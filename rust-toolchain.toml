@@ -1,0 +1,7 @@
+[toolchain]
+# Pinned so local, CI, and container builds agree. Bump deliberately, never
+# incidentally — the toolchain is part of the build reproducibility contract
+# alongside Cargo.lock and the container base-image digest.
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -1,0 +1,49 @@
+[package]
+name = "repolens-server"
+description = "RepoLens HTTP API, durable worker, and migration runner."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Three binaries, one container image: Cloud Run overrides the entrypoint per
+# resource, so the Service and the Job share a single build and a single
+# Artifact Registry repository.
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "worker"
+path = "src/bin/worker.rs"
+
+[[bin]]
+name = "migrate"
+path = "src/bin/migrate.rs"
+
+[dependencies]
+repolens-core = { workspace = true }
+repolens-github = { workspace = true }
+
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+
+sqlx = { workspace = true }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

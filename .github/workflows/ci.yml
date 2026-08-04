@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings fail the build. A warning nobody has to fix is a warning everybody
+  # learns to scroll past.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+
+    # Provisioned now so that the integration tests arriving with the durable
+    # worker (issue #7) have a real PostgreSQL to run `sqlx::test` against
+    # rather than a mock. Nothing in the workspace connects to it yet, and no
+    # step requires it to be reachable, so a database problem cannot currently
+    # fail this job for the wrong reason.
+    #
+    # Trust authentication on purpose: the container is ephemeral, reachable
+    # only from this job, and holds no data. That keeps a password-shaped
+    # string out of the workflow entirely. This workflow reads no secrets.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: repolens_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://postgres@localhost:5432/repolens_test
+      DATABASE_DIRECT_URL: postgres://postgres@localhost:5432/repolens_test
+      # Compile-time query verification reads the committed .sqlx/ cache instead
+      # of the database, so the build cannot depend on a live server.
+      SQLX_OFFLINE: "true"
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        # rust-toolchain.toml decides the version and components; naming them
+        # again here would create a second source of truth that can disagree.
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Report toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked

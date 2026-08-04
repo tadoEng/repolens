@@ -1,0 +1,29 @@
+# Local configuration and secrets.
+# Real values live in .env.local (project-scoped, never machine-wide env vars).
+# Only .env.example — with empty values — is ever committed.
+.env
+.env.*
+!.env.example
+
+# Build output
+target/
+node_modules/
+.svelte-kit/
+build/
+dist/
+
+# Credential material. Never committed; rotate at the provider if one ever leaks.
+*.pem
+*.key
+*service-account*.json
+gha-creds-*.json
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Deliberately NOT ignored — both must be committed:
+#   Cargo.lock  application build reproducibility (this workspace ships binaries,
+#               not a published library, so the lockfile is part of the contract)
+#   .sqlx/      SQLx offline query cache; without it, Docker and CI builds fail
+#               confusingly because `sqlx::query!` cannot reach a live database
