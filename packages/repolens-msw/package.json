@@ -1,0 +1,20 @@
+{
+  "name": "@repolens/msw",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared MSW request handlers for RepoLens, typed against the generated OpenAPI schema and driven by the executable fixtures.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./handlers": "./src/handlers.ts"
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "msw": "^2.15.0"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

@@ -1,0 +1,98 @@
+/*
+ * Minimal normalize — deliberately NOT a Meyer-style reset.
+ *
+ * RepoLens is a document-like UI built on native elements: <details>/<summary> for
+ * evidence disclosure, real <table>s for the composition/LOC section, ordered and
+ * unordered lists for limitations and exclusions. A full reset strips exactly those
+ * semantics' default presentation and then forces us to re-implement them — more code,
+ * and every re-implementation is a chance to lose the accessibility we chose native
+ * elements to get for free.
+ *
+ * So this file does three things and stops:
+ *   1. box-sizing
+ *   2. zero the margins the browser adds to block elements
+ *   3. sane media and form-control defaults
+ *
+ * Anything beyond that is styling, and belongs in typography.css or a component.
+ */
+
+/* 1. Predictable box model, inherited so components can never opt out by accident. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* 2. Zero the browser's block margins. Vertical rhythm is set deliberately in
+ *    typography.css from the space scale, never inherited from user-agent defaults. */
+body,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+figure,
+blockquote,
+dl,
+dd,
+pre {
+  margin: 0;
+}
+
+/* Lists keep their list-item display and marker — only the margin is normalized.
+ * `list-style: none` is NOT applied globally: some browsers drop list semantics from
+ * the accessibility tree when the marker is removed, and our limitations and exclusion
+ * ledgers rely on being announced as lists. Individual components opt out locally. */
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+}
+
+/* 3. Media defaults. Block display kills the inline-descender gap; max-inline-size
+ *    keeps a stray asset from causing horizontal body scroll at 360px. */
+img,
+picture,
+video,
+canvas,
+svg {
+  display: block;
+  max-inline-size: 100%;
+  block-size: auto;
+}
+
+/* Form controls do not inherit typography by default. */
+input,
+button,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+/* Long repository paths, URLs, and SHAs must wrap rather than widen the page. */
+p,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+li,
+dd,
+figcaption {
+  overflow-wrap: break-word;
+}
+
+/* Give the root a real height so a short route can still centre or pin a footer. */
+html {
+  block-size: 100%;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  min-block-size: 100%;
+}
