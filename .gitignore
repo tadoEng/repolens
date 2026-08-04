@@ -12,6 +12,13 @@ node_modules/
 build/
 dist/
 
+# Test artefacts
+test-results/
+playwright-report/
+blob-report/
+web/test-results/
+web/playwright-report/
+
 # Credential material. Never committed; rotate at the provider if one ever leaks.
 *.pem
 *.key
