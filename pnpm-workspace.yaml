@@ -1,0 +1,21 @@
+# RepoLens pnpm workspace.
+#
+# Layout is fixed by the frontend plan (§4.2):
+#   web/                          SvelteKit app (adapter-static, no Node server)
+#   packages/repolens-api-client  generated OpenAPI schema + thin openapi-fetch wrapper
+#   packages/repolens-msw         shared MSW handlers + executable fixtures
+#
+# No package is added speculatively. A new workspace package needs a real second
+# consumer before it exists.
+packages:
+  - web
+  - packages/*
+
+# pnpm refuses to run a dependency's install-time lifecycle scripts unless it is listed
+# here. Every entry is a decision to let third-party code execute on this machine, so each
+# one is justified explicitly rather than blanket-approved.
+allowBuilds:
+  # msw's postinstall only prints guidance about `msw init`, which writes the browser
+  # service worker into a public directory. We invoke that explicitly when browser mocking
+  # is wired up (issue #14), so the script has nothing to do here.
+  msw: false

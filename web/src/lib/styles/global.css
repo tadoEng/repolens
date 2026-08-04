@@ -1,0 +1,120 @@
+/*
+ * Application-wide stylesheet. The only stylesheet the root layout imports.
+ *
+ * Order matters and is the whole point of this file:
+ *   tokens      define the vocabulary
+ *   reset       normalize the platform (minimally)
+ *   typography  set the reading defaults from the vocabulary
+ *   this file   cross-cutting behaviour that belongs to no single component
+ */
+
+@import './tokens.css';
+@import './reset.css';
+@import './typography.css';
+
+/* --------------------------------------------------------------------------- */
+/* Focus                                                                        */
+/* --------------------------------------------------------------------------- */
+/*
+ * One visible focus treatment for everything, from the token. `:focus-visible` keeps
+ * it off mouse clicks without hiding it from keyboard users — the usual mistake is
+ * `outline: none` on `:focus`, which silently breaks keyboard operability.
+ *
+ * `[tabindex="-1"]:focus` is deliberately NOT given a ring: section headings get
+ * tabindex="-1" so in-page navigation can move focus (not just scroll), and a ring on
+ * a heading the user never tabbed to reads as a bug.
+ */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: var(--radius-sm);
+}
+
+[tabindex='-1']:focus {
+  outline: none;
+}
+
+[tabindex='-1']:focus-visible {
+  outline: none;
+}
+
+::selection {
+  background-color: var(--status-documented-bg);
+  color: var(--status-documented-fg);
+}
+
+/* --------------------------------------------------------------------------- */
+/* Scroll and anchor behaviour                                                  */
+/* --------------------------------------------------------------------------- */
+/* A sticky report nav would otherwise cover the heading a user just jumped to. */
+:target {
+  scroll-margin-block-start: var(--space-8);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+/* --------------------------------------------------------------------------- */
+/* Reduced motion — belt and braces                                             */
+/* --------------------------------------------------------------------------- */
+/*
+ * tokens.css already zeroes --duration-fast/--duration-slow, which covers every
+ * transition we author. This sweep catches anything that does not go through the
+ * tokens: third-party primitives (Bits UI transitions), and smooth scrolling.
+ */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* --------------------------------------------------------------------------- */
+/* Utilities                                                                    */
+/* --------------------------------------------------------------------------- */
+/*
+ * Two utilities, both accessibility infrastructure rather than styling shortcuts.
+ * This is not the start of a utility-class system.
+ */
+
+/* Visible only to assistive technology. Used by the aria-live progress region and by
+ * labels that would be redundant on screen. */
+.visually-hidden {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Skip link: hidden until focused, then pinned to the top-left of the viewport. */
+.skip-link {
+  position: absolute;
+  inset-block-start: var(--space-2);
+  inset-inline-start: var(--space-2);
+  z-index: 10;
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-0);
+  color: var(--text-primary);
+  text-decoration: none;
+  transform: translateY(calc(-100% - var(--space-4)));
+  transition: transform var(--duration-fast) var(--easing-standard);
+}
+
+.skip-link:focus-visible {
+  transform: translateY(0);
+}
