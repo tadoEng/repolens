@@ -3,8 +3,10 @@
   //
   // RepoLens Phase 0 has no server-side rendering and no edge logic: the
   // SvelteKit app is built with adapter-static and every dynamic response comes
-  // from the Axum API. Declaring a Worker entrypoint we do not need would add a
-  // paid dependency and a runtime with nothing to run.
+  // from the Axum API. Declaring a Worker entrypoint would add an unnecessary
+  // runtime and a potentially metered invocation path when RepoLens only needs
+  // static assets. Static-asset requests are free and unlimited on the Workers
+  // Free plan; it is the Worker script, not the assets, that consumes quota.
   "name": "repolens",
   "compatibility_date": "2026-08-06",
   "assets": {
