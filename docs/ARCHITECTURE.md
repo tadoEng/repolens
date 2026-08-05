@@ -242,18 +242,38 @@ Two facts it refuses to conflate:
 
 ## The reproducibility key
 
-A report is reproducible with respect to four values, all of which it carries:
+A report is reproducible with respect to every value below, all of which it
+carries:
 
 ```text
-commit SHA + analyzer version + ruleset version + exclusion-policy version
+repository coordinate
+commit SHA
+root tree SHA
+evidence source API + version
+analyzer version
+ruleset version
+composition counter + version   (nullable — absent when nothing was counted)
+exclusion-policy version
 ```
 
-Two runs are expected to agree only when all four match. Any of them changing is
+Two runs are expected to agree only when all of them match. Any one changing is
 a legitimate reason for the report to differ — which is precisely why they are
 published: without them, a reader cannot tell "the repository changed" from
 "RepoLens changed".
 
-These four are the reason the version-pinning policy is split. Ordinary
+The membership test is narrow: **does changing this value change the report?**
+The repository coordinate is included because two repositories can share a
+commit SHA — a fork, or a commit present in both — and they are not the same
+analysis. The root tree SHA is included because it is what the collectors
+actually walked; commit metadata such as author and message affects no finding.
+The archive hash is deliberately **excluded**: GitHub does not guarantee stable
+archive bytes for a fixed commit, so keying on it would break reproducibility
+rather than establish it.
+
+`TreeSha` is a distinct type from `CommitSha` even though both are 40-character
+hex digests, so that transposing them cannot compile.
+
+These values are the reason the version-pinning policy is split. Ordinary
 dependencies use normal compatible requirements (`axum = "0.8"`), because
 reproducibility already comes from `Cargo.lock`, `rust-toolchain.toml`, and the
 container base-image digest, and blanket exact pins buy nothing but maintenance
@@ -271,11 +291,15 @@ document too.
   under `contracts/fixtures/` (issue #14) so that a drifting contract fails CI
   rather than a specification document. Types in `repolens-core` marked
   **PROVISIONAL** exist to express a boundary, not to fix a wire format.
-- **No `/api/v1/system/probe`.** The walking skeleton (issue #11) owns it,
-  together with the database connectivity it reports on. `GET /healthz` answers
-  only for the process, which is all this binary can currently support.
-- **No CORS layer.** The allowed origin is a deployed Cloudflare domain that
-  does not exist yet, and a permissive default would be a security decision made
-  by omission.
+- **No deployed verification.** `/api/v1/system/probe` and its database
+  reporting now exist and are confirmed against a real Neon project, but only
+  from a local process. Static hosting, `not_found_handling`, the CSP
+  `connect-src` allowlist against a deployed origin, and cold-start behaviour
+  remain unproven until the deployment half of issue #11. `vite preview` is not
+  Cloudflare and cannot stand in for it.
+- **No CORS by default.** A layer is applied only when `CORS_ALLOWED_ORIGIN`
+  names one exact origin. It is never a wildcard: that would need revisiting the
+  moment an endpoint requires credentials, and a permissive default is a
+  security decision made by omission.
 - **No fourth crate.** Extraction, the Tokei adapter, the worker, and auth stay
   inside `repolens-server` until real code justifies splitting them.

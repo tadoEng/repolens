@@ -102,6 +102,52 @@ async fn unknown_paths_are_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn probe_answers_within_its_own_budget() {
+    // The router's outer timeout is 30s; the probe's inner budget is 5s. This
+    // asserts the promise that matters: a probe answers quickly enough that a
+    // stalled dependency still yields 200 + UNAVAILABLE rather than the outer
+    // layer's 408. With no pool configured there is nothing to stall, so this
+    // guards the ordering of the two budgets rather than the stall itself.
+    let started = std::time::Instant::now();
+    let (status, body) = get("/api/v1/system/probe").await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["database"], "UNAVAILABLE");
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "the probe must resolve inside its own budget, not the router's"
+    );
+}
+
+#[tokio::test]
+async fn no_cors_headers_without_a_configured_origin() {
+    // Absent configuration must mean *no* CORS layer, not a permissive one. A
+    // wildcard would have to be revisited the moment an endpoint needs
+    // credentials, so its absence is asserted rather than assumed.
+    let (app, _openapi) = api::build(AppState::without_database());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/system/probe")
+                .header("Origin", "https://example.invalid")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("router responds");
+
+    assert!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none(),
+        "no origin is configured, so no CORS header may be emitted"
+    );
+}
+
 #[test]
 fn openapi_document_is_collected_from_the_live_router() {
     let (_app, openapi) = api::build(AppState::without_database());

@@ -81,7 +81,8 @@
         "required": [
           "api",
           "database",
-          "build_sha"
+          "build_sha",
+          "schema_version"
         ],
         "properties": {
           "api": {
@@ -102,7 +103,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Highest applied migration version.\n\nNull rather than zero when the database could not be reached: \"no\nmigrations have been applied\" and \"we could not find out\" are different\nfacts, and collapsing them into `0` would let a connection failure read\nas an empty database. The frontend must render the null case, which is\nalso the cheapest available exercise of its unknown-value handling."
+            "description": "Highest applied migration version.\n\nNull rather than zero when the database could not be reached: \"no\nmigrations have been applied\" and \"we could not find out\" are different\nfacts, and collapsing them into `0` would let a connection failure read\nas an empty database. The frontend must render the null case, which is\nalso the cheapest available exercise of its unknown-value handling.\n\n`required` is explicit because utoipa treats `Option<T>` as optional by\ndefault, which would generate `schema_version?: number | null` in\nTypeScript. The field is always present — its *value* is nullable — and\nthe two are different contracts: an optional field lets a consumer\nforget the null case entirely, which is the case that matters here."
           }
         }
       }

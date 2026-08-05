@@ -96,8 +96,14 @@ export interface components {
              *     facts, and collapsing them into `0` would let a connection failure read
              *     as an empty database. The frontend must render the null case, which is
              *     also the cheapest available exercise of its unknown-value handling.
+             *
+             *     `required` is explicit because utoipa treats `Option<T>` as optional by
+             *     default, which would generate `schema_version?: number | null` in
+             *     TypeScript. The field is always present — its *value* is nullable — and
+             *     the two are different contracts: an optional field lets a consumer
+             *     forget the null case entirely, which is the case that matters here.
              */
-            schema_version?: number | null;
+            schema_version: number | null;
         };
     };
     responses: never;

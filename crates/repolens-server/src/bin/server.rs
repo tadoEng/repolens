@@ -10,6 +10,9 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Before telemetry, so RUST_LOG from .env.local is honoured by the
+    // subscriber this call installs.
+    config::load_dotenv();
     telemetry::init();
 
     let address = config::bind_address().context("resolving the bind address")?;

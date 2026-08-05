@@ -11,15 +11,17 @@ use std::time::Duration;
 use axum::Json;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::cors::CorsLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use crate::config;
 use crate::state::{AppState, BUILD_SHA};
 
 /// Ceiling on request bodies. Every current and planned endpoint takes either
@@ -102,7 +104,64 @@ pub struct SystemProbeResponse {
     /// facts, and collapsing them into `0` would let a connection failure read
     /// as an empty database. The frontend must render the null case, which is
     /// also the cheapest available exercise of its unknown-value handling.
+    ///
+    /// `required` is explicit because utoipa treats `Option<T>` as optional by
+    /// default, which would generate `schema_version?: number | null` in
+    /// TypeScript. The field is always present — its *value* is nullable — and
+    /// the two are different contracts: an optional field lets a consumer
+    /// forget the null case entirely, which is the case that matters here.
+    #[schema(required)]
     pub schema_version: Option<i64>,
+}
+
+/// Why a database probe did not succeed.
+///
+/// Errors are reported by bounded category rather than by rendering the `sqlx`
+/// error, because that message is attacker-influenceable in principle and
+/// unbounded in practice — it can carry connection parameters, server notices,
+/// and query text into the log. A closed set keeps log volume predictable and
+/// keeps a credential-bearing URL out of the record entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeFailure {
+    /// The query did not complete within the probe's own budget.
+    Timeout,
+    /// No usable connection: DNS, TLS, authentication, or the pool.
+    Connection,
+    /// Connected, but the expected relation is absent — migrations never ran.
+    SchemaMissing,
+    /// Connected and the schema exists, but the query still failed.
+    Query,
+}
+
+impl ProbeFailure {
+    /// Stable, low-cardinality label for logs and metrics.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Connection => "connection",
+            Self::SchemaMissing => "schema_missing",
+            Self::Query => "query",
+        }
+    }
+
+    /// Classifies a `sqlx` error without retaining its message.
+    fn classify(error: &sqlx::Error) -> Self {
+        match error {
+            sqlx::Error::PoolTimedOut => Self::Timeout,
+            // 42P01 undefined_table. The probe reads `_sqlx_migrations`, so this
+            // means the migrator has never run here rather than that the
+            // database is unreachable.
+            sqlx::Error::Database(db) if db.code().as_deref() == Some("42P01") => {
+                Self::SchemaMissing
+            }
+            sqlx::Error::Database(_) => Self::Query,
+            // Everything else — I/O, TLS, a closed pool, DNS, authentication —
+            // means no usable connection. Enumerating those variants explicitly
+            // would duplicate this arm without adding a distinction the caller
+            // can act on.
+            _ => Self::Connection,
+        }
+    }
 }
 
 #[utoipa::path(
@@ -148,33 +207,66 @@ async fn system_probe(State(state): State<AppState>) -> Json<SystemProbeResponse
 /// indistinguishable from "the API is down", which is exactly the distinction
 /// this endpoint exists to draw.
 async fn probe_database(pool: &sqlx::PgPool) -> (ProbeStatus, Option<i64>) {
-    // Errors are logged by shape, never interpolated wholesale: a connection
-    // error can carry the URL, and the URL carries a password.
-    if let Err(error) = sqlx::query("SELECT 1").execute(pool).await {
-        tracing::warn!(error = %error, "system probe could not reach the database");
-        return (ProbeStatus::Unavailable, None);
-    }
-
-    let applied = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT max(version) FROM _sqlx_migrations WHERE success",
-    )
-    .fetch_one(pool)
-    .await;
-
-    match applied {
-        Ok(Some(version)) => (ProbeStatus::Ok, Some(version)),
-        // The table exists but is empty: the migrator ran and applied nothing.
-        Ok(None) => {
-            tracing::warn!("database is reachable but no migrations have been applied");
+    match run_database_probe(pool).await {
+        Ok(version) => {
+            if version.is_some() {
+                (ProbeStatus::Ok, version)
+            } else {
+                // The table exists but is empty: the migrator ran and applied
+                // nothing.
+                tracing::warn!("database is reachable but no migrations have been applied");
+                (ProbeStatus::Degraded, None)
+            }
+        }
+        Err(ProbeFailure::SchemaMissing) => {
+            tracing::warn!(
+                failure = ProbeFailure::SchemaMissing.as_str(),
+                "database is reachable but the schema is not initialised"
+            );
             (ProbeStatus::Degraded, None)
         }
-        // Almost always `undefined_table`: the migrator has never run here.
-        // Reachable, so not unavailable — but not ready to serve either.
-        Err(error) => {
-            tracing::warn!(error = %error, "database is reachable but the schema is not initialised");
-            (ProbeStatus::Degraded, None)
+        Err(failure) => {
+            tracing::warn!(
+                failure = failure.as_str(),
+                "system probe could not reach the database"
+            );
+            (ProbeStatus::Unavailable, None)
         }
     }
+}
+
+/// Budget for the probe's own database work.
+///
+/// Strictly shorter than the router's request timeout. Without an inner budget,
+/// a stalled database would hold the handler until the outer layer cut the
+/// request and returned `408` — losing the `200` plus `UNAVAILABLE` this
+/// endpoint promises, and turning "the database is hanging" into "the API is
+/// broken". The distinction is the entire point of the endpoint, so it has to
+/// survive the failure mode most likely to obscure it.
+const DATABASE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Runs both queries under one shared deadline.
+async fn run_database_probe(pool: &sqlx::PgPool) -> Result<Option<i64>, ProbeFailure> {
+    let work = async {
+        // Connectivity first. A single query against `_sqlx_migrations` could
+        // not separate "unreachable" from "schema never applied": a missing
+        // table would report an empty database as unreachable.
+        sqlx::query("SELECT 1")
+            .execute(pool)
+            .await
+            .map_err(|error| ProbeFailure::classify(&error))?;
+
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT max(version) FROM _sqlx_migrations WHERE success",
+        )
+        .fetch_one(pool)
+        .await
+        .map_err(|error| ProbeFailure::classify(&error))
+    };
+
+    tokio::time::timeout(DATABASE_PROBE_TIMEOUT, work)
+        .await
+        .unwrap_or(Err(ProbeFailure::Timeout))
 }
 
 /// Builds the HTTP application together with the OpenAPI document it generates.
@@ -188,9 +280,35 @@ pub fn build(state: AppState) -> (Router, utoipa::openapi::OpenApi) {
         .with_state(state)
         .split_for_parts();
 
-    // CORS is intentionally absent: the allowed origin is the deployed
-    // Cloudflare domain, which does not exist yet. A permissive default now
-    // would be a security decision made by omission.
+    // A statically hosted frontend calling this API is cross-origin, so the
+    // browser blocks every request without this. Applied only when an exact
+    // origin is configured — never a wildcard, which would have to be revisited
+    // the moment an endpoint needs credentials, and which is a security
+    // decision made by omission rather than by choice.
+    let router = if let Some(origin) = config::cors_allowed_origin() {
+        if let Ok(value) = origin.parse::<HeaderValue>() {
+            tracing::info!(%origin, "CORS enabled for one exact origin");
+            router.layer(
+                CorsLayer::new()
+                    .allow_origin(value)
+                    .allow_methods([Method::GET])
+                    .allow_headers([header::CONTENT_TYPE]),
+            )
+        } else {
+            // Refusing to start would take the API down over a typo in a
+            // variable that only affects browsers; serving without CORS fails
+            // visibly in the browser and loudly in the log.
+            tracing::error!(
+                %origin,
+                "CORS_ALLOWED_ORIGIN is not a valid header value; serving without CORS"
+            );
+            router
+        }
+    } else {
+        tracing::info!("no CORS_ALLOWED_ORIGIN configured; serving without CORS");
+        router
+    };
+
     let router = router
         .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES))
         .layer(TimeoutLayer::with_status_code(

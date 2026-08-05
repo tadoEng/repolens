@@ -32,6 +32,37 @@ pub enum ConfigError {
     },
 }
 
+/// Loads `.env.local`, then `.env`, without overriding what is already set.
+///
+/// Call once, first thing in `main`. Without this the binaries see only the
+/// ambient environment, so a developer has to `set -a; . ./.env.local` before
+/// every `cargo run` — and forgetting silently produces a server with no
+/// database rather than an error.
+///
+/// Deliberately does not override existing variables: a value explicitly
+/// exported for one command must win over a file, or `DATABASE_URL=... cargo
+/// run` would silently do something else.
+///
+/// Paths are relative to the working directory, so binaries are run from the
+/// workspace root. In a deployed environment neither file exists and this is a
+/// no-op — Cloud Run supplies the variables, and a `.env` in a container image
+/// would be a packaging mistake worth failing on rather than absorbing.
+pub fn load_dotenv() {
+    for filename in [".env.local", ".env"] {
+        match dotenvy::from_filename(filename) {
+            Ok(path) => tracing::debug!(?path, "loaded environment file"),
+            // Absent is the normal case in production; anything else is worth
+            // seeing, but never fatal — the file is a convenience, not a
+            // contract. Missing *variables* still fail loudly at their point of
+            // use.
+            Err(error) if error.not_found() => {}
+            Err(error) => {
+                tracing::warn!(filename, %error, "could not read environment file");
+            }
+        }
+    }
+}
+
 /// Address the HTTP server binds to.
 ///
 /// Binds to all interfaces because the process runs inside a container whose
@@ -76,22 +107,21 @@ fn required(name: &'static str) -> Result<String, ConfigError> {
     }
 }
 
-/// Warns when a database URL does not verify the server's certificate.
+/// Warns when a database URL does not verify the server's hostname.
 ///
-/// Measured against a real Neon endpoint, not assumed:
+/// Measured against a real Neon endpoint, not assumed. Neon issues connection
+/// strings containing `sslmode=require` and `channel_binding=require`:
 ///
-/// * Neon issues connection strings containing `sslmode=require` and
-///   `channel_binding=require`.
-/// * `sslmode=require` encrypts but performs **no certificate or hostname
-///   verification**, so it defends against passive eavesdropping and not
-///   against an active machine-in-the-middle.
-/// * `sqlx` does not implement `channel_binding` and silently ignores it —
-///   visible in its own logs as `ignoring unrecognized connect parameter`. The
-///   protection the parameter appears to request is therefore absent.
+/// * This build enables `sqlx`'s `tls-rustls-ring-native-roots`, so with system
+///   roots available `sslmode=require` can validate the certificate **chain**,
+///   behaving like `verify-ca`. What it does not guarantee is **hostname
+///   identity** — only `verify-full` checks both trust and hostname.
+/// * `sqlx` does not implement `channel_binding` and silently ignores it, which
+///   is visible in its own log as `ignoring unrecognized connect parameter`.
+///   The parameter should be removed rather than left implying a protection
+///   the client does not provide.
 ///
-/// Those two together mean a connection string that *looks* hardened is not.
-/// `sslmode=verify-full` is what actually verifies the chain and the hostname,
-/// and it is confirmed to work against Neon.
+/// `sslmode=verify-full` is confirmed to work against Neon.
 ///
 /// This warns rather than refuses: a developer pointing at a local PostgreSQL
 /// without TLS has a legitimate reason to. Production enforcement belongs with
@@ -112,10 +142,31 @@ fn warn_on_weak_tls(name: &'static str, url: &str) {
 
     tracing::warn!(
         variable = name,
-        "database URL does not use sslmode=verify-full; the connection is encrypted but the \
-         server certificate is not verified. sqlx also ignores channel_binding, so that \
-         parameter provides nothing. Prefer sslmode=verify-full for any non-local endpoint."
+        "database URL does not use sslmode=verify-full, so hostname identity is not verified. \
+         With native roots the certificate chain may still be validated like verify-ca, but \
+         only verify-full checks both trust and hostname. sqlx also ignores the \
+         channel_binding parameter, so remove it rather than implying a protection the client \
+         does not provide."
     );
+}
+
+/// Exact origin permitted to call this API from a browser, if any.
+///
+/// A statically hosted frontend on Cloudflare calling Cloud Run is
+/// **cross-origin**, so without this the browser blocks every request — which
+/// is precisely the class of failure the walking skeleton exists to surface
+/// before it reaches production.
+///
+/// Absent means no CORS layer at all, which is correct for same-origin local
+/// development and for the container's own health checks. It is never a
+/// wildcard: `Access-Control-Allow-Origin: *` would have to be revisited the
+/// moment any endpoint requires credentials, and a permissive default is a
+/// security decision made by omission.
+pub fn cors_allowed_origin() -> Option<String> {
+    match env::var("CORS_ALLOWED_ORIGIN") {
+        Ok(value) if !value.trim().is_empty() => Some(value.trim().to_owned()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
