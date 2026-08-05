@@ -133,14 +133,53 @@ jobs:
 
       - name: Scan the production bundle for secrets
         # Acceptance criterion of issue #8. The bundle is what actually ships, so
-        # it is the last place a credential can hide before it reaches a browser.
+        # it is the last place a server-side credential can hide before a browser
+        # receives it.
+        #
+        # The question this asks is deliberately narrow: "is this a value that
+        # grants access, which a browser must never hold?" Not "does this look
+        # like a key?"
+        #
+        # NOT scanned: the Firebase browser API key (`AIzaSy…`). It identifies the
+        # project rather than authorizing access, and Firebase documents it as
+        # intended for client code — the repository itself declares it as
+        # PUBLIC_FIREBASE_API_KEY in .env.example. A rule forbidding it from the
+        # bundle would contradict the architecture and fail this job the day
+        # Firebase auth lands (#13), training everyone to ignore the scan. That
+        # key is protected by API restrictions in the provider console, which is
+        # where a key that is *supposed* to be public gets constrained.
         run: |
           set -euo pipefail
-          if grep -rIlE 'npg_[A-Za-z0-9]|AIzaSy[A-Za-z0-9_-]{30}|postgresql://[^ ]*:[^ ]*@|ghp_[A-Za-z0-9]{20}|gho_[A-Za-z0-9]{20}|BEGIN [A-Z ]*PRIVATE KEY' web/build/; then
-            echo "::error::credential pattern found in production bundle"
-            exit 1
-          fi
-          echo "bundle scan clean"
+
+          patterns=(
+            # Database URLs carrying an inline password, and Neon role secrets.
+            'postgres(ql)?://[^[:space:]]*:[^[:space:]]*@'
+            'npg_[A-Za-z0-9]{16,}'
+            # GitHub tokens: personal, OAuth, server-to-server, user-to-server.
+            'gh[pousr]_[A-Za-z0-9]{36}'
+            'github_pat_[A-Za-z0-9_]{50,}'
+            # Asymmetric private keys in any PEM form.
+            'BEGIN [A-Z ]*PRIVATE KEY'
+            # Google service-account JSON, by its two unmistakable fields.
+            '"type"[[:space:]]*:[[:space:]]*"service_account"'
+            '"private_key_id"[[:space:]]*:'
+            # Google OAuth client secret (server-side; never belongs in a browser).
+            'GOCSPX-[A-Za-z0-9_-]{20,}'
+            # Legacy FCM server key — grants send-to-any-device and is server-only.
+            'AAAA[A-Za-z0-9_-]{7}:APA91b[A-Za-z0-9_-]{100,}'
+          )
+
+          found=0
+          for pattern in "${patterns[@]}"; do
+            if matches=$(grep -rIlE "$pattern" web/build/); then
+              echo "::error::server-side credential pattern in production bundle: $pattern"
+              echo "$matches"
+              found=1
+            fi
+          done
+
+          [ "$found" -eq 0 ] || exit 1
+          echo "bundle scan clean: ${#patterns[@]} patterns, no match"
 
       - name: Browser and accessibility tests
         # Includes the axe WCAG 2.1 AA scans across all three routes at
