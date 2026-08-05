@@ -1,0 +1,20 @@
+[package]
+name = "repolens-github"
+description = "GitHub REST boundary for RepoLens: repository, commit, tree, blob, and archive access."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No `reqwest` yet — the HTTP implementation lands at issue #4 (plan §4.3).
+# This crate currently defines the boundary the rest of the workspace codes
+# against, so that the concrete client can be added without moving anything.
+[dependencies]
+repolens-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+
+[lints]
+workspace = true

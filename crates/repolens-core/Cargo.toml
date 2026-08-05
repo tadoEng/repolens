@@ -1,0 +1,22 @@
+[package]
+name = "repolens-core"
+description = "RepoLens domain model: identity, findings, evidence, analyzer rule contracts, and repository composition."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Forbidden by design: axum, sqlx, reqwest, and any async runtime. See
+# docs/ARCHITECTURE.md. If a dependency here needs a socket or a connection
+# pool, it belongs in another crate.
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

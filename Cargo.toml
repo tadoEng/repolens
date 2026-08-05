@@ -1,0 +1,95 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+# All rights reserved, matching `"license": "UNLICENSED"` in package.json and the
+# LICENSE file. The repository is public so the work can be read and reviewed;
+# that is not the same as granting rights to use it, and a public repository with
+# no licence grant defaults to exactly this position anyway.
+#
+# This crate previously declared `MIT OR Apache-2.0` while package.json declared
+# UNLICENSED — two incompatible legal positions in one repository. Aligning on the
+# restrictive one is the reversible direction: opening the licence later is a
+# deliberate act, whereas retracting a grant already published is not.
+license = "LicenseRef-Proprietary"
+publish = false
+repository = "https://github.com/tadoEng/repolens"
+
+# Version policy (plan Part 4): normal compatible requirements, not blanket exact
+# pins. Build reproducibility comes from Cargo.lock, rust-toolchain.toml, and the
+# container base-image digest. Exact pins are reserved for the small set of things
+# that change deterministic report output — Tokei, analyzer version, ruleset
+# version, exclusion-policy version, GitHub REST API version — none of which are
+# ordinary Cargo dependencies at this stage.
+#
+# Only plan §4.3 "#11 skeleton" dependencies are installed. reqwest, tokei, tar,
+# flate2, jsonwebtoken, and google-cloud-auth belong to later stages and are
+# deliberately absent.
+[workspace.dependencies]
+repolens-core = { path = "crates/repolens-core" }
+repolens-github = { path = "crates/repolens-github" }
+
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "~1.51", features = [
+  "macros",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7", features = [
+  "catch-panic",
+  "cors",
+  "limit",
+  "request-id",
+  "timeout",
+  "trace",
+] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+utoipa = { version = "5.5", features = ["axum_extras", "time", "uuid"] }
+utoipa-axum = "0.2"
+
+sqlx = { version = "0.9", default-features = false, features = [
+  "runtime-tokio",
+  "tls-rustls-ring-native-roots",
+  "postgres",
+  "macros",
+  "migrate",
+  "uuid",
+  "time",
+  "json",
+] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+thiserror = "2"
+anyhow = "1"
+
+uuid = { version = "1", features = ["v7", "serde"] }
+time = { version = "0.3", features = ["serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"

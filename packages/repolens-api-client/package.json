@@ -1,0 +1,25 @@
+{
+  "name": "@repolens/api-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Generated RepoLens OpenAPI types plus a thin openapi-fetch wrapper. Contract package — must not depend on Svelte.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/schema.ts"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "schema:update": "vitest run schema.test.ts --update"
+  },
+  "dependencies": {
+    "openapi-fetch": "^0.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "openapi-typescript": "^7.13.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
+  }
+}

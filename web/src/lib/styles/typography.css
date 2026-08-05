@@ -1,0 +1,173 @@
+/*
+ * Typographic defaults for a reading surface.
+ *
+ * Every value here comes from tokens.css. Nothing declares a raw px size, colour, or
+ * duration — if a value is missing from the scale, the scale is wrong, not this file.
+ *
+ * The heading scale is set on the element, not on a utility class, because the plan
+ * requires exactly one <h1> per route and no skipped levels: making the visual weight
+ * follow the semantic level removes the temptation to pick a heading for its size.
+ */
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-body);
+  color: var(--text-primary);
+  background-color: var(--surface-0);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-weight: var(--font-weight-bold);
+  line-height: var(--line-height-heading);
+  letter-spacing: var(--letter-spacing-heading);
+  color: var(--text-primary);
+  text-wrap: balance;
+}
+
+h1 {
+  font-size: var(--font-size-3xl);
+}
+
+h2 {
+  font-size: var(--font-size-2xl);
+}
+
+h3 {
+  font-size: var(--font-size-xl);
+}
+
+h4 {
+  font-size: var(--font-size-lg);
+}
+
+h5,
+h6 {
+  font-size: var(--font-size-md);
+}
+
+/* Prose measure. A 72ch column is the difference between a report that is read and a
+ * report that is skimmed; wide containers (tables, evidence blocks) opt out. */
+p {
+  max-inline-size: var(--measure);
+  text-wrap: pretty;
+}
+
+p + p {
+  margin-block-start: var(--space-4);
+}
+
+small {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+strong,
+b {
+  font-weight: var(--font-weight-bold);
+}
+
+/* --------------------------------------------------------------------------- */
+/* Links                                                                        */
+/* --------------------------------------------------------------------------- */
+/* Underlined by default and permanently: the accent alone would make link-ness a
+ * colour-only signal, which the accessibility contract forbids. */
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  text-decoration-thickness: 1px;
+  transition: color var(--duration-fast) var(--easing-standard);
+}
+
+a:hover {
+  color: var(--accent-hover);
+  text-decoration-thickness: 2px;
+}
+
+/* --------------------------------------------------------------------------- */
+/* Machine-produced strings                                                     */
+/* --------------------------------------------------------------------------- */
+/* Mono is reserved for values that must be copied verbatim: file paths, commit SHAs,
+ * digests, evidence excerpts. Prose never uses it. */
+code,
+kbd,
+samp,
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.9375em; /* mono faces run large at the same nominal size */
+  line-height: var(--line-height-mono);
+  font-variant-ligatures: none; /* a SHA must never render as a ligature */
+}
+
+:not(pre) > code {
+  padding: 0.1em var(--space-1);
+  border: var(--border-width) solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-1);
+  overflow-wrap: anywhere;
+}
+
+/* Evidence blocks scroll inside their own container — never the page body. */
+pre {
+  padding: var(--space-3) var(--space-4);
+  border: var(--border-width) solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background-color: var(--surface-1);
+  overflow-x: auto;
+  tab-size: 2;
+}
+
+/* --------------------------------------------------------------------------- */
+/* Tables                                                                       */
+/* --------------------------------------------------------------------------- */
+/* The composition/LOC "charts" are real tables with CSS bar backgrounds, so table
+ * defaults are load-bearing rather than incidental. */
+table {
+  border-collapse: collapse;
+  inline-size: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+caption {
+  text-align: start;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  padding-block-end: var(--space-2);
+}
+
+th,
+td {
+  text-align: start;
+  padding: var(--space-2) var(--space-3);
+  border-block-end: var(--border-width) solid var(--border-subtle);
+  vertical-align: baseline;
+}
+
+th {
+  font-weight: var(--font-weight-medium);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+/* --------------------------------------------------------------------------- */
+/* Native disclosure                                                            */
+/* --------------------------------------------------------------------------- */
+/* <details>/<summary> is the default evidence disclosure. Only the cursor and focus
+ * affordance are touched; the marker and semantics are left alone. */
+summary {
+  cursor: pointer;
+}
+
+hr {
+  border: 0;
+  border-block-start: var(--border-width) solid var(--border-subtle);
+  margin-block: var(--space-8);
+}

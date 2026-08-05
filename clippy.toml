@@ -1,0 +1,14 @@
+# Proper nouns that appear throughout the documentation as prose, not as code.
+# `..` keeps Clippy's own default list rather than replacing it.
+doc-valid-idents = [
+  "..",
+  "RepoLens",
+  "GitHub",
+  "GitHub's",
+  "PostgreSQL",
+  "OpenAPI",
+  "SvelteKit",
+  "Cloudflare",
+  "CloudRun",
+  "SIGTERM",
+]

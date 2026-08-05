@@ -1,0 +1,195 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings fail the build. A warning nobody has to fix is a warning everybody
+  # learns to scroll past.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+
+    # No PostgreSQL service yet. Nothing in the workspace connects to one, so a
+    # container provisioned "for later" is startup time and a moving part that
+    # buys nothing today — the same reasoning that keeps empty future crates out
+    # of the workspace. It arrives with the first test that needs it (issue #7).
+    env:
+      # Compile-time query verification reads the committed .sqlx/ cache instead
+      # of the database, so the build cannot depend on a live server.
+      SQLX_OFFLINE: "true"
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        # rust-toolchain.toml decides the version and components; naming them
+        # again here would create a second source of truth that can disagree.
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Report toolchain
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  frontend:
+    name: Frontend workspace
+    runs-on: ubuntu-latest
+
+    env:
+      # Explicit rather than inherited. The production build fails closed without
+      # this, by design — see web/svelte.config.js. CI is testing that the build
+      # works, not what origin it points at, so a localhost value is the honest
+      # choice and setting it here records that decision instead of hiding it
+      # behind a default.
+      PUBLIC_API_ORIGIN: http://localhost:8080
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          # engines.node in package.json is the single source of truth for the
+          # major version; this reads the version file rather than restating it.
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Types
+        run: pnpm -r check
+
+      - name: Lint and format
+        # web's `lint` is `prettier --check . && eslint .`, so formatting is
+        # already enforced here rather than in a second step that could drift.
+        run: pnpm -r lint
+
+      - name: Install Playwright browsers
+        # Must precede the unit tests, not just the e2e ones: web's Vitest suite
+        # runs in *browser mode* rather than jsdom, so it launches Chromium too.
+        # `chromium` and the headless shell are separate downloads, and browser
+        # mode uses the shell — installing only `chromium` fails at run time with
+        # a missing chrome-headless-shell binary.
+        run: pnpm --filter @repolens/web exec playwright install --with-deps chromium chromium-headless-shell
+
+      - name: Unit and contract tests
+        # Includes the generated-schema staleness gate: if src/schema.ts drifts
+        # from contracts/openapi.json, this is where it fails.
+        run: pnpm -r test
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Assert the build output is static
+        # adapter-static must not emit a server bundle. If one appears, the app
+        # has silently acquired an SSR dependency and can no longer be hosted on
+        # Cloudflare static assets — the core hosting assumption of the project.
+        run: |
+          set -euo pipefail
+          for forbidden in index.js handler.js server.js manifest.js; do
+            if find web/build -name "$forbidden" -print -quit | grep -q .; then
+              echo "::error::web/build contains $forbidden — output is no longer static"
+              exit 1
+            fi
+          done
+          echo "static output confirmed: $(find web/build -type f | wc -l) files"
+
+      - name: Scan the production bundle for secrets
+        # Acceptance criterion of issue #8. The bundle is what actually ships, so
+        # it is the last place a server-side credential can hide before a browser
+        # receives it.
+        #
+        # The question this asks is deliberately narrow: "is this a value that
+        # grants access, which a browser must never hold?" Not "does this look
+        # like a key?"
+        #
+        # NOT scanned: the Firebase browser API key (`AIzaSy…`). It identifies the
+        # project rather than authorizing access, and Firebase documents it as
+        # intended for client code — the repository itself declares it as
+        # PUBLIC_FIREBASE_API_KEY in .env.example. A rule forbidding it from the
+        # bundle would contradict the architecture and fail this job the day
+        # Firebase auth lands (#13), training everyone to ignore the scan. That
+        # key is protected by API restrictions in the provider console, which is
+        # where a key that is *supposed* to be public gets constrained.
+        run: |
+          set -euo pipefail
+
+          patterns=(
+            # Database URLs carrying an inline password, and Neon role secrets.
+            'postgres(ql)?://[^[:space:]]*:[^[:space:]]*@'
+            'npg_[A-Za-z0-9]{16,}'
+            # GitHub tokens: personal, OAuth, server-to-server, user-to-server.
+            'gh[pousr]_[A-Za-z0-9]{36}'
+            'github_pat_[A-Za-z0-9_]{50,}'
+            # Asymmetric private keys in any PEM form.
+            'BEGIN [A-Z ]*PRIVATE KEY'
+            # Google service-account JSON, by its two unmistakable fields.
+            '"type"[[:space:]]*:[[:space:]]*"service_account"'
+            '"private_key_id"[[:space:]]*:'
+            # Google OAuth client secret (server-side; never belongs in a browser).
+            'GOCSPX-[A-Za-z0-9_-]{20,}'
+            # Legacy FCM server key — grants send-to-any-device and is server-only.
+            'AAAA[A-Za-z0-9_-]{7}:APA91b[A-Za-z0-9_-]{100,}'
+          )
+
+          found=0
+          for pattern in "${patterns[@]}"; do
+            if matches=$(grep -rIlE "$pattern" web/build/); then
+              echo "::error::server-side credential pattern in production bundle: $pattern"
+              echo "$matches"
+              found=1
+            fi
+          done
+
+          [ "$found" -eq 0 ] || exit 1
+          echo "bundle scan clean: ${#patterns[@]} patterns, no match"
+
+      - name: Browser and accessibility tests
+        # Includes the axe WCAG 2.1 AA scans across all three routes at
+        # 360/768/1280px — the accessibility contract is a gate, not a review step.
+        run: pnpm --filter @repolens/web run test:e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7

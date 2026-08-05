@@ -1,0 +1,7 @@
+# Managed by tooling, not by hand.
+.svelte-kit/
+build/
+node_modules/
+playwright-report/
+test-results/
+pnpm-lock.yaml

@@ -1,0 +1,243 @@
+/*
+ * RepoLens design tokens — the single source of truth for the visual system.
+ *
+ * Plain CSS custom properties. No Tailwind, no UnoCSS, no CSS framework. The whole
+ * surface is three routes; a token file that fits on one screen is auditable in a way
+ * that a utility-class vocabulary is not, and it keeps our tokens authoritative when
+ * Bits UI primitives are introduced (Bits UI ships no CSS of its own).
+ *
+ * Direction: quiet, typographic, evidence-first. Borders, never shadows. One accent,
+ * used sparingly. Generous line-height — this is a reading surface, not a dashboard.
+ *
+ * Light and dark are both first-class, driven by `prefers-color-scheme`. There is no
+ * theme toggle yet; when one is added it overrides via a `[data-theme]` attribute on
+ * :root rather than by redefining these names anywhere else.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* ---------------------------------------------------------------------- */
+  /* Colour — light                                                          */
+  /* ---------------------------------------------------------------------- */
+
+  /* Surfaces, from page background outward to raised panels. */
+  --surface-0: #ffffff;
+  --surface-1: #f7f7f6;
+  --surface-2: #eeeeec;
+
+  /* Text. `muted` is the floor: it still clears WCAG AA on --surface-0. */
+  --text-primary: #1a1a19;
+  --text-secondary: #4a4a47;
+  --text-muted: #6b6b66;
+
+  /* Borders carry all separation and elevation. There is no shadow token. */
+  --border-subtle: #e0e0dc;
+  --border-strong: #c4c4be;
+
+  /* Exactly one accent. Links, focus, and the single primary action per screen. */
+  --accent: #1f5f8b;
+  --accent-hover: #17496b;
+  --accent-contrast: #ffffff;
+
+  /* ---------------------------------------------------------------------- */
+  /* Status hues — desaturated, and never the only signal                    */
+  /* ---------------------------------------------------------------------- */
+  /*
+	 * Five states, matching the analyzer's finding states. Status is always carried by
+	 * chip text and shape as well as colour; colour alone is never the signal.
+	 *
+	 * `missing` is NEUTRAL GREY, not red. Absence of a thing is not a failure — it is
+	 * a fact about the repository. Rendering it red would smuggle a judgement into what
+	 * is supposed to be evidence, and it is the single easiest way for an
+	 * evidence-first report to start reading like a score.
+	 *
+	 * `not-applicable` sits below `missing` in contrast, because it is even less of a
+	 * claim about the repository. `unable-to-verify` is the only hue that leans warm:
+	 * it is the one state that says something about *our* limits, not the repo's.
+	 */
+  --status-detected-bg: #e8f1ea;
+  --status-detected-fg: #1f5132;
+  --status-detected-border: #b9d3c2;
+
+  --status-documented-bg: #e7eef6;
+  --status-documented-fg: #1c4a75;
+  --status-documented-border: #b6c9de;
+
+  --status-missing-bg: #eeeeec;
+  --status-missing-fg: #4a4a47;
+  --status-missing-border: #cfcfc9;
+
+  --status-not-applicable-bg: #f4f4f2;
+  --status-not-applicable-fg: #6b6b66;
+  --status-not-applicable-border: #dcdcd7;
+
+  --status-unable-to-verify-bg: #f6efe1;
+  --status-unable-to-verify-fg: #6d5312;
+  --status-unable-to-verify-border: #ddcda6;
+
+  /* ---------------------------------------------------------------------- */
+  /* Typography                                                              */
+  /* ---------------------------------------------------------------------- */
+  /*
+	 * One text face and one mono face. No web fonts are loaded: a report should paint
+	 * on first byte, and a font request is one more origin in the CSP.
+	 *
+	 * Mono is reserved for machine-produced strings that must be copied exactly —
+	 * paths, commit SHAs, digests, evidence excerpts. It is a semantic choice, not
+	 * decoration; never set prose in it.
+	 */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'Noto Sans', sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'Cascadia Mono', 'Segoe UI Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
+
+  /* Scale: 12 / 14 / 16 / 18 / 22 / 28 / 36. Nothing between, nothing beyond. */
+  --font-size-xs: 0.75rem; /* 12px — table captions, metadata */
+  --font-size-sm: 0.875rem; /* 14px — chips, secondary labels */
+  --font-size-md: 1rem; /* 16px — body */
+  --font-size-lg: 1.125rem; /* 18px — lead paragraph, h4 */
+  --font-size-xl: 1.375rem; /* 22px — h3 */
+  --font-size-2xl: 1.75rem; /* 28px — h2 */
+  --font-size-3xl: 2.25rem; /* 36px — h1 */
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-bold: 600;
+
+  --line-height-body: 1.6;
+  --line-height-heading: 1.25;
+  --line-height-mono: 1.5;
+
+  --letter-spacing-heading: -0.01em;
+
+  /* ---------------------------------------------------------------------- */
+  /* Space — 4px base                                                        */
+  /* ---------------------------------------------------------------------- */
+  /* 4 / 8 / 12 / 16 / 24 / 32 / 48 / 64. Named by multiple of the base. */
+  --space-1: 0.25rem; /* 4px  */
+  --space-2: 0.5rem; /* 8px  */
+  --space-3: 0.75rem; /* 12px */
+  --space-4: 1rem; /* 16px */
+  --space-6: 1.5rem; /* 24px */
+  --space-8: 2rem; /* 32px */
+  --space-12: 3rem; /* 48px */
+  --space-16: 4rem; /* 64px */
+
+  /* ---------------------------------------------------------------------- */
+  /* Radius and elevation                                                    */
+  /* ---------------------------------------------------------------------- */
+  /* Two radii only. There is deliberately no shadow token — separation is a border. */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+
+  --border-width: 1px;
+
+  /* ---------------------------------------------------------------------- */
+  /* Focus                                                                   */
+  /* ---------------------------------------------------------------------- */
+  /* Keyboard operability is a hard requirement, so the focus ring is a token, not
+	 * a per-component decision, and it is never removed without a replacement. */
+  --focus-ring-color: var(--accent);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* ---------------------------------------------------------------------- */
+  /* Motion                                                                  */
+  /* ---------------------------------------------------------------------- */
+  /*
+	 * Two durations. Every transition in the app references one of these tokens, which
+	 * is what makes the reduced-motion override below a complete gate rather than a
+	 * best-effort sweep: set the tokens to 0ms and motion stops everywhere at once.
+	 */
+  --duration-fast: 120ms;
+  --duration-slow: 200ms;
+  --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ---------------------------------------------------------------------- */
+  /* Layout                                                                  */
+  /* ---------------------------------------------------------------------- */
+  --measure: 72ch; /* comfortable reading column */
+  --content-max: 68rem;
+  --content-gutter: var(--space-4);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Colour — dark                                                               */
+/* -------------------------------------------------------------------------- */
+/*
+ * Not an inversion. Dark surfaces need their own hue values to keep the status
+ * chips distinguishable and to keep `missing` reading as neutral rather than dead.
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-0: #131416;
+    --surface-1: #1b1d20;
+    --surface-2: #24262a;
+
+    --text-primary: #e9e9e6;
+    --text-secondary: #b3b4b1;
+    --text-muted: #8b8d8a;
+
+    --border-subtle: #2c2e32;
+    --border-strong: #43464b;
+
+    --accent: #6faed9;
+    --accent-hover: #8ec3e6;
+    --accent-contrast: #0d1013;
+
+    --status-detected-bg: #16241c;
+    --status-detected-fg: #8fcfa8;
+    --status-detected-border: #2c4536;
+
+    --status-documented-bg: #151f2b;
+    --status-documented-fg: #93bde0;
+    --status-documented-border: #2a3d53;
+
+    --status-missing-bg: #212327;
+    --status-missing-fg: #b3b4b1;
+    --status-missing-border: #3a3d42;
+
+    --status-not-applicable-bg: #1b1d20;
+    --status-not-applicable-fg: #8b8d8a;
+    --status-not-applicable-border: #33363a;
+
+    --status-unable-to-verify-bg: #262014;
+    --status-unable-to-verify-fg: #d8bd80;
+    --status-unable-to-verify-border: #4a3f26;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Reduced motion                                                              */
+/* -------------------------------------------------------------------------- */
+/*
+ * The gate. Because durations are tokens, zeroing them here disables every
+ * token-driven transition in one place. global.css adds a belt-and-braces sweep for
+ * anything that slips past (third-party primitives, for instance).
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-slow: 0ms;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Forced colours (Windows High Contrast)                                      */
+/* -------------------------------------------------------------------------- */
+/*
+ * Forced-colors mode replaces our palette wholesale and strips background images.
+ * The LOC bars are drawn as row backgrounds, so they vanish here — which is correct,
+ * because the real number is in the <td> next to them. What must NOT vanish is
+ * structure, so borders are pinned to the system colour.
+ */
+@media (forced-colors: active) {
+  :root {
+    --border-subtle: CanvasText;
+    --border-strong: CanvasText;
+    --focus-ring-color: Highlight;
+  }
+}
