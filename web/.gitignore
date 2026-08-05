@@ -1,0 +1,11 @@
+# Vitest browser-mode failure artefacts.
+#
+# Both directories are written only when a test fails: `__screenshots__/` holds the page
+# capture attached to the failure report, `.vitest-attachments/` the raw blobs behind it.
+# They are regenerated on the next failing run and are meaningless afterwards — committing
+# them would put a binary snapshot of a bug that no longer exists into the history.
+#
+# Scoped to this package rather than added to the root .gitignore, because these paths are
+# an artefact of the web app's test runner and belong with it.
+.vitest-attachments/
+src/tests/__screenshots__/
