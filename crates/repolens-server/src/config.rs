@@ -68,8 +68,77 @@ pub fn database_direct_url() -> Result<String, ConfigError> {
 
 fn required(name: &'static str) -> Result<String, ConfigError> {
     match env::var(name) {
-        Ok(value) if !value.trim().is_empty() => Ok(value),
+        Ok(value) if !value.trim().is_empty() => {
+            warn_on_weak_tls(name, &value);
+            Ok(value)
+        }
         _ => Err(ConfigError::Missing(name)),
+    }
+}
+
+/// Warns when a database URL does not verify the server's certificate.
+///
+/// Measured against a real Neon endpoint, not assumed:
+///
+/// * Neon issues connection strings containing `sslmode=require` and
+///   `channel_binding=require`.
+/// * `sslmode=require` encrypts but performs **no certificate or hostname
+///   verification**, so it defends against passive eavesdropping and not
+///   against an active machine-in-the-middle.
+/// * `sqlx` does not implement `channel_binding` and silently ignores it —
+///   visible in its own logs as `ignoring unrecognized connect parameter`. The
+///   protection the parameter appears to request is therefore absent.
+///
+/// Those two together mean a connection string that *looks* hardened is not.
+/// `sslmode=verify-full` is what actually verifies the chain and the hostname,
+/// and it is confirmed to work against Neon.
+///
+/// This warns rather than refuses: a developer pointing at a local PostgreSQL
+/// without TLS has a legitimate reason to. Production enforcement belongs with
+/// the deployment work in issue #9, where the URL comes from Secret Manager and
+/// there is no such case.
+fn warn_on_weak_tls(name: &'static str, url: &str) {
+    // Substring rather than a URL parse: this must never panic or allocate on a
+    // secret, and the parameter is unambiguous enough not to need parsing.
+    if url.contains("sslmode=verify-full") {
+        return;
+    }
+
+    // Local development over a plaintext socket is a deliberate choice, not an
+    // oversight worth shouting about.
+    if url.contains("@localhost") || url.contains("@127.0.0.1") {
+        return;
+    }
+
+    tracing::warn!(
+        variable = name,
+        "database URL does not use sslmode=verify-full; the connection is encrypted but the \
+         server certificate is not verified. sqlx also ignores channel_binding, so that \
+         parameter provides nothing. Prefer sslmode=verify-full for any non-local endpoint."
+    );
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::warn_on_weak_tls;
+
+    // The function's contract is "never panic, never leak" — it is handed a
+    // string containing a password on every startup.
+    #[test]
+    fn tolerates_any_shape_of_url() {
+        // `.invalid` is reserved by RFC 2606 and can never resolve, and the
+        // credentials are named rather than plausible. A fixture that merely
+        // *looks* fake still trips credential scanners and still makes a
+        // reviewer stop and check.
+        for url in [
+            "",
+            "not-a-url",
+            "postgres://EXAMPLE_USER:EXAMPLE_PASSWORD@db.example.invalid/db?sslmode=require",
+            "postgres://EXAMPLE_USER:EXAMPLE_PASSWORD@db.example.invalid/db?sslmode=verify-full",
+            "postgres://EXAMPLE_USER:EXAMPLE_PASSWORD@localhost/db",
+        ] {
+            warn_on_weak_tls("DATABASE_URL", url);
+        }
     }
 }
 

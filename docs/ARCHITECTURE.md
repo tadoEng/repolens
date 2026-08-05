@@ -157,6 +157,23 @@ Two database endpoints, not one:
 | `DATABASE_URL`        | pooled   | API and ordinary worker transactions               |
 | `DATABASE_DIRECT_URL` | direct   | migrations and session-dependent administration    |
 
+Measured against a real Neon project, not assumed:
+
+- **SQLx works over Neon's pooled endpoint.** The plan flagged this as an open
+  question, since PgBouncer in transaction mode historically broke prepared
+  statements. It does not here, and `statement_cache_capacity=0` is not needed.
+- **Neon's default connection string is weaker than it looks.** It carries
+  `sslmode=require`, which encrypts but verifies neither certificate chain nor
+  hostname, and `channel_binding=require`, which sqlx does not implement and
+  silently ignores — visible in its own log as `ignoring unrecognized connect
+  parameter`. Neither protection against an active machine-in-the-middle is
+  actually in force. Use `sslmode=verify-full`, which is confirmed to work
+  against Neon; the server warns at startup when a non-local URL lacks it.
+- **A suspended compute costs seconds on the first connection.** Neon
+  scale-to-zero suspends after idle, and that resume stacks on top of a Cloud
+  Run cold start, so the first request after quiet pays both. The progress UI
+  has to tolerate it without looking broken.
+
 ## The contract pipeline
 
 The frontend never sees a hand-written description of this API. One chain, with
