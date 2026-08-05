@@ -11,7 +11,8 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "schema:update": "vitest run schema.test.ts --update"
+    "schema:update": "vitest run schema.test.ts --update",
+    "fixtures:update": "vitest run fixtures.test.ts --update"
   },
   "dependencies": {
     "openapi-fetch": "^0.17.0"

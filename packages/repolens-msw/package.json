@@ -7,16 +7,19 @@
   "exports": {
     ".": "./src/index.ts",
     "./handlers": "./src/handlers.ts",
+    "./analysis-handlers": "./src/analysis-handlers.ts",
     "./mock-fetch": "./src/mock-fetch.ts"
   },
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@repolens/api-client": "workspace:*",
     "msw": "^2.15.0"
   },
   "devDependencies": {
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
   }
 }
