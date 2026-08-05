@@ -22,6 +22,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::config;
+use crate::contract;
 use crate::state::{AppState, BUILD_SHA};
 
 /// Ceiling on request bodies. Every current and planned endpoint takes either
@@ -34,11 +35,46 @@ const REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Root OpenAPI document. Paths and schemas are contributed by the router.
+/// Root OpenAPI document.
+///
+/// Paths are contributed by the router, so a route cannot be served without
+/// being documented. The `analysis-v1` schemas are registered explicitly
+/// instead, because issue #14 fixes the contract while issue #6 builds the
+/// endpoints that serve it — the generated client and the executable fixtures
+/// therefore exist before any analysis route does, which is what unblocks
+/// frontend work without anyone inventing a DTO in Svelte.
 #[derive(OpenApi)]
-#[openapi(info(
-    title = "RepoLens API",
-    description = "Deterministic, evidence-backed analysis of a public GitHub repository at an exact commit."
-))]
+#[openapi(
+    info(
+        title = "RepoLens API",
+        description = "Deterministic, evidence-backed analysis of a public GitHub repository at an exact commit."
+    ),
+    components(schemas(
+        contract::error::ApiError,
+        contract::error::ErrorCode,
+        contract::analysis::Analysis,
+        contract::analysis::AnalysisState,
+        contract::analysis::ExecutionMetadata,
+        contract::analysis::RepositoryIdentity,
+        contract::analysis::RetryPolicy,
+        contract::analysis::TriggerStatus,
+        contract::report::AreaLineCount,
+        contract::report::CompositionExclusion,
+        contract::report::Confidence,
+        contract::report::Evidence,
+        contract::report::EvidenceKind,
+        contract::report::Finding,
+        contract::report::FindingCategory,
+        contract::report::FindingState,
+        contract::report::LanguageLineCount,
+        contract::report::Limitation,
+        contract::report::LineCountSummary,
+        contract::report::LineRange,
+        contract::report::OverviewStatement,
+        contract::report::Report,
+        contract::report::Severity,
+    ))
+)]
 struct ApiDoc;
 
 /// Process liveness.
