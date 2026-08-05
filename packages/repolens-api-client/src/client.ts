@@ -61,9 +61,24 @@ function readEnv(name: string): string | undefined {
 /**
  * Normalize an origin so `baseUrl + '/api/v1/...'` never produces a double slash and never
  * silently drops a path prefix.
+ *
+ * Deliberately not a regex. `/\/+$/` is a polynomial ReDoS (CodeQL `js/polynomial-redos`):
+ * an anchored `+` over a repeated character makes the engine retry from every position, so
+ * a string of many trailing slashes costs quadratic time. Scanning backwards is linear and
+ * needs no backtracking at all.
+ *
+ * The input here is build-time configuration rather than user input, so this was never
+ * reachable by an attacker — but a pattern that is only safe because of where it happens to
+ * sit is one copy-paste away from somewhere it is not, and this repository's own product is
+ * finding exactly that class of problem.
  */
 function normalizeOrigin(origin: string): string {
-	return origin.replace(/\/+$/, '');
+	const SLASH = 47; // '/'
+	let end = origin.length;
+	while (end > 0 && origin.charCodeAt(end - 1) === SLASH) {
+		end -= 1;
+	}
+	return origin.slice(0, end);
 }
 
 /**
