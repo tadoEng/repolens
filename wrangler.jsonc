@@ -1,0 +1,26 @@
+{
+  // Cloudflare Workers Static Assets — assets only, no Worker script.
+  //
+  // RepoLens Phase 0 has no server-side rendering and no edge logic: the
+  // SvelteKit app is built with adapter-static and every dynamic response comes
+  // from the Axum API. Declaring a Worker entrypoint we do not need would add a
+  // paid dependency and a runtime with nothing to run.
+  "name": "repolens",
+  "compatibility_date": "2026-08-06",
+  "assets": {
+    // Relative to this file at the repository root. `adapter-static` writes to
+    // `build/` inside `web/`, so the deployable artifact is `./web/build`.
+    "directory": "./web/build",
+
+    // Serves `/index.html` with 200 for any path that does not match an asset,
+    // which is what makes direct navigation to /analyses/<id> and /reports/<id>
+    // work rather than returning Cloudflare's own 404.
+    //
+    // This is why svelte.config.js uses `fallback: 'index.html'` and not
+    // crates.io's `200.html`: that is the Netlify convention, and Cloudflare
+    // serves `/index.html` specifically. Copying it would break nested routes on
+    // hard refresh while working fine in client-side navigation — a failure that
+    // only appears after deploy.
+    "not_found_handling": "single-page-application"
+  }
+}
