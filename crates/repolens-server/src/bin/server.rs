@@ -4,6 +4,7 @@
 //! this one by overriding the entrypoint on the Service.
 
 use anyhow::Context as _;
+use repolens_server::state::AppState;
 use repolens_server::{api, config, telemetry};
 use tokio::net::TcpListener;
 
@@ -12,7 +13,23 @@ async fn main() -> anyhow::Result<()> {
     telemetry::init();
 
     let address = config::bind_address().context("resolving the bind address")?;
-    let (app, _openapi) = api::build();
+
+    // A missing DATABASE_URL is a warning, not a fatal error. The probe then
+    // reports the database as unavailable — which is true — and the frontend
+    // can still be developed against a running API. Deployed environments set
+    // the variable, and the probe is what proves they did.
+    let state = match config::database_url() {
+        Ok(url) => {
+            let pool = AppState::connect_lazy(&url).context("configuring the database pool")?;
+            AppState::with_pool(pool)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "starting without a database; the system probe will report it as unavailable");
+            AppState::without_database()
+        }
+    };
+
+    let (app, _openapi) = api::build(state);
 
     let listener = TcpListener::bind(address)
         .await

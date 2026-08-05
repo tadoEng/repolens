@@ -131,8 +131,16 @@ Registry repository.
 
 There is no argument parser. A Cloud Run Job starts one execution and exits, so
 `worker` needs no `--once` flag, and with no flag to parse there is no reason to
-depend on a CLI crate. `REPOLENS_WORKER_LOOP=1` repeats the run-once body for
-local iteration and is never set in a deployed environment.
+depend on a CLI crate. There is deliberately no loop mode either, not even
+behind an environment variable: a worker that can be a daemon under some
+configuration has two sets of shutdown and lease-renewal semantics, and the
+second would only ever be exercised on a developer's machine — the worst place
+to discover a lease bug. Local iteration repeats the *process*, which is the
+code path Cloud Run actually runs:
+
+```sh
+while cargo run --bin worker; do sleep 5; done
+```
 
 An always-on polling worker would require `min-instances >= 1`, which bills
 continuously and would falsify the free-stack thesis RepoLens exists to test.
@@ -148,6 +156,72 @@ Two database endpoints, not one:
 | --------------------- | -------- | -------------------------------------------------- |
 | `DATABASE_URL`        | pooled   | API and ordinary worker transactions               |
 | `DATABASE_DIRECT_URL` | direct   | migrations and session-dependent administration    |
+
+## The contract pipeline
+
+The frontend never sees a hand-written description of this API. One chain, with
+a gate at each end:
+
+```text
+Axum routes + DTOs
+      ↓  utoipa, collected by OpenApiRouter from routes that actually exist
+contracts/openapi.json          ← committed
+      ↓  openapi-typescript
+packages/repolens-api-client/src/schema.ts   ← committed, generated
+      ↓  openapi-fetch
+web/  (SvelteKit)
+```
+
+A route cannot be served without being documented, because the router and the
+document are produced by the same call and there is no way to obtain one
+without the other. Both committed artefacts are generated, so both can go
+stale; two gates make that a build failure rather than a runtime surprise:
+
+| Gate                                            | Catches                                        |
+| ----------------------------------------------- | ---------------------------------------------- |
+| `cargo test -p repolens-server --test openapi`  | `contracts/openapi.json` no longer matches the routes |
+| `pnpm --filter @repolens/api-client test`       | `schema.ts` no longer matches the document     |
+
+CI additionally asserts the working tree is clean, which catches a regeneration
+that was run but never committed.
+
+After deliberately changing a route or DTO, regenerate both — in order, because
+the second reads the first's output:
+
+```sh
+UPDATE_OPENAPI=1 cargo test -p repolens-server --test openapi
+pnpm --filter @repolens/api-client schema:update
+```
+
+Naming is settled (issue #14): **object fields are `snake_case`**, which is what
+Rust produces already, so no `rename_all` is used on structs — an attribute that
+must be repeated on every DTO is an attribute that will eventually be forgotten
+on one. **Enum values are `SCREAMING_SNAKE_CASE`**, which Rust's `PascalCase`
+variants cannot produce, so there `rename_all` is unavoidable and is applied
+once per enum.
+
+### The system probe
+
+`GET /api/v1/system/probe` reports the whole hosting path in one response:
+
+```json
+{ "api": "OK", "database": "OK", "build_sha": "abc1234", "schema_version": 1 }
+```
+
+It answers `200` even when a dependency is down, because failing the request
+would make "the API is up but the database is not" indistinguishable from "the
+API is down" — the exact distinction the endpoint exists to draw. Dependency
+health is data, not a status code.
+
+Two facts it refuses to conflate:
+
+- `database` separates `UNAVAILABLE` (unreachable) from `DEGRADED` (reachable,
+  but migrations have never been applied). One query against `_sqlx_migrations`
+  could not tell them apart: a missing table would report an empty database as
+  unreachable.
+- `schema_version` is **nullable, never zero-by-default**. "No migrations have
+  been applied" and "we could not find out" are different facts, and collapsing
+  them would let a connection failure read as an empty database.
 
 ## The reproducibility key
 

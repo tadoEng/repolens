@@ -1,0 +1,111 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RepoLens API",
+    "description": "Deterministic, evidence-backed analysis of a public GitHub repository at an exact commit.",
+    "license": {
+      "name": "LicenseRef-Proprietary",
+      "identifier": "LicenseRef-Proprietary"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/system/probe": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "system_probe",
+        "responses": {
+          "200": {
+            "description": "Reachability of the API and its database",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemProbeResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "liveness",
+        "responses": {
+          "200": {
+            "description": "The process is serving requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivenessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "LivenessResponse": {
+        "type": "object",
+        "description": "Process liveness.\n\nDeliberately *not* the system probe. `GET /api/v1/system/probe`, which also\nreports database reachability, build SHA, and schema version, is owned by\nthe walking-skeleton work (issue #11); answering \"is the database up?\" here\nbefore there is a pool would be a claim this binary cannot support.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Always `ok` when the process can serve a request at all."
+          }
+        }
+      },
+      "ProbeStatus": {
+        "type": "string",
+        "description": "Reachability of one dependency.\n\nEnum values are `SCREAMING_SNAKE_CASE` per the settled contract convention\n(issue #14). Unlike object fields — where Rust's own naming already matches\nand no rename is used — enum variants are `PascalCase` in Rust, so a rename\nis unavoidable here. It is applied once, on the enum, rather than per\nvariant.",
+        "enum": [
+          "OK",
+          "DEGRADED",
+          "UNAVAILABLE"
+        ]
+      },
+      "SystemProbeResponse": {
+        "type": "object",
+        "description": "Result of the system probe.\n\nDeliberately the *whole* hosting path in one response: the process answered\n(`api`), the database answered a real query (`database`), the running code\nis identifiable (`build_sha`), and the schema is at a known version\n(`schema_version`). A liveness endpoint proves only the first.",
+        "required": [
+          "api",
+          "database",
+          "build_sha"
+        ],
+        "properties": {
+          "api": {
+            "$ref": "#/components/schemas/ProbeStatus",
+            "description": "Always `OK`: reaching this handler means the process is serving."
+          },
+          "build_sha": {
+            "type": "string",
+            "description": "Commit this binary was built from, or `unknown` for a local build."
+          },
+          "database": {
+            "$ref": "#/components/schemas/ProbeStatus",
+            "description": "Whether a real query against the configured database succeeded."
+          },
+          "schema_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Highest applied migration version.\n\nNull rather than zero when the database could not be reached: \"no\nmigrations have been applied\" and \"we could not find out\" are different\nfacts, and collapsing them into `0` would let a connection failure read\nas an empty database. The frontend must render the null case, which is\nalso the cheapest available exercise of its unknown-value handling."
+          }
+        }
+      }
+    }
+  }
+}

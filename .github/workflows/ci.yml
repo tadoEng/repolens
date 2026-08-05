@@ -63,6 +63,21 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      - name: Assert the committed contract is not stale
+        # `cargo test` already runs the staleness gate, but only inside the test
+        # process. This asserts the working tree too: a contributor who
+        # regenerated contracts/openapi.json and forgot to commit it would
+        # otherwise pass CI while the frontend built against a document nobody
+        # else has.
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- contracts/openapi.json; then
+            echo "::error::contracts/openapi.json differs from the committed copy"
+            git diff -- contracts/openapi.json
+            exit 1
+          fi
+          echo "contract document matches the routes"
+
   frontend:
     name: Frontend workspace
     runs-on: ubuntu-latest

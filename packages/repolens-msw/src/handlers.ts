@@ -6,20 +6,25 @@
  * mode that lets the frontend be developed against a working API without the backend
  * running.
  *
- * **There are no handlers yet, and that is deliberate.**
+ * **Only `GET /api/v1/system/probe` is handled, and that is deliberate.**
  *
- * Handlers are typed against the generated schema in `@repolens/api-client` and return
- * the executable fixtures that land in `contracts/fixtures/analysis-v1/` at issue #14.
- * Writing a handler now would mean inventing the response shape it returns — the exact
- * failure the fixtures exist to prevent. An invented mock is worse than no mock: it lets
- * a UI be built, reviewed, and merged against a contract that never existed, and the
- * mismatch only surfaces against the real API.
+ * The probe is the one endpoint whose contract has actually landed, so it is the one
+ * endpoint that can be mocked without inventing a response shape. The analysis and report
+ * endpoints wait for the executable fixtures at issue #14, because an invented mock is
+ * worse than no mock: it lets a UI be built, reviewed, and merged against a contract that
+ * never existed, and the mismatch only surfaces against the real API.
  *
- * When #14 lands, this file grows handlers that read those fixtures. It does not grow
- * hand-written response literals.
+ * Every body below is typed as a schema from the *generated* client rather than written
+ * out by hand. That is the entire point of this package — when the Rust DTOs change, the
+ * regenerated schema breaks these mocks at compile time instead of letting them drift.
  */
 
-import type { RequestHandler } from 'msw';
+import type { components } from '@repolens/api-client';
+import { HttpResponse, http, type RequestHandler } from 'msw';
+
+type SystemProbeResponse = components['schemas']['SystemProbeResponse'];
+
+const SYSTEM_PROBE_PATH = '/api/v1/system/probe';
 
 export interface HandlerOptions {
 	/**
@@ -31,6 +36,90 @@ export interface HandlerOptions {
 	apiOrigin?: string;
 }
 
+function systemProbeUrl({ apiOrigin }: HandlerOptions): string {
+	// A leading `*` matches any origin. That is the right default: a component test knows
+	// which endpoint it is mocking but has no business knowing which origin the app was
+	// built against, and pinning one here would make the mocks fail for the wrong reason.
+	return apiOrigin
+		? `${apiOrigin.replace(/\/+$/, '')}${SYSTEM_PROBE_PATH}`
+		: `*${SYSTEM_PROBE_PATH}`;
+}
+
+/** Every dependency answered: the shape a healthy deployment returns. */
+export const HEALTHY_PROBE: SystemProbeResponse = {
+	api: 'OK',
+	database: 'OK',
+	// Deliberately longer than the seven characters the footer shows, so that a test can
+	// tell "shortened" apart from "happened to be short".
+	build_sha: '0f1e2d3c4b5a69788796a5b4c3d2e1f009182736',
+	schema_version: 1
+};
+
+/**
+ * The API answered but its database did not.
+ *
+ * `api` stays `OK`: reaching the handler at all means the process is serving, and keeping
+ * that distinction visible is the reason the probe reports dependency health as data
+ * instead of failing the request. `schema_version` is `null` rather than `0` — "no
+ * migrations have been applied" and "we could not find out" are different facts.
+ */
+export const DATABASE_UNAVAILABLE_PROBE: SystemProbeResponse = {
+	api: 'OK',
+	database: 'UNAVAILABLE',
+	build_sha: '0f1e2d3c4b5a69788796a5b4c3d2e1f009182736',
+	schema_version: null
+};
+
+/** A binary built outside CI, where there is no commit to name. */
+export const LOCAL_BUILD_PROBE: SystemProbeResponse = {
+	api: 'OK',
+	database: 'OK',
+	build_sha: 'unknown',
+	schema_version: 1
+};
+
+/** Answer the probe with an arbitrary contract-shaped body. */
+export function systemProbeHandler(
+	probe: SystemProbeResponse,
+	options: HandlerOptions = {}
+): RequestHandler {
+	// The third type argument makes the resolver's return type the generated DTO, so a
+	// body that no longer matches the contract is a type error rather than a stale mock.
+	return http.get<never, never, SystemProbeResponse>(systemProbeUrl(options), () =>
+		HttpResponse.json(probe)
+	);
+}
+
+/** Scenario: everything is up. */
+export function systemProbeHealthy(options: HandlerOptions = {}): RequestHandler {
+	return systemProbeHandler(HEALTHY_PROBE, options);
+}
+
+/** Scenario: the service is serving but cannot reach Neon. */
+export function systemProbeDatabaseUnavailable(options: HandlerOptions = {}): RequestHandler {
+	return systemProbeHandler(DATABASE_UNAVAILABLE_PROBE, options);
+}
+
+/**
+ * Scenario: the service failed outright.
+ *
+ * The body is empty because the contract declares no error schema for this path — a JSON
+ * error DTO invented here would be exactly the drift this package exists to prevent.
+ */
+export function systemProbeServerError(options: HandlerOptions = {}): RequestHandler {
+	return http.get(systemProbeUrl(options), () => new HttpResponse(null, { status: 500 }));
+}
+
+/**
+ * Scenario: the request never reached a server.
+ *
+ * Distinct from a 500: the origin was wrong, DNS failed, or — the case this project cares
+ * about most — the CSP `connect-src` allowlist and `PUBLIC_API_ORIGIN` disagree.
+ */
+export function systemProbeNetworkFailure(options: HandlerOptions = {}): RequestHandler {
+	return http.get(systemProbeUrl(options), () => HttpResponse.error());
+}
+
 /**
  * Build the handler set for a given API origin.
  *
@@ -38,8 +127,8 @@ export interface HandlerOptions {
  * tests do not necessarily run against the same origin, and a module-level array would
  * bake one in at import time.
  */
-export function createHandlers(_options: HandlerOptions = {}): RequestHandler[] {
-	return [];
+export function createHandlers(options: HandlerOptions = {}): RequestHandler[] {
+	return [systemProbeHealthy(options)];
 }
 
 /** Default handler set, for consumers that do not need to override the origin. */
