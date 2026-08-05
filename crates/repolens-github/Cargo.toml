@@ -27,12 +27,7 @@ repolens-core = { workspace = true }
 # `json` is deliberately absent: `Response::json` reads an unbounded body, and
 # every response here is read through the size cap first and parsed from the
 # resulting slice.
-reqwest = { version = "0.13", default-features = false, features = [
-  "rustls",
-  "http2",
-  "stream",
-  "gzip",
-] }
+reqwest = { workspace = true }
 # `Url::origin` is the credential-scoping comparison, so the type is used
 # directly rather than through `reqwest`'s re-export.
 url = { workspace = true }
