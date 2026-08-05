@@ -19,6 +19,10 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
 	testDir: 'e2e',
+	// `real-api.spec.ts` needs a real Axum server and lives in
+	// playwright.integration.config.ts. Excluded here so the ordinary frontend loop needs
+	// no Rust toolchain and stays fast.
+	testIgnore: 'real-api.spec.ts',
 	fullyParallel: true,
 	forbidOnly: !!process.env.CI,
 	retries: process.env.CI ? 2 : 0,

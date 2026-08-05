@@ -208,3 +208,56 @@ jobs:
           name: playwright-report
           path: web/playwright-report/
           retention-days: 7
+
+  integration:
+    name: Browser against a real API
+    runs-on: ubuntu-latest
+
+    # The only job where a browser talks to a real Axum server. Every other
+    # browser test mocks the probe, which proves how a response renders but not
+    # that it is reachable: a mocked request never leaves the page, so it never
+    # consults the CSP connect-src allowlist and never triggers an origin
+    # comparison. Those fail only after deploy, which is what this catches.
+    #
+    # Needs no database and no secret — the server is started with an empty
+    # DATABASE_URL, so it runs on a fork.
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the server
+        # Built ahead of Playwright so a cold compile does not eat the
+        # webServer startup budget and surface as a misleading timeout.
+        run: cargo build --bin server --locked
+
+      - name: Install Playwright browsers
+        run: pnpm --filter @repolens/web exec playwright install --with-deps chromium chromium-headless-shell
+
+      - name: Browser against a real Axum server
+        run: pnpm --filter @repolens/web run test:e2e:integration
+
+      - name: Upload report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-report
+          path: web/playwright-report/
+          retention-days: 7

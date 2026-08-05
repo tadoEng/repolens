@@ -32,12 +32,56 @@ pub enum ConfigError {
     },
 }
 
+/// Why an environment file could not be loaded.
+///
+/// A category, never the underlying message. `dotenvy::Error::LineParse`
+/// carries the **entire malformed line** and prints it through `Display`, so a
+/// mistyped `DATABASE_URL=` or token line would otherwise be copied verbatim
+/// into the log — turning a typo into a credential disclosure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DotenvErrorKind {
+    /// The file could not be read.
+    Io,
+    /// A line was malformed. The line itself is deliberately discarded.
+    Parse,
+    /// A variable could not be applied to the process environment.
+    Environment,
+}
+
+impl DotenvErrorKind {
+    /// Stable label for logs.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Io => "io",
+            Self::Parse => "parse",
+            Self::Environment => "environment",
+        }
+    }
+}
+
+/// What happened while loading one environment file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DotenvOutcome {
+    /// File that was attempted.
+    pub filename: &'static str,
+    /// Failure category, or `None` when the file loaded or was simply absent.
+    pub error: Option<DotenvErrorKind>,
+    /// Character index of a parse failure, when the error reported one. Safe to
+    /// log: a position locates the problem without reproducing its content.
+    pub index: Option<usize>,
+}
+
 /// Loads `.env.local`, then `.env`, without overriding what is already set.
 ///
-/// Call once, first thing in `main`. Without this the binaries see only the
-/// ambient environment, so a developer has to `set -a; . ./.env.local` before
-/// every `cargo run` — and forgetting silently produces a server with no
-/// database rather than an error.
+/// Call once, first thing in `main`, and pass the result to [`report_dotenv`]
+/// **after** telemetry is initialised. Splitting the two is not ceremony: this
+/// has to run before `telemetry::init()` so `RUST_LOG` from the file is
+/// honoured, which means any `tracing` call made here would be emitted before a
+/// subscriber exists and silently discarded.
+///
+/// Without this a developer has to `set -a; . ./.env.local` before every `cargo
+/// run`, and forgetting produces a server with no database rather than an
+/// error.
 ///
 /// Deliberately does not override existing variables: a value explicitly
 /// exported for one command must win over a file, or `DATABASE_URL=... cargo
@@ -47,18 +91,56 @@ pub enum ConfigError {
 /// workspace root. In a deployed environment neither file exists and this is a
 /// no-op — Cloud Run supplies the variables, and a `.env` in a container image
 /// would be a packaging mistake worth failing on rather than absorbing.
-pub fn load_dotenv() {
+#[must_use]
+pub fn load_dotenv() -> Vec<DotenvOutcome> {
+    let mut outcomes = Vec::new();
+
     for filename in [".env.local", ".env"] {
         match dotenvy::from_filename(filename) {
-            Ok(path) => tracing::debug!(?path, "loaded environment file"),
-            // Absent is the normal case in production; anything else is worth
-            // seeing, but never fatal — the file is a convenience, not a
-            // contract. Missing *variables* still fail loudly at their point of
-            // use.
+            Ok(_) => outcomes.push(DotenvOutcome {
+                filename,
+                error: None,
+                index: None,
+            }),
+            // Absent is the normal case in production and not worth reporting.
             Err(error) if error.not_found() => {}
             Err(error) => {
-                tracing::warn!(filename, %error, "could not read environment file");
+                let (kind, index) = match &error {
+                    // The `String` here is the offending line. It is matched
+                    // but never bound, so it cannot reach a log by accident.
+                    dotenvy::Error::LineParse(_, index) => (DotenvErrorKind::Parse, Some(*index)),
+                    dotenvy::Error::EnvVar(_) => (DotenvErrorKind::Environment, None),
+                    // `Io`, plus any variant added later. Defaulting an unknown
+                    // variant to a read failure is safe: it names a category
+                    // without reproducing content we have not inspected.
+                    _ => (DotenvErrorKind::Io, None),
+                };
+                outcomes.push(DotenvOutcome {
+                    filename,
+                    error: Some(kind),
+                    index,
+                });
             }
+        }
+    }
+
+    outcomes
+}
+
+/// Logs what [`load_dotenv`] found, once a subscriber exists.
+///
+/// Emits only the filename, the category, and a character index. Never the
+/// error text and never the source line.
+pub fn report_dotenv(outcomes: &[DotenvOutcome]) {
+    for outcome in outcomes {
+        match outcome.error {
+            None => tracing::debug!(file = outcome.filename, "loaded environment file"),
+            Some(kind) => tracing::warn!(
+                file = outcome.filename,
+                error = kind.as_str(),
+                index = outcome.index,
+                "could not load environment file; contents are not logged"
+            ),
         }
     }
 }
@@ -163,9 +245,136 @@ fn warn_on_weak_tls(name: &'static str, url: &str) {
 /// moment any endpoint requires credentials, and a permissive default is a
 /// security decision made by omission.
 pub fn cors_allowed_origin() -> Option<String> {
-    match env::var("CORS_ALLOWED_ORIGIN") {
-        Ok(value) if !value.trim().is_empty() => Some(value.trim().to_owned()),
-        _ => None,
+    let raw = env::var("CORS_ALLOWED_ORIGIN").ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    match parse_origin(raw) {
+        Ok(origin) => Some(origin),
+        Err(reason) => {
+            // Rejected rather than passed through. The previous version accepted
+            // any string that could become a header value, which let `*` and
+            // path-bearing values through while the architecture claimed they
+            // were impossible.
+            tracing::error!(
+                value = raw,
+                reason,
+                "CORS_ALLOWED_ORIGIN is not a valid origin; serving without CORS"
+            );
+            None
+        }
+    }
+}
+
+/// Validates a browser origin: scheme, host, optional port — nothing else.
+///
+/// Hand-rolled rather than pulling in `url`, which belongs to the ingestion
+/// stage (#4). The grammar being enforced is small and closed, and writing it
+/// out states the rule the architecture claims rather than delegating it.
+///
+/// A trailing slash is tolerated and normalised away, because `Origin` headers
+/// never carry one and copying a browser address bar is the obvious mistake.
+///
+/// # Errors
+///
+/// Returns a short, static reason suitable for logging next to the value.
+fn parse_origin(value: &str) -> Result<String, &'static str> {
+    // `*` would permit every site on the internet, and `null` is what a
+    // sandboxed iframe or `file://` page sends — neither is an origin we could
+    // have deliberately chosen.
+    if value == "*" || value.eq_ignore_ascii_case("null") {
+        return Err("wildcard and null are never valid origins");
+    }
+
+    let (scheme, rest) = value.split_once("://").ok_or("missing scheme")?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err("scheme must be http or https");
+    }
+
+    // Everything after the authority must be empty. A path, query, or fragment
+    // means this is a URL rather than an origin, and browsers would never match
+    // it against the `Origin` header.
+    let authority = rest.strip_suffix('/').unwrap_or(rest);
+    if authority.contains('/') {
+        return Err("an origin has no path");
+    }
+    if authority.contains('?') || authority.contains('#') {
+        return Err("an origin has no query or fragment");
+    }
+    if authority.contains('@') {
+        return Err("an origin carries no credentials");
+    }
+    if authority.is_empty() {
+        return Err("missing host");
+    }
+    if authority.contains(char::is_whitespace) {
+        return Err("an origin contains no whitespace");
+    }
+
+    // Reject `https://host:` and `https://host:notaport` before the header
+    // parser turns them into something surprising.
+    if let Some((host, port)) = authority.rsplit_once(':')
+        && !host.is_empty()
+        && !host.contains(']')
+        && (port.is_empty() || port.parse::<u16>().is_err())
+    {
+        return Err("port must be a number");
+    }
+
+    Ok(format!("{}://{}", scheme.to_ascii_lowercase(), authority))
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::parse_origin;
+
+    #[test]
+    fn accepts_real_origins() {
+        for (input, expected) in [
+            ("https://repolens.pages.dev", "https://repolens.pages.dev"),
+            ("http://localhost:5173", "http://localhost:5173"),
+            // A trailing slash is what copying a browser address bar produces.
+            ("https://example.test/", "https://example.test"),
+            ("HTTPS://Example.test", "https://Example.test"),
+            ("https://[::1]:8080", "https://[::1]:8080"),
+        ] {
+            assert_eq!(
+                parse_origin(input).as_deref(),
+                Ok(expected),
+                "input: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_wildcard_and_null() {
+        // These are the two values that would silently widen the policy to
+        // everything, which is what the architecture claims is impossible.
+        assert!(parse_origin("*").is_err());
+        assert!(parse_origin("null").is_err());
+        assert!(parse_origin("NULL").is_err());
+    }
+
+    #[test]
+    fn rejects_anything_that_is_not_an_origin() {
+        for input in [
+            "",
+            "example.test",                  // no scheme
+            "ftp://example.test",            // wrong scheme
+            "https://",                      // no host
+            "https://example.test/path",     // path
+            "https://example.test?q=1",      // query
+            "https://example.test#frag",     // fragment
+            "https://user:pw@example.test",  // credentials
+            "https://example.test:",         // empty port
+            "https://example.test:notaport", // non-numeric port
+            "https://example.test:99999",    // port out of range
+            "https://exa mple.test",         // whitespace
+        ] {
+            assert!(parse_origin(input).is_err(), "should reject: {input:?}");
+        }
     }
 }
 

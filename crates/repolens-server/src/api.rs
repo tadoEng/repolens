@@ -83,6 +83,17 @@ pub enum ProbeStatus {
     Unavailable,
 }
 
+impl ProbeStatus {
+    /// Stable label for logs, matching the wire representation.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "OK",
+            Self::Degraded => "DEGRADED",
+            Self::Unavailable => "UNAVAILABLE",
+        }
+    }
+}
+
 /// Result of the system probe.
 ///
 /// Deliberately the *whole* hosting path in one response: the process answered
@@ -123,14 +134,15 @@ pub struct SystemProbeResponse {
 /// keeps a credential-bearing URL out of the record entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProbeFailure {
-    /// The query did not complete within the probe's own budget.
+    /// The work did not complete within the probe's own budget.
     Timeout,
     /// No usable connection: DNS, TLS, authentication, or the pool.
     Connection,
     /// Connected, but the expected relation is absent — migrations never ran.
     SchemaMissing,
-    /// Connected and the schema exists, but the query still failed.
-    Query,
+    /// Connected, but reading the schema version failed for another reason —
+    /// most often a missing `SELECT` grant on `_sqlx_migrations`.
+    SchemaUnreadable,
 }
 
 impl ProbeFailure {
@@ -140,8 +152,19 @@ impl ProbeFailure {
             Self::Timeout => "timeout",
             Self::Connection => "connection",
             Self::SchemaMissing => "schema_missing",
-            Self::Query => "query",
+            Self::SchemaUnreadable => "schema_unreadable",
         }
+    }
+
+    /// Whether connectivity had already been proven when this failure occurred.
+    ///
+    /// A failure after `SELECT 1` succeeds cannot mean "unreachable", so it
+    /// maps to `DEGRADED` rather than `UNAVAILABLE`. A timeout is deliberately
+    /// *not* in this set: the deadline covers both queries, so which phase was
+    /// in flight is unknown, and claiming reachability we did not establish
+    /// would be the same overstatement this distinction exists to prevent.
+    const fn after_connectivity(self) -> bool {
+        matches!(self, Self::SchemaMissing | Self::SchemaUnreadable)
     }
 
     /// Classifies a `sqlx` error without retaining its message.
@@ -154,7 +177,7 @@ impl ProbeFailure {
             sqlx::Error::Database(db) if db.code().as_deref() == Some("42P01") => {
                 Self::SchemaMissing
             }
-            sqlx::Error::Database(_) => Self::Query,
+            sqlx::Error::Database(_) => Self::SchemaUnreadable,
             // Everything else — I/O, TLS, a closed pool, DNS, authentication —
             // means no usable connection. Enumerating those variants explicitly
             // would duplicate this arm without adding a distinction the caller
@@ -218,19 +241,27 @@ async fn probe_database(pool: &sqlx::PgPool) -> (ProbeStatus, Option<i64>) {
                 (ProbeStatus::Degraded, None)
             }
         }
-        Err(ProbeFailure::SchemaMissing) => {
-            tracing::warn!(
-                failure = ProbeFailure::SchemaMissing.as_str(),
-                "database is reachable but the schema is not initialised"
-            );
-            (ProbeStatus::Degraded, None)
-        }
         Err(failure) => {
+            // The phase matters more than the error. Once `SELECT 1` has
+            // returned, connectivity is *proven*, so a later failure cannot
+            // mean "unreachable" — it means reachable but not serving. That
+            // distinction becomes load-bearing when the migration and runtime
+            // roles hold different privileges: a permission error reading
+            // `_sqlx_migrations` is a misconfigured grant, not a network fault,
+            // and reporting it as UNAVAILABLE would send a reader looking in
+            // entirely the wrong place.
+            let status = if failure.after_connectivity() {
+                ProbeStatus::Degraded
+            } else {
+                ProbeStatus::Unavailable
+            };
+
             tracing::warn!(
                 failure = failure.as_str(),
-                "system probe could not reach the database"
+                status = status.as_str(),
+                "system probe could not read the database"
             );
-            (ProbeStatus::Unavailable, None)
+            (status, None)
         }
     }
 }
@@ -251,11 +282,19 @@ async fn run_database_probe(pool: &sqlx::PgPool) -> Result<Option<i64>, ProbeFai
         // Connectivity first. A single query against `_sqlx_migrations` could
         // not separate "unreachable" from "schema never applied": a missing
         // table would report an empty database as unreachable.
+        //
+        // Failures here are *always* connectivity failures, regardless of what
+        // SQLx reports. `SELECT 1` touches no schema, so there is no
+        // schema-shaped explanation for it failing, and classifying by error
+        // kind could otherwise map it to a schema category and claim a
+        // reachability we never established.
         sqlx::query("SELECT 1")
             .execute(pool)
             .await
-            .map_err(|error| ProbeFailure::classify(&error))?;
+            .map_err(|_| ProbeFailure::Connection)?;
 
+        // Past this point connectivity is proven, so `classify` may attribute a
+        // failure to the schema.
         sqlx::query_scalar::<_, Option<i64>>(
             "SELECT max(version) FROM _sqlx_migrations WHERE success",
         )
@@ -319,4 +358,25 @@ pub fn build(state: AppState) -> (Router, utoipa::openapi::OpenApi) {
         .layer(TraceLayer::new_for_http());
 
     (router, openapi)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::{DATABASE_PROBE_TIMEOUT, REQUEST_TIMEOUT};
+
+    #[test]
+    fn probe_budget_is_strictly_shorter_than_the_request_budget() {
+        // The endpoint promises 200 + UNAVAILABLE when the database stalls. That
+        // promise holds only while the probe's own deadline fires first; if the
+        // router's timeout won, the caller would get 408 and could not tell "the
+        // database is hanging" from "the API is broken".
+        //
+        // Asserted as an invariant rather than by stalling a real database:
+        // there is no pool to stall in a unit test, and a sleep-based test would
+        // buy a slower suite without proving anything this does not.
+        assert!(
+            DATABASE_PROBE_TIMEOUT < REQUEST_TIMEOUT,
+            "probe budget {DATABASE_PROBE_TIMEOUT:?} must be shorter than request timeout {REQUEST_TIMEOUT:?}"
+        );
+    }
 }

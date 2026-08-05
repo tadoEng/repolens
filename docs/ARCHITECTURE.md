@@ -162,13 +162,14 @@ Measured against a real Neon project, not assumed:
 - **SQLx works over Neon's pooled endpoint.** The plan flagged this as an open
   question, since PgBouncer in transaction mode historically broke prepared
   statements. It does not here, and `statement_cache_capacity=0` is not needed.
-- **Neon's default connection string is weaker than it looks.** It carries
-  `sslmode=require`, which encrypts but verifies neither certificate chain nor
-  hostname, and `channel_binding=require`, which sqlx does not implement and
-  silently ignores — visible in its own log as `ignoring unrecognized connect
-  parameter`. Neither protection against an active machine-in-the-middle is
-  actually in force. Use `sslmode=verify-full`, which is confirmed to work
-  against Neon; the server warns at startup when a non-local URL lacks it.
+- **Neon's default connection string does not guarantee hostname verification.**
+  It carries `sslmode=require` and `channel_binding=require`. With `sqlx`'s
+  native roots, `require` may validate the certificate chain like `verify-ca`;
+  only `verify-full` additionally guarantees hostname identity. `sqlx` does not
+  implement the supplied `channel_binding` parameter, so remove it rather than
+  leaving it to imply a protection the client does not provide.
+  `sslmode=verify-full` is confirmed to work against Neon, and the server warns
+  at startup when a non-local URL lacks it.
 - **A suspended compute costs seconds on the first connection.** Neon
   scale-to-zero suspends after idle, and that resume stacks on top of a Cloud
   Run cold start, so the first request after quiet pays both. The progress UI
