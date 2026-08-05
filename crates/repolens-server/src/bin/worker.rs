@@ -1,40 +1,30 @@
 //! Durable worker role.
 //!
-//! **Always run-once.** A Cloud Run Job starts one execution and exits, so
-//! there is no `--once` flag and no argument parser to hold one — which is
-//! precisely why this workspace needs no CLI-parsing dependency. An always-on
-//! polling worker would need `min-instances >= 1`, which bills continuously and
-//! would falsify the free-stack thesis RepoLens exists to test.
+//! **Always run-once.** A Cloud Run Job starts one execution and exits, so there
+//! is no `--once` flag and no argument parser to hold one — which is precisely
+//! why this workspace needs no CLI-parsing dependency. An always-on polling
+//! worker would need `min-instances >= 1`, which bills continuously and would
+//! falsify the free-stack thesis RepoLens exists to test.
 //!
-//! For local iteration set `REPOLENS_WORKER_LOOP=1` to repeat the same
-//! run-once body on an interval. That is a development convenience and is never
-//! set in a deployed environment.
-
-use std::time::Duration;
+//! There is deliberately no loop mode, not even behind an environment variable.
+//! A worker that can be a daemon under some configuration is a worker whose
+//! shutdown, lease-renewal, and failure semantics have to be correct in two
+//! shapes rather than one — and the second shape would be exercised only on a
+//! developer's machine, which is the worst place to discover a lease bug. Local
+//! iteration repeats the process instead of the body:
+//!
+//! ```sh
+//! while cargo run --bin worker; do sleep 5; done
+//! ```
+//!
+//! That runs the exact code path Cloud Run runs, including startup and exit.
 
 use repolens_server::telemetry;
-
-/// Interval between iterations when looping locally.
-const LOCAL_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     telemetry::init();
-
-    let repeat = std::env::var("REPOLENS_WORKER_LOOP")
-        .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
-
-    loop {
-        run_once().await?;
-
-        if !repeat {
-            break;
-        }
-
-        tokio::time::sleep(LOCAL_POLL_INTERVAL).await;
-    }
-
-    Ok(())
+    run_once().await
 }
 
 /// Claims at most one queued analysis, runs it, persists the result, and

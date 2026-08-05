@@ -27,6 +27,6 @@ pub use composition::{
 };
 pub use finding::{Confidence, Evidence, Finding, Severity};
 pub use ids::{AnalysisId, FindingId, SnapshotId};
-pub use repository::{CommitSha, CommitShaError, RepositoryCoordinate};
-pub use reproducibility::ReproducibilityKey;
+pub use repository::{CommitSha, CommitShaError, RepositoryCoordinate, TreeSha};
+pub use reproducibility::{CompositionCounter, EvidenceSource, ReproducibilityKey};
 pub use rule::{AnalyzerRule, RuleId, RuleInput};

@@ -22,7 +22,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import openapiTS, { astToString } from 'openapi-typescript';
 import { describe, expect, test } from 'vitest';
@@ -66,19 +66,54 @@ function normalizeNewlines(source: string): string {
 	return source.replace(/\r\n/g, '\n');
 }
 
+/**
+ * Generates schema source from an OpenAPI document on disk.
+ *
+ * `pathToFileURL` rather than `` new URL(`file://${path}`) ``: the latter is broken on
+ * Windows, where an absolute path is `D:\repo\...` and string-concatenating it yields
+ * `file://D:\repo\...`, which is not a valid file URL. `pathToFileURL` handles the drive
+ * letter and backslash escaping that a template literal cannot.
+ *
+ * Extracted so the fixture test below can exercise this exact code path today, instead of
+ * it lying dormant until the backend first emits `contracts/openapi.json` — at which point
+ * a platform-specific failure would surface as a confusing CI break rather than a bug
+ * caught at the time it was written.
+ */
+async function generateSchemaSource(documentPath: string): Promise<string> {
+	const ast = await openapiTS(pathToFileURL(documentPath));
+	return `${GENERATED_HEADER}${astToString(ast)}`;
+}
+
 const documentExists = existsSync(OPENAPI_DOCUMENT_PATH);
 
 describe('generated API schema', () => {
 	test.runIf(documentExists)(
 		'src/schema.ts is regenerated from the committed OpenAPI document',
 		async () => {
-			const ast = await openapiTS(new URL(`file://${OPENAPI_DOCUMENT_PATH}`));
-			const generated = `${GENERATED_HEADER}${astToString(ast)}`;
+			const generated = await generateSchemaSource(OPENAPI_DOCUMENT_PATH);
 
 			// The snapshot file IS the generated source, so `--update` regenerates in place.
 			await expect(normalizeNewlines(generated)).toMatchFileSnapshot(SCHEMA_PATH);
 		}
 	);
+
+	test('the generator resolves an absolute filesystem path on this platform', async () => {
+		// Guards the branch above, which cannot run until the backend publishes its
+		// document. The fixture is a minimal but real OpenAPI 3.1 document, so this
+		// asserts the whole path: absolute path → file URL → parsed document → emitted
+		// TypeScript. On Windows the previous `file://${path}` form failed here.
+		const fixturePath = fileURLToPath(
+			new URL('./fixtures/minimal-openapi.json', import.meta.url)
+		);
+
+		const generated = await generateSchemaSource(fixturePath);
+
+		expect(generated.startsWith(GENERATED_HEADER)).toBe(true);
+		// The fixture declares GET /probe returning an object with `status`, so the
+		// generated source must mention the path — proving the document was parsed,
+		// not merely opened.
+		expect(generated).toContain('/probe');
+	});
 
 	test.runIf(!documentExists)(
 		'src/schema.ts is still the untouched generated placeholder',

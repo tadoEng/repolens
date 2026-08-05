@@ -8,17 +8,43 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
  * and re-exported onto `process.env` so `$env/static/public` resolves the same value
  * in application code. There is exactly one source of truth for the API origin.
  *
- * Real values come from a git-ignored `.env.local`; nothing is committed. The
- * localhost default exists only so a clean checkout can `pnpm build` without an
- * environment file — a deployed build MUST set `PUBLIC_API_ORIGIN` explicitly.
+ * Real values come from a git-ignored `.env.local`; nothing is committed.
+ *
+ * **This fails closed.** A production build with no `PUBLIC_API_ORIGIN` throws rather
+ * than defaulting, because the value is baked irreversibly into two places at build
+ * time — the CSP `connect-src` allowlist and the client's base URL. A silent localhost
+ * default would produce a deployable artifact whose CSP permits only `localhost:8080`,
+ * so every API call from the deployed site would be blocked by the browser. That failure
+ * surfaces as a blank page in production, far from its cause. Refusing to build is the
+ * cheaper failure by a wide margin.
+ *
+ * Development still defaults, because there the value is right and re-typing it on every
+ * clean checkout buys nothing. CI builds set it explicitly — including to a localhost
+ * value when that is genuinely what is being tested — so the choice is always recorded
+ * rather than inherited.
  */
 const LOCAL_API_ORIGIN = 'http://localhost:8080';
-const apiOrigin = process.env.PUBLIC_API_ORIGIN ?? LOCAL_API_ORIGIN;
 
-if (!process.env.PUBLIC_API_ORIGIN) {
+// `vite build` sets NODE_ENV=production; `vite dev` does not.
+const isProductionBuild = process.env.NODE_ENV === 'production';
+const configuredOrigin = process.env.PUBLIC_API_ORIGIN;
+
+if (!configuredOrigin && isProductionBuild) {
+	throw new Error(
+		'[repolens] PUBLIC_API_ORIGIN is required for a production build.\n' +
+			'It is baked into the CSP connect-src allowlist and the generated API client at ' +
+			'build time, so defaulting it would ship an artifact that cannot talk to its own ' +
+			'API.\n' +
+			`Set it explicitly, e.g. PUBLIC_API_ORIGIN=${LOCAL_API_ORIGIN} pnpm build`
+	);
+}
+
+const apiOrigin = configuredOrigin ?? LOCAL_API_ORIGIN;
+
+if (!configuredOrigin) {
 	console.warn(
-		`[repolens] PUBLIC_API_ORIGIN is not set; falling back to ${LOCAL_API_ORIGIN}. ` +
-			'Deployed builds must set it explicitly — it is baked into the CSP connect-src allowlist.'
+		`[repolens] PUBLIC_API_ORIGIN is not set; using ${LOCAL_API_ORIGIN} for development. ` +
+			'Production builds refuse to start without it.'
 	);
 	process.env.PUBLIC_API_ORIGIN = apiOrigin;
 }

@@ -6,7 +6,17 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
-license = "MIT OR Apache-2.0"
+# All rights reserved, matching `"license": "UNLICENSED"` in package.json and the
+# LICENSE file. The repository is public so the work can be read and reviewed;
+# that is not the same as granting rights to use it, and a public repository with
+# no licence grant defaults to exactly this position anyway.
+#
+# This crate previously declared `MIT OR Apache-2.0` while package.json declared
+# UNLICENSED — two incompatible legal positions in one repository. Aligning on the
+# restrictive one is the reversible direction: opening the licence later is a
+# deliberate act, whereas retracting a grant already published is not.
+license = "LicenseRef-Proprietary"
+publish = false
 repository = "https://github.com/tadoEng/repolens"
 
 # Version policy (plan Part 4): normal compatible requirements, not blanket exact

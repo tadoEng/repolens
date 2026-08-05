@@ -23,32 +23,11 @@ jobs:
     name: Rust workspace
     runs-on: ubuntu-latest
 
-    # Provisioned now so that the integration tests arriving with the durable
-    # worker (issue #7) have a real PostgreSQL to run `sqlx::test` against
-    # rather than a mock. Nothing in the workspace connects to it yet, and no
-    # step requires it to be reachable, so a database problem cannot currently
-    # fail this job for the wrong reason.
-    #
-    # Trust authentication on purpose: the container is ephemeral, reachable
-    # only from this job, and holds no data. That keeps a password-shaped
-    # string out of the workflow entirely. This workflow reads no secrets.
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_DB: repolens_test
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
+    # No PostgreSQL service yet. Nothing in the workspace connects to one, so a
+    # container provisioned "for later" is startup time and a moving part that
+    # buys nothing today — the same reasoning that keeps empty future crates out
+    # of the workspace. It arrives with the first test that needs it (issue #7).
     env:
-      DATABASE_URL: postgres://postgres@localhost:5432/repolens_test
-      DATABASE_DIRECT_URL: postgres://postgres@localhost:5432/repolens_test
       # Compile-time query verification reads the committed .sqlx/ cache instead
       # of the database, so the build cannot depend on a live server.
       SQLX_OFFLINE: "true"
@@ -83,3 +62,90 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --locked
+
+  frontend:
+    name: Frontend workspace
+    runs-on: ubuntu-latest
+
+    env:
+      # Explicit rather than inherited. The production build fails closed without
+      # this, by design — see web/svelte.config.js. CI is testing that the build
+      # works, not what origin it points at, so a localhost value is the honest
+      # choice and setting it here records that decision instead of hiding it
+      # behind a default.
+      PUBLIC_API_ORIGIN: http://localhost:8080
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          # engines.node in package.json is the single source of truth for the
+          # major version; this reads the version file rather than restating it.
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Types
+        run: pnpm -r check
+
+      - name: Lint and format
+        # web's `lint` is `prettier --check . && eslint .`, so formatting is
+        # already enforced here rather than in a second step that could drift.
+        run: pnpm -r lint
+
+      - name: Unit and contract tests
+        # Includes the generated-schema staleness gate: if src/schema.ts drifts
+        # from contracts/openapi.json, this is where it fails.
+        run: pnpm -r test
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Assert the build output is static
+        # adapter-static must not emit a server bundle. If one appears, the app
+        # has silently acquired an SSR dependency and can no longer be hosted on
+        # Cloudflare static assets — the core hosting assumption of the project.
+        run: |
+          set -euo pipefail
+          for forbidden in index.js handler.js server.js manifest.js; do
+            if find web/build -name "$forbidden" -print -quit | grep -q .; then
+              echo "::error::web/build contains $forbidden — output is no longer static"
+              exit 1
+            fi
+          done
+          echo "static output confirmed: $(find web/build -type f | wc -l) files"
+
+      - name: Scan the production bundle for secrets
+        # Acceptance criterion of issue #8. The bundle is what actually ships, so
+        # it is the last place a credential can hide before it reaches a browser.
+        run: |
+          set -euo pipefail
+          if grep -rIlE 'npg_[A-Za-z0-9]|AIzaSy[A-Za-z0-9_-]{30}|postgresql://[^ ]*:[^ ]*@|ghp_[A-Za-z0-9]{20}|gho_[A-Za-z0-9]{20}|BEGIN [A-Z ]*PRIVATE KEY' web/build/; then
+            echo "::error::credential pattern found in production bundle"
+            exit 1
+          fi
+          echo "bundle scan clean"
+
+      - name: Install Playwright browsers
+        run: pnpm --filter @repolens/web exec playwright install --with-deps chromium
+
+      - name: Browser and accessibility tests
+        # Includes the axe WCAG 2.1 AA scans across all three routes at
+        # 360/768/1280px — the accessibility contract is a gate, not a review step.
+        run: pnpm --filter @repolens/web run test:e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7

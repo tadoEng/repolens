@@ -1,0 +1,31 @@
+# Line endings are LF in the repository and LF in every working tree, including
+# Windows.
+#
+# Without this, Git's core.autocrlf converts to CRLF on Windows checkout while
+# Prettier's default `endOfLine: "lf"` expects LF, so `prettier --check` fails on
+# every file for a Windows developer while passing in Ubuntu CI. That produces the
+# worst kind of failure: green remotely, broken locally, and the diff shows nothing
+# because the change is invisible whitespace.
+#
+# `eol=lf` is deliberate rather than plain `text=auto`: the latter still checks out
+# CRLF on Windows. Rust, Node, and every tool in this stack read LF fine on Windows;
+# only Notepad ever needed CRLF.
+* text=auto eol=lf
+
+# Binary files must never be line-ending converted or diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+
+# Generated and lock files: kept in the repository, but collapsed in diffs and
+# excluded from language statistics so they do not drown a review or misreport
+# what this project is written in.
+pnpm-lock.yaml linguist-generated=true -diff
+Cargo.lock linguist-generated=true -diff
+packages/repolens-api-client/src/schema.ts linguist-generated=true

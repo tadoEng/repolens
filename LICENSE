@@ -1,0 +1,24 @@
+Copyright (c) 2026 tadoEng
+
+All rights reserved.
+
+This repository is public so that the work can be read, reviewed, and discussed.
+Publishing source code is not a licence grant. No permission is given to use,
+copy, modify, merge, publish, distribute, sublicense, or sell this software or
+substantial portions of it.
+
+This is the default legal position for a public repository that carries no
+open-source licence; stating it explicitly avoids the ambiguity of leaving it
+unsaid. It is recorded in three places that must agree:
+
+    LICENSE          this file
+    Cargo.toml       license = "LicenseRef-Proprietary"
+    package.json     "license": "UNLICENSED"
+
+If RepoLens is later released under an open-source licence, all three change
+together, and the licence texts are added at that point. Opening a licence is a
+deliberate decision; retracting one already published is not possible, which is
+why the restrictive position is the default here rather than the permissive one.
+
+Third-party dependencies remain under their own licences, which this file does
+not alter.

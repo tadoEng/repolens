@@ -93,6 +93,59 @@ impl From<CommitSha> for String {
     }
 }
 
+/// A full, validated, lowercase Git tree SHA.
+///
+/// Distinct from [`CommitSha`] as a type even though both are 40-character
+/// SHA-1 digests, because they are not interchangeable: two different commits
+/// can share a root tree, and a rule that reads "the tree we analyzed" must not
+/// silently accept a commit identifier instead.
+///
+/// The root tree is part of the reproducibility key because it is what the
+/// collectors actually walked. A commit carries metadata — author, message,
+/// parents — that does not affect any finding, so two commits with an identical
+/// root tree are expected to produce identical evidence.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct TreeSha(String);
+
+impl TreeSha {
+    /// Validates and normalizes a tree SHA to lowercase.
+    pub fn parse(value: &str) -> Result<Self, CommitShaError> {
+        if value.len() != 40 {
+            return Err(CommitShaError::Length(value.len()));
+        }
+        if !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(CommitShaError::NotHexadecimal);
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+
+    /// Borrows the normalized SHA.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TreeSha {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for TreeSha {
+    type Error = CommitShaError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<TreeSha> for String {
+    fn from(value: TreeSha) -> Self {
+        value.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CommitSha, CommitShaError, RepositoryCoordinate};

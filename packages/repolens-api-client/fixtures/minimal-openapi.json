@@ -1,0 +1,42 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RepoLens schema-gate fixture",
+    "version": "0.0.0",
+    "description": "Not the RepoLens API. This is the smallest valid OpenAPI document that still exercises path, operation, response, and component-schema generation, so schema.test.ts can prove the generator resolves an absolute filesystem path on the host platform before contracts/openapi.json exists. Field naming follows the settled convention (snake_case objects, SCREAMING_SNAKE_CASE enum values) so the fixture cannot quietly model a different contract than the real one."
+  },
+  "paths": {
+    "/probe": {
+      "get": {
+        "operationId": "probe",
+        "responses": {
+          "200": {
+            "description": "Probe result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProbeResult" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ProbeResult": {
+        "type": "object",
+        "required": ["status", "build_sha"],
+        "properties": {
+          "status": { "$ref": "#/components/schemas/ProbeStatus" },
+          "build_sha": { "type": "string" },
+          "checked_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "ProbeStatus": {
+        "type": "string",
+        "enum": ["OK", "DEGRADED", "UNAVAILABLE"]
+      }
+    }
+  }
+}
