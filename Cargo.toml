@@ -84,10 +84,17 @@ time = { version = "0.3", features = ["serde"] }
 
 # --- Ingestion stage (issue #4). Added ahead of use so the workspace manifest is
 # --- edited once rather than by two concurrent workstreams.
+# `rustls`, not `rustls-tls`: reqwest renamed the feature in 0.13, and cargo
+# unions features across the workspace, so a wrong name here cannot be
+# subtracted by a member crate.
+#
+# `json` is deliberately absent. Every response body is read through an explicit
+# size cap and parsed from the resulting slice, so `Response::json()` — which
+# reads an unbounded body before deserializing — would be the one path around
+# the byte budget that the ingestion boundary exists to enforce.
 reqwest = { version = "0.13", default-features = false, features = [
-  "rustls-tls",
+  "rustls",
   "http2",
-  "json",
   "stream",
   "gzip",
 ] }
