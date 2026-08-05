@@ -17,12 +17,34 @@
 //!
 //! Line *counting* is not GitHub-specific and does not live here; see
 //! [`repolens_core::composition`].
+//!
+//! # Layout
+//!
+//! This module owns the contract — the domain types and the trait. The parts
+//! that implement it are deliberately separate and only one of them is public:
+//!
+//! * [`GitHubRestClient`] — the `reqwest` implementation and its budgets.
+//! * [`select_paths`] — which files are worth reading, as a pure function of a
+//!   tree, so that two runs of one commit choose the same evidence.
+//! * `payload` — `serde` mirrors of GitHub's JSON, private on purpose. If one
+//!   escaped, a field GitHub renamed would become a change to RepoLens' own
+//!   contract.
+
+pub mod limits;
+
+mod payload;
+mod policy;
+mod rest;
+
+pub use policy::{BlobSelection, FileSelection, SkipReason, SkippedPath, select_paths};
+pub use rest::{GitHubClientConfig, GitHubRestClient};
 
 use std::future::Future;
 use std::path::Path;
 
 use repolens_core::{CommitSha, RepositoryCoordinate};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 /// The REST API version sent as `X-GitHub-Api-Version` on **every** request.
@@ -109,9 +131,28 @@ pub struct BlobContent {
     pub path: String,
     /// Git object name of the blob.
     pub sha: String,
+    /// SHA-256 of [`bytes`](BlobContent::bytes), lowercase hex. See
+    /// [`content_digest`].
+    pub content_digest: String,
     /// Raw bytes. Bounded by the per-blob cap the implementation applies at
     /// fetch time, not by the caller after the fact.
     pub bytes: Vec<u8>,
+}
+
+/// SHA-256 of retrieved bytes, lowercase hex.
+///
+/// Recorded alongside every piece of retrieved evidence so that a finding can be
+/// traced to the exact bytes it was drawn from — the point of an evidence-backed
+/// report is that a reader can check it, and a citation to a path is only a
+/// citation to whatever that path holds today.
+///
+/// Deliberately not the Git blob SHA, which [`BlobContent::sha`] already
+/// carries. That is SHA-1 over a length-prefixed object rather than over the
+/// content, so it answers a different question, and SHA-1 is no longer a digest
+/// anything should be pinned on. Keeping both means a mismatch between them is
+/// itself detectable.
+pub fn content_digest(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// Result of streaming an archive to disk.
@@ -135,12 +176,22 @@ pub enum GitHubSourceError {
     /// A reference did not resolve to a commit.
     #[error("reference `{0}` did not resolve to a commit")]
     ReferenceNotFound(String),
-    /// Rate limit exhausted. `retry_after_seconds` comes from GitHub's own
-    /// headers when present, so back-off is measured rather than guessed.
+    /// Rate limit exhausted. Both fields come from GitHub's own headers when
+    /// present, so back-off is measured rather than guessed.
+    ///
+    /// The message names no URL and no header value, because this error is the
+    /// one most likely to be logged in bulk.
     #[error("GitHub rate limit exhausted")]
     RateLimited {
-        /// Seconds to wait before retrying, if GitHub said.
+        /// Seconds to wait before retrying, if GitHub said. Sent with the
+        /// secondary rate limit; usually absent for the primary one.
         retry_after_seconds: Option<u64>,
+        /// Instant the current window resets, from `x-ratelimit-reset`.
+        ///
+        /// An instant rather than a remaining duration on purpose. Converting
+        /// here would need a clock read at the point of failure, and the result
+        /// would already be stale by the time a queued retry acted on it.
+        reset_at: Option<OffsetDateTime>,
     },
     /// A configured ceiling was hit. Both numbers are recorded so the report
     /// can state the limit and the observed value rather than only failing.
@@ -153,9 +204,68 @@ pub enum GitHubSourceError {
         /// Value that exceeded it.
         observed: u64,
     },
+    /// GitHub answered with a status this boundary does not model. The code is
+    /// carried; the body is not, because an unmodelled status is exactly the
+    /// case where the body is least likely to be something we should repeat.
+    #[error("GitHub answered with an unexpected status: {status}")]
+    UnexpectedStatus {
+        /// HTTP status code.
+        status: u16,
+    },
+    /// A response was not the shape its endpoint promises.
+    ///
+    /// Names the resource, never the body. `serde_json` quotes the input around
+    /// the failure through `Display`, which would copy part of a response into a
+    /// log for precisely the class of failure where the response is unexpected.
+    #[error("GitHub's {resource} response could not be interpreted")]
+    MalformedResponse {
+        /// Which response disappointed: `repository`, `commit`, `tree`, ….
+        resource: &'static str,
+    },
+    /// The configured REST base cannot have a path appended, so no endpoint
+    /// could ever be built from it. Raised once at construction rather than on
+    /// every request.
+    #[error("the configured API base cannot be used as a URL base")]
+    InvalidApiBase,
+    /// Writing retrieved bytes to disk failed.
+    ///
+    /// The path is named by the caller and is not rendered here.
+    #[error("could not {operation}")]
+    Io {
+        /// What was being attempted, as a fixed phrase.
+        operation: &'static str,
+    },
     /// Transport, TLS, or protocol failure.
+    ///
+    /// Carries a category — `timeout`, `connect`, `redirect`, … — never the
+    /// underlying message, which renders the request URL.
     #[error("transport failure: {0}")]
     Transport(String),
+}
+
+impl GitHubSourceError {
+    /// Whether retrying the same request could plausibly succeed later.
+    ///
+    /// The distinction is what separates a worker that backs off from one that
+    /// hammers a closed door: a rate limit and a transport blip pass, while a
+    /// missing repository or an exceeded ceiling will fail identically forever
+    /// and should be recorded rather than retried.
+    ///
+    /// [`UnexpectedStatus`](GitHubSourceError::UnexpectedStatus) is retryable
+    /// only for server-side codes. A `4xx` that reached here was not a rate
+    /// limit and not a `404`, so it is a refusal that waiting cannot improve.
+    pub const fn is_retryable(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } | Self::Transport(_) => true,
+            Self::UnexpectedStatus { status } => *status >= 500,
+            Self::RepositoryNotFound(_)
+            | Self::ReferenceNotFound(_)
+            | Self::LimitExceeded { .. }
+            | Self::MalformedResponse { .. }
+            | Self::InvalidApiBase
+            | Self::Io { .. } => false,
+        }
+    }
 }
 
 /// Everything RepoLens is allowed to ask GitHub for.
@@ -215,10 +325,64 @@ pub trait GitHubRepositorySource {
 
 #[cfg(test)]
 mod tests {
-    use super::GITHUB_REST_API_VERSION;
+    use super::{GITHUB_REST_API_VERSION, GitHubSourceError, content_digest};
 
     /// The implicit default GitHub applies when the header is absent.
     const IMPLICIT_DEFAULT: &str = "2022-11-28";
+
+    #[test]
+    fn identical_content_digests_identically() {
+        // The property the reproducibility contract rests on: the same commit
+        // read twice yields the same evidence identity. If the digest depended
+        // on anything but the bytes, "we analyzed the same thing" would be
+        // unverifiable.
+        let first = content_digest(b"# RepoLens\n");
+        let second = content_digest(b"# RepoLens\n");
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64, "SHA-256 renders as 64 hex characters");
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn a_single_changed_byte_changes_the_digest() {
+        assert_ne!(
+            content_digest(b"# RepoLens\n"),
+            content_digest(b"# RepoLens")
+        );
+    }
+
+    #[test]
+    fn the_empty_file_has_a_digest_rather_than_no_digest() {
+        // An empty file is evidence too — a zero-byte `LICENSE` is a fact about
+        // a repository — so it must be citable like any other.
+        assert_eq!(
+            content_digest(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn only_failures_that_can_pass_are_retryable() {
+        assert!(
+            GitHubSourceError::RateLimited {
+                retry_after_seconds: Some(60),
+                reset_at: None,
+            }
+            .is_retryable()
+        );
+        assert!(GitHubSourceError::UnexpectedStatus { status: 502 }.is_retryable());
+        // Waiting will not create a repository, nor shrink one past a ceiling.
+        assert!(!GitHubSourceError::UnexpectedStatus { status: 451 }.is_retryable());
+        assert!(
+            !GitHubSourceError::LimitExceeded {
+                limit_name: "tree entries",
+                limit: 1,
+                observed: 2,
+            }
+            .is_retryable()
+        );
+    }
 
     #[test]
     fn rest_api_version_is_pinned() {
