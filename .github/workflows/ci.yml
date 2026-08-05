@@ -101,6 +101,14 @@ jobs:
         # already enforced here rather than in a second step that could drift.
         run: pnpm -r lint
 
+      - name: Install Playwright browsers
+        # Must precede the unit tests, not just the e2e ones: web's Vitest suite
+        # runs in *browser mode* rather than jsdom, so it launches Chromium too.
+        # `chromium` and the headless shell are separate downloads, and browser
+        # mode uses the shell — installing only `chromium` fails at run time with
+        # a missing chrome-headless-shell binary.
+        run: pnpm --filter @repolens/web exec playwright install --with-deps chromium chromium-headless-shell
+
       - name: Unit and contract tests
         # Includes the generated-schema staleness gate: if src/schema.ts drifts
         # from contracts/openapi.json, this is where it fails.
@@ -133,9 +141,6 @@ jobs:
             exit 1
           fi
           echo "bundle scan clean"
-
-      - name: Install Playwright browsers
-        run: pnpm --filter @repolens/web exec playwright install --with-deps chromium
 
       - name: Browser and accessibility tests
         # Includes the axe WCAG 2.1 AA scans across all three routes at
