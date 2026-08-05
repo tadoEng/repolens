@@ -18,7 +18,12 @@ static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Before telemetry, so RUST_LOG from .env.local is honoured by the
+    // subscriber this call installs. Reporting is deferred until after, because
+    // anything logged here would precede the subscriber and be discarded.
+    let dotenv = config::load_dotenv();
     telemetry::init();
+    config::report_dotenv(&dotenv);
 
     let url = config::database_direct_url().context("resolving the direct database URL")?;
 

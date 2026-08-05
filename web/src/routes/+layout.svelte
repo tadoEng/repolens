@@ -4,6 +4,7 @@
 	// of a dead link. Enforced by eslint-plugin-svelte's no-navigation-without-resolve.
 	import { resolve } from '$app/paths';
 
+	import SystemProbe from '$lib/components/SystemProbe.svelte';
 	import '$lib/styles/global.css';
 
 	let { children } = $props();
@@ -36,6 +37,12 @@
 			<small
 				>RepoLens · analyzer and ruleset versions appear here once the report contract lands</small
 			>
+			<!--
+				Walking-skeleton diagnostic (issue #11): proves Cloudflare → generated client →
+				Axum → Neon on every route. Scaffolding, to be removed once real report
+				metadata renders here.
+			-->
+			<SystemProbe />
 		</div>
 	</footer>
 </div>

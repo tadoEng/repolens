@@ -34,3 +34,11 @@ Thumbs.db
 #               not a published library, so the lockfile is part of the contract)
 #   .sqlx/      SQLx offline query cache; without it, Docker and CI builds fail
 #               confusingly because `sqlx::query!` cannot reach a live database
+
+# Vendored agent skills, installed by provider CLIs (e.g. `neon init`) and
+# regenerable from skills-lock.json. Duplicated across .agents/ and .claude/,
+# and third-party content that would distort RepoLens's analysis of itself.
+# Scoped to skills/ so a genuine .claude/settings.json can still be committed.
+.agents/
+.claude/skills/
+skills-lock.json
