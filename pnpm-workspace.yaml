@@ -20,9 +20,15 @@ allowBuilds:
   # is wired up (issue #14), so the script has nothing to do here.
   msw: false
 
-# Peer mismatches fail the install (`strict-peer-dependencies=true` in .npmrc). Each
-# exception below is named individually, because a blanket escape hatch would also
-# silence the next mismatch — the one that actually matters.
+# Peer mismatches fail the install. A blanket escape hatch would also silence the
+# next mismatch — the one that actually matters — so each exception below is named
+# individually and has to say which package and which version it forgives.
+#
+# Lives here rather than in .npmrc because npm reads .npmrc too and warns on every
+# invocation that `strict-peer-dependencies` is an unknown config; pnpm 11 moved
+# its settings here regardless.
+strictPeerDependencies: true
+
 peerDependencyRules:
   allowedVersions:
     # openapi-typescript 7.13.0 declares a peer of typescript@^5 while the workspace
