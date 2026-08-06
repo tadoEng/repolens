@@ -304,7 +304,24 @@ test('the evidence appendix lists paths openly, without expanding anything', asy
 	expect(screen.container.querySelector('details')).toBeNull();
 	expect(text).toContain('Cargo.toml');
 	expect(text).toContain('docs/');
-	expect(text).toContain('sha256:6b8f9e2');
+
+	// Read from the fixture rather than hardcoded. A literal here duplicates the
+	// contract, and duplicated contract data is what breaks when the contract
+	// legitimately changes — as it did when ContentDigest took ownership of the
+	// digest format.
+	// Annotated rather than narrowed: `satisfies` preserves each fixture entry's
+	// literal type, so the evidence arrays are heterogeneous and neither flatMap
+	// nor an `in` check yields something with a usable `digest`.
+	const digest = (REPORT.findings as readonly { evidence: readonly { digest?: string }[] }[])
+		.flatMap((finding) => finding.evidence)
+		.find((evidence) => typeof evidence.digest === 'string')?.digest;
+	expect(digest, 'the fixture must carry at least one digest to assert on').toBeTruthy();
+
+	// The appendix truncates for display — a 64-character digest in a table cell
+	// is unreadable and pushes every other column off screen. Asserting a prefix
+	// of the fixture value still proves the rendered digest came from the
+	// contract rather than from a literal in this file.
+	expect(text).toContain(digest!.slice(0, 'sha256:'.length + 7));
 
 	// And it links back to the finding that drew the conclusion.
 	const backlink = screen.container.querySelector('a[href^="#finding-"]');
