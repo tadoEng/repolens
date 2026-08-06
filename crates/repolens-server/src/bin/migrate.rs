@@ -18,6 +18,11 @@ static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // First, before anything that can panic. The default panic hook prints the
+    // payload to stderr *before* unwinding, so a panic while parsing a `.env`
+    // line would copy that line into the log. See `telemetry::install_panic_hook`.
+    telemetry::install_panic_hook();
+
     // Before telemetry, so RUST_LOG from .env.local is honoured by the
     // subscriber this call installs. Reporting is deferred until after, because
     // anything logged here would precede the subscriber and be discarded.

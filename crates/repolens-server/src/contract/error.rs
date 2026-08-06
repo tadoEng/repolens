@@ -49,6 +49,13 @@ pub enum ErrorCode {
     /// and check a repository that was never the problem, and the UI would
     /// offer to correct a URL that is already right.
     AnalysisNotFound,
+    /// The analysis exists, but its report is not ready.
+    ///
+    /// Not [`AnalysisNotFound`](Self::AnalysisNotFound): the identifier is
+    /// correct and the work is still running or has failed. Answering "no such
+    /// analysis" here is false, and it tells a client to stop polling something
+    /// that may be seconds from finishing.
+    ReportNotAvailable,
     /// The request itself could not be interpreted: a body that is not valid
     /// JSON, a missing or wrong `Content-Type`, or a path parameter that is not
     /// the type the route declares.
@@ -70,10 +77,14 @@ pub enum ErrorCode {
     RequestTimedOut,
     /// An unhandled fault in this service.
     ///
-    /// The message is deliberately fixed and uninformative to the caller: a
-    /// panic payload can carry internal paths, query fragments, or retrieved
-    /// repository content, none of which may cross into a browser. The detail
-    /// goes to the log instead.
+    /// The message is deliberately fixed and uninformative: a panic payload can
+    /// carry internal paths, query fragments, or retrieved repository content.
+    ///
+    /// The detail does **not** go to the log either. `telemetry::install_panic_hook`
+    /// replaces the process-wide hook so the payload is never written, because
+    /// the default hook prints it to stderr before unwinding even begins — a
+    /// disclosure that catching the unwind cannot undo. What is recorded is the
+    /// panic's source location, which is what makes it actionable.
     InternalError,
 }
 
@@ -83,7 +94,7 @@ impl ErrorCode {
     /// Hand-maintained but *not* hand-trusted: `all_variants_are_listed` fails
     /// if this drifts from the enum. Without it, a test that iterates "all
     /// codes" would quietly iterate only the ones somebody remembered.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::InvalidRepositoryUrl,
         Self::RepositoryNotFound,
         Self::RepositoryInaccessible,
@@ -93,6 +104,7 @@ impl ErrorCode {
         Self::WorkerFailedRetriable,
         Self::AnalyzerFailedPermanent,
         Self::AnalysisNotFound,
+        Self::ReportNotAvailable,
         Self::MalformedRequest,
         Self::RequestTooLarge,
         Self::RequestTimedOut,
@@ -243,6 +255,7 @@ mod tests {
                 | ErrorCode::WorkerFailedRetriable
                 | ErrorCode::AnalyzerFailedPermanent
                 | ErrorCode::AnalysisNotFound
+                | ErrorCode::ReportNotAvailable
                 | ErrorCode::MalformedRequest
                 | ErrorCode::RequestTooLarge
                 | ErrorCode::RequestTimedOut
