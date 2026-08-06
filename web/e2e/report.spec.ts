@@ -116,6 +116,46 @@ test.describe('a completed report', () => {
 		expect(requests().length).toBeGreaterThan(0);
 	});
 
+	test('the role share bar renders with real width under the production CSP', async ({ page }) => {
+		await page.goto(REPORT_URL);
+		await expect(page.getByRole('heading', { name: 'Composition' })).toBeVisible();
+
+		/*
+		 * The failure this catches is production-only. A template-authored
+		 * `style="--proportion: …"` is stripped by `style-src 'self'` with no
+		 * `style-src-attr`, so every bar renders at zero width while passing every
+		 * component test. Measuring the ::before box is the only assertion that can tell
+		 * the difference.
+		 */
+		const measured = await page
+			.locator('.composition__share')
+			.first()
+			.evaluate((node) => ({
+				proportion: getComputedStyle(node).getPropertyValue('--proportion').trim(),
+				width: Number.parseFloat(getComputedStyle(node, '::before').inlineSize),
+				text: node.textContent?.trim() ?? ''
+			}));
+
+		expect(Number(measured.proportion)).toBeGreaterThan(0);
+		expect(measured.width).toBeGreaterThan(0);
+		// The percentage survives beside the bar rather than being sized by it.
+		expect(measured.text).toMatch(/%/);
+	});
+
+	test('the role share bar degrades rather than breaks in forced colours', async ({ page }) => {
+		// Windows High Contrast strips background colours wholesale, so the bar vanishes.
+		// The percentage has to remain, which is what makes dropping the bar a degradation
+		// rather than a loss of information.
+		await page.emulateMedia({ forcedColors: 'active' });
+		await page.goto(REPORT_URL);
+		await expect(page.getByRole('heading', { name: 'Composition' })).toBeVisible();
+
+		const cell = page.locator('.composition__share').first();
+		const display = await cell.evaluate((node) => getComputedStyle(node, '::before').display);
+		expect(display).toBe('none');
+		await expect(cell).toContainText('%');
+	});
+
 	test('composition draws exactly two bars, and names the role of every large file', async ({
 		page
 	}) => {
@@ -124,8 +164,9 @@ test.describe('a completed report', () => {
 
 		const composition = page.locator('section[aria-labelledby="composition"]');
 
-		// "Two charts, three tables" is meant literally. Asserted against the rendered
-		// artifact rather than the component, because this is where the CSP applies.
+		// Exactly two *comparative* bar views. Asserted against the rendered artifact
+		// rather than the component, because this is where the CSP applies. The role
+		// table's embedded share bar is a different thing and is checked below.
 		await expect(composition.locator('table.metric-table--bars')).toHaveCount(2);
 
 		// Production / test / generated, from `LineCountSummary.roles`.

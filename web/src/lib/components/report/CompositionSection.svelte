@@ -37,6 +37,7 @@
 	 * Same discipline as having no universal score. A footnote is where a caveat goes to be
 	 * skipped, and LOC is the easiest number in this product to mistake for a verdict.
 	 */
+	import { proportionBar } from './proportion';
 	import Disclosure from '$lib/components/primitives/Disclosure.svelte';
 	import ScrollRegion from '$lib/components/primitives/ScrollRegion.svelte';
 	import StatusChip from '$lib/components/primitives/StatusChip.svelte';
@@ -149,8 +150,17 @@
 	</ScrollRegion>
 
 	<!--
-		Production / test / generated. A table with a share column and no bar: the acceptance
-		criterion is two bar views, and the two comparative ones have them.
+		Production / test / generated, with one share bar embedded in the table.
+
+		This is not a third chart. The two *comparative* views — by language and by area —
+		exist to rank items against each other, and they are the only ones a reader scans for
+		"which is biggest". This bar answers a different question about a single row: what
+		proportion of the repository this role accounts for. It reads along the row it
+		describes rather than as a figure in its own right.
+
+		The percentage stays as text beside it. The bar is the fast read; the number is the
+		one a reader can quote, and a sub-1% role has to remain legible when its bar is a
+		sliver.
 	-->
 	{#if roles.length === 0}
 		<p class="composition__lead">
@@ -182,7 +192,12 @@
 							<th scope="row" data-role={role.raw}>{role.label}</th>
 							<td class="composition__number">{integer(row.files)}</td>
 							<td class="composition__number">{integer(row.codeLines)}</td>
-							<td class="composition__number">{percent(row.proportion)}</td>
+							<td
+								class="composition__number composition__share"
+								{@attach proportionBar(row.proportion)}
+							>
+								<span class="composition__share-value">{percent(row.proportion)}</span>
+							</td>
 						</tr>
 					{/each}
 				</tbody>
@@ -414,6 +429,47 @@
 		padding-inline-start: var(--space-6);
 		font-size: var(--font-size-sm);
 		color: var(--text-secondary);
+	}
+
+	/*
+	 * The embedded share bar. Same mechanism as MetricTable: a ::before background
+	 * layer sized by --proportion, which `proportionBar` sets through CSSOM because
+	 * the CSP forbids an inline style attribute and every bar would otherwise render
+	 * at zero width in production only.
+	 *
+	 * The bar is a background; it never sizes the text. A role at 0.4% still shows a
+	 * fully legible percentage beside a sliver.
+	 */
+	.composition__share {
+		position: relative;
+		isolation: isolate;
+	}
+
+	.composition__share::before {
+		content: '';
+		position: absolute;
+		inset-block: var(--space-1);
+		inset-inline-end: 0;
+		inline-size: calc(var(--proportion, 0) * 100%);
+		background-color: var(--surface-2);
+		border-radius: var(--radius-sm);
+		z-index: -1;
+	}
+
+	.composition__share-value {
+		position: relative;
+		z-index: 1;
+	}
+
+	/*
+	 * Windows High Contrast strips background colours, so the bar disappears. The
+	 * percentage is still there, which is why dropping the bar degrades rather than
+	 * breaks.
+	 */
+	@media (forced-colors: active) {
+		.composition__share::before {
+			display: none;
+		}
 	}
 
 	.composition__number {

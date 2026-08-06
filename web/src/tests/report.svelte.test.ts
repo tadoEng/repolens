@@ -353,6 +353,63 @@ test('the composition disclaimer is in-section, not a footnote', async () => {
 	expect(first.textContent).toContain('not productivity or code quality');
 });
 
+test('the role table carries an embedded share bar beside the percentage', async () => {
+	const screen = await render(CompositionSection, {
+		props: { composition: COMPOSITION, limitations: REPORT.limitations }
+	});
+
+	// One bar cell per role row, and it is not one of the comparative charts.
+	const shares = [...screen.container.querySelectorAll('.composition__share')];
+	expect(shares.length).toBeGreaterThan(0);
+
+	for (const cell of shares) {
+		// The percentage stays as text: the bar is the fast read, the number is what a
+		// reader can quote, and a sub-1% role must stay legible when its bar is a sliver.
+		expect(cell.querySelector('.composition__share-value')?.textContent).toMatch(/%/);
+
+		/*
+		 * The custom property is set through CSSOM by `proportionBar`, not written into the
+		 * markup. `setProperty` does produce a `style` attribute — CSP's `style-src-attr`
+		 * governs attributes in *parsed HTML*, not ones assigned afterwards, which is
+		 * exactly why this mechanism survives the production policy where a template-authored
+		 * `style="--proportion: …"` would be stripped and every bar would render at zero
+		 * width.
+		 *
+		 * That distinction cannot be observed from a component test, so it is proven where it
+		 * is real: `e2e/report.spec.ts` measures the rendered ::before width under the
+		 * deployed CSP. Here the assertion is only that a usable proportion arrives.
+		 */
+		const proportion = Number(getComputedStyle(cell).getPropertyValue('--proportion'));
+		expect(Number.isFinite(proportion)).toBe(true);
+		expect(proportion).toBeGreaterThanOrEqual(0);
+		expect(proportion).toBeLessThanOrEqual(1);
+	}
+});
+
+test('a sub-one-percent role keeps a readable percentage', async () => {
+	// The case a bar-sized-box implementation clips: a role at a fraction of a percent
+	// still has to state its number legibly.
+	const tiny = {
+		...COMPOSITION,
+		code_lines: 100_000,
+		roles: [
+			{ role: 'PRODUCTION' as const, files: 1, code_lines: 99_600 },
+			{ role: 'GENERATED' as const, files: 1, code_lines: 400 }
+		]
+	};
+
+	const screen = await render(CompositionSection, {
+		props: { composition: tiny, limitations: REPORT.limitations }
+	});
+
+	const values = [...screen.container.querySelectorAll('.composition__share-value')].map(
+		(node) => node.textContent?.trim() ?? ''
+	);
+	expect(values.some((text) => /%/.test(text))).toBe(true);
+	// Rendered, not collapsed to an empty cell by a zero-width bar.
+	for (const text of values) expect(text.length).toBeGreaterThan(0);
+});
+
 test('exactly two views draw bars, and they are the two comparative ones', async () => {
 	const screen = await render(CompositionSection, {
 		props: { composition: COMPOSITION, limitations: REPORT.limitations }
@@ -366,10 +423,12 @@ test('exactly two views draw bars, and they are the two comparative ones', async
 	const withBars = tables.filter((table) => table.classList.contains('metric-table--bars'));
 
 	/*
-	 * "Two charts, three tables" is meant literally, and an earlier head drew three. Bars
-	 * are earned by comparison across items, not by a value having a denominator: a single
-	 * composition of a known whole is stated exactly by a share column, and a bar only
-	 * approximates it.
+	 * Exactly two *comparative* bar views, meant literally. Comparative bars rank items
+	 * against each other and are what a reader scans for "which is biggest"; an earlier
+	 * head drew three of them.
+	 *
+	 * The role table's embedded share bar is deliberately not one of these — it answers a
+	 * different question about a single row, and is asserted separately below.
 	 */
 	expect(withBars).toHaveLength(2);
 	expect(withBars.map((table) => table.querySelector('caption')?.textContent?.trim())).toEqual([
