@@ -32,6 +32,20 @@
  * resolve against the contract's scope and then the repository root; Markdown
  * links resolve against the file's own directory, as Markdown requires.
  *
+ * ## What this cannot catch
+ *
+ * A reference whose *first segment* does not exist is classified as "not a
+ * path" rather than "stale path", because at that point it is indistinguishable
+ * from `sqlx::migrate!` or `@repolens/api-client`. So documenting a directory
+ * that was never created — `.sqlx/` was the real case — passes silently.
+ *
+ * More generally: this proves that references resolve, not that the sentences
+ * around them are true. `crates/repolens-server/AGENTS.md` once described a
+ * committed offline cache, a regeneration command, and a CI variable that
+ * depended on it; every token in that paragraph resolved, and the paragraph was
+ * wrong. A human reviewer caught it. The guard complements review; it does not
+ * replace it.
+ *
  * Usage:
  *
  *     node scripts/check-agent-contracts.mjs [repository-root]
@@ -75,8 +89,7 @@ const GENERATED_SEGMENTS = new Set([
 	'target',
 	'build',
 	'dist',
-	'.svelte-kit',
-	'.sqlx'
+	'.svelte-kit'
 ]);
 
 const ABSOLUTE_PATH_PATTERNS = [

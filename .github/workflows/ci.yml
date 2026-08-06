@@ -52,11 +52,6 @@ jobs:
     # container provisioned "for later" is startup time and a moving part that
     # buys nothing today — the same reasoning that keeps empty future crates out
     # of the workspace. It arrives with the first test that needs it (issue #7).
-    env:
-      # Compile-time query verification reads the committed .sqlx/ cache instead
-      # of the database, so the build cannot depend on a live server.
-      SQLX_OFFLINE: "true"
-
     steps:
       - name: Check out
         uses: actions/checkout@v4

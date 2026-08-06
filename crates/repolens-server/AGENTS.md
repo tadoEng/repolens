@@ -72,11 +72,17 @@ cargo run --bin server
 cargo run --bin migrate
 ```
 
-After changing a `sqlx::query!` call, refresh the committed offline cache with
-`cargo sqlx prepare --workspace` or the container and CI builds fail with no
-live database to verify against. Migrations are authored with
-`sqlx migrate add <name>`, are append-only once deployed, and run over the
-direct endpoint.
+Queries are written with runtime `sqlx::query`, **not** the `query!` macro, so
+there is no `.sqlx/` offline cache and nothing to regenerate. Compile-time
+verification needs either a live database at build time or a committed cache
+that every query change must refresh — friction this query set has not earned,
+and a stale cache fails CI in a way that reads as a broken build rather than a
+missed step. The trade is deliberate and is one of the stack findings #10
+reports on; `cargo sqlx prepare --workspace` is what would generate the cache if
+the query set ever earns it.
+
+Migrations are authored with `sqlx migrate add <name>`, are append-only once
+deployed, and run over the direct endpoint via `cargo run --bin migrate`.
 
 There are no PostgreSQL integration tests yet, and CI provisions no database.
 The first ones must fail loudly when `DATABASE_URL` is unset rather than skip

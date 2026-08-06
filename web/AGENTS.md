@@ -23,10 +23,24 @@ production build.
 
 ## Data comes from the generated client, only
 
-Import DTOs and operations from `@repolens/api-client`. Do not hand-write a copy
-of a Rust type, do not invent a response literal in a component or a test, and
-do not `fetch` the API directly. A hand-written shape compiles happily against
-nothing and is discovered wrong by a user.
+Import DTOs and operations from `@repolens/api-client`. Never hand-write a copy
+of a Rust type and never invent a response literal in a component or a test — a
+hand-written shape compiles happily against nothing and is discovered wrong by a
+user.
+
+Transport, in order of preference:
+
+1. **Use the generated operation** whenever the OpenAPI document publishes one.
+2. **Components never perform transport.** A component that reaches the network
+   is a component that cannot be rendered from a fixture.
+3. **A single GET-only adapter is permitted while an operation is absent.** The
+   contract is fixed ahead of the routes that serve it (#14 owns the shapes, #6
+   the endpoints), so a provisional read path exists during that gap. It stays
+   centralized in `$lib/api/`, stays read-only, and disappears as each operation
+   is published. Shapes are still imported — only the URL is provisional.
+
+A mutation is never provisional. Starting work is authenticated (#13), and a
+hand-written POST would be the abuse surface that gate exists to close.
 
 Fixtures for tests come from `@repolens/msw`, which is driven by the same
 executable fixtures the backend generates.
