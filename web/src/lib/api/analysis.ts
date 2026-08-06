@@ -1,52 +1,41 @@
 /**
  * Transport for the analysis and report resources.
  *
- * ---------------------------------------------------------------------------------------
- * READ THIS BEFORE CHANGING IT — the paths below are the one thing here that is not
- * generated.
- * ---------------------------------------------------------------------------------------
+ * Both reads go through the generated client. `api.GET` is typed against the OpenAPI
+ * document's `paths`, so the URL, the name of the path parameter, and the response shape all
+ * come from the contract: a route the API does not publish does not compile, and an id
+ * reaches the wire through the client's own path serializer rather than through a template
+ * literal written here. Nothing in this file is hand-written for a server change to drift
+ * away from.
  *
- * Issue #14 fixed the `analysis-v1` *contract*; issue #6 owns the *routes that serve it*.
- * The OpenAPI document therefore registers `Analysis`, `Report` and friends as schemas but
- * declares no paths for them, so `paths` in the generated client contains only the probe
- * and liveness operations — `api.GET('/api/v1/analyses/{id}')` does not type-check, because
- * that operation does not exist yet.
+ * (Something was, until issue #6 landed the endpoints: two path builders and a raw `fetch`,
+ * kept deliberately narrow while the contract existed and the routes serving it did not.
+ * `paths` now carries `/api/v1/analyses/{analysis_id}` and its `/report`, so they are gone.)
  *
- * What this module does and does not invent is the whole point:
+ * What this module still owns is the *outcome*. `openapi-fetch` reports a request three
+ * different ways — a parsed body, an `error` beside a non-OK `response`, and a thrown
+ * exception when nothing answered at all — and `Fetched<T>` is the single union every caller
+ * reads instead of rediscovering that split at each call site.
  *
- *   - **Every shape is imported.** `Analysis`, `Report` and `ApiError` come from
- *     `@repolens/api-client`. Not one field is re-declared here, so a change to the Rust
- *     DTOs breaks this file and everything downstream of it at compile time.
- *   - **Only the paths are hand-written**, and they are the same two paths
- *     `@repolens/msw`'s `analysis-handlers.ts` intercepts. That is deliberate: the mock and
- *     the client have to agree, and the cheapest way to guarantee it is a test that asserts
- *     these builders against the handler paths (`src/tests/analysis-api.svelte.test.ts`).
- *   - **Everything here is a `GET`, and that is a boundary rather than a coincidence.**
+ * ## Why there is no retry, and no create
  *
- * ## Why there is no retry request
+ * Reads only, and that is a boundary rather than an omission. Both operations here are
+ * idempotent and anonymous by design — the unguessable analysis id *is* the capability —
+ * which is what lets a progress page work for someone who has not signed in. Starting or
+ * retrying an analysis is none of those things. It **starts work**: it is an authenticated
+ * mutation on the paid path, it needs the Firebase bearer credential that issue #13 owns,
+ * and it needs declared idempotency semantics.
  *
- * There was one, and it is gone. A provisional path is defensible for a read: it is
- * idempotent, it is anonymous by design — the unguessable analysis ID *is* the capability —
- * and it is pinned to a matching MSW handler, so a drifting URL fails a test rather than a
- * deployment. None of that transfers to `POST …/retry`. That request **starts work**: it is
- * an authenticated mutation on the paid path, and hand-writing it here would have meant
- * inventing four things the contract does not yet carry — the operation, its request and
- * error schemas, the Firebase bearer credential (#13), and its idempotency semantics.
- *
- * A retry sent without those is not a smaller version of the real feature. It is a request
- * whose behaviour on a double-click, on a replay, or against a server that has already
- * requeued the work is undefined, and the failure mode is duplicate paid analyses rather
- * than an error message. So the affordance is withheld, visibly and with the reason stated
- * on screen (`RetryNotice.svelte`) rather than silently dropped.
- *
- * When #6 lands the endpoints, the regenerated `paths` makes the reads callable and each
- * function below collapses to a single `api.GET(...)`; retry arrives at the same time as
- * its generated, authenticated operation, not before. The exported types and the outcome
- * union do not change, so no component is touched.
+ * `POST /api/v1/analyses` now exists in the generated `paths`, and that changes nothing
+ * here. A create sent without those is not a smaller version of the real feature; it is a
+ * request whose behaviour on a double-click, on a replay, or against a server that has
+ * already queued the work is undefined, and whose failure mode is duplicate paid analyses
+ * rather than an error message. So the affordance stays withheld, visibly and with the
+ * reason stated on screen (`RetryNotice.svelte`), until it can arrive with its credential.
  */
 
-import { PUBLIC_API_ORIGIN } from '$env/static/public';
-import { resolveApiOrigin, type Analysis, type ApiError, type Report } from '@repolens/api-client';
+import { api } from '$lib/api/client';
+import type { Analysis, ApiError, Report } from '@repolens/api-client';
 
 export type { Analysis, ApiError, Report };
 
@@ -65,36 +54,15 @@ export type Fetched<T> =
 	/** The request never reached a server: DNS, CORS, offline, or a CSP violation. */
 	| { kind: 'unreachable' };
 
-const ORIGIN = resolveApiOrigin(PUBLIC_API_ORIGIN);
-
-/** `GET` this for one analysis's progress. Provisional — see the banner above. */
-export function analysisPath(analysisId: string): string {
-	return `/api/v1/analyses/${encodeURIComponent(analysisId)}`;
-}
-
-/**
- * `GET` this for one completed report.
- *
- * Nested under the analysis rather than a top-level `/reports/{id}`: a report is identified
- * by the analysis that produced it, and there is no second identifier for it.
- */
-export function reportPath(analysisId: string): string {
-	return `${analysisPath(analysisId)}/report`;
-}
-
-/** Absolute URL for a path, against the single configured API origin. */
-export function apiUrl(path: string): string {
-	return `${ORIGIN}${path}`;
-}
-
 /**
  * Recognise an `ApiError` body without trusting it.
  *
  * A response body is untyped data no matter what the contract says, and this one arrives on
  * the failure path — precisely where a server is most likely to answer with a proxy's HTML
- * error page instead. So the shape is checked at runtime and anything else becomes `null`,
- * which the UI renders as "the server did not explain" rather than crashing on
- * `error.code.toUpperCase()`.
+ * error page instead. The generated types describe what the *API* promises to send, not what
+ * a load balancer between it and the browser actually sent, so this stays a runtime check
+ * rather than a cast: the shape is verified and anything else becomes `null`, which the UI
+ * renders as "the server did not explain" rather than crashing on `error.code.toUpperCase()`.
  *
  * `code` is not validated against the enum here on purpose: an unrecognised code is data the
  * UI must still display, and rejecting it would be the silent drop the contract forbids.
@@ -113,44 +81,87 @@ function asApiError(body: unknown): ApiError | null {
 }
 
 /**
- * One `GET`.
+ * What `openapi-fetch` resolves with, narrowed to the three fields this module reads.
  *
- * The method is fixed here rather than passed in. A `method` parameter is a one-line change
- * away from a mutation, and the whole point of this module's boundary is that a mutation
- * has to arrive through a generated, authenticated operation instead.
+ * Structural rather than the exported `FetchResponse<…>` generic, which would have to be
+ * threaded an operation type to be written down. Every call site is still checked against
+ * the real result — an operation whose success body is not `T` fails to compile here.
  */
-async function request<T>(path: string): Promise<Fetched<T>> {
-	let response: Response;
+interface ApiResult<T> {
+	/** Absent when the response carried no body, `null` when the body was literally `null`. */
+	data?: T | null;
+	/** The failure body, parsed when it was JSON and the raw text when it was not. */
+	error?: unknown;
+	response: Response;
+}
+
+/**
+ * Turn one client call into one outcome.
+ *
+ * `response.ok` decides, never the truthiness of `error`: `openapi-fetch` leaves `error` as
+ * the raw text when a failure body is not JSON, so an empty 404 arrives as `''` and an HTML
+ * error page as a string — both falsy or truthy for reasons that have nothing to do with
+ * whether the request succeeded.
+ */
+async function fetched<T>(call: Promise<ApiResult<T>>): Promise<Fetched<T>> {
+	let result: ApiResult<T>;
+
 	try {
-		response = await fetch(apiUrl(path), {
-			method: 'GET',
-			headers: { accept: 'application/json' }
-		});
+		result = await call;
 	} catch {
+		/*
+		 * A transport failure is *thrown* by `openapi-fetch` rather than returned as `error`:
+		 * there is no response, so there is no status to report and nothing to parse. This is
+		 * the branch that keeps a CORS or CSP failure from being rendered as "not found".
+		 *
+		 * One known imprecision, recorded rather than left to be discovered: a **2xx** whose
+		 * body is not valid JSON also lands here, because `openapi-fetch` throws inside its
+		 * own parse step and hands back no response to read a status from. That reports
+		 * `unreachable` for a server that demonstrably answered — the same conflation this
+		 * union exists to prevent, in the opposite direction. It is accepted only because
+		 * this API sends JSON on every path, and because the realistic case of a proxy
+		 * substituting an HTML error page carries a non-2xx status and so still lands in
+		 * `rejected` with its status intact. Recovering the status would mean shadowing
+		 * `fetch` per request to buffer the body ahead of the client — more machinery in the
+		 * transport than the case has earned. Revisit if it ever fires in practice.
+		 */
 		return { kind: 'unreachable' };
 	}
 
-	const body: unknown = await response.json().catch(() => null);
+	const { data, response } = result;
 
 	if (!response.ok) {
-		return { kind: 'rejected', status: response.status, error: asApiError(body) };
+		return { kind: 'rejected', status: response.status, error: asApiError(result.error) };
 	}
 
-	if (body === null || typeof body !== 'object') {
-		// A 200 with an unusable body is a server fault, not a missing resource, and saying
-		// so with the status is more useful than pretending the resource is absent.
+	if (typeof data !== 'object' || data === null) {
+		// A success status with no usable body is a server fault, not a missing resource, and
+		// saying so with the status is more useful than pretending the resource is absent.
+		// Catches all three ways that happens: no body at all, a literal `null`, and a scalar
+		// where the contract promises an object.
 		return { kind: 'rejected', status: response.status, error: null };
 	}
 
-	return { kind: 'ok', value: body as T };
+	return { kind: 'ok', value: data };
 }
 
 /** Current progress for one analysis. Readable anonymously: the ID is the capability. */
 export function fetchAnalysis(analysisId: string): Promise<Fetched<Analysis>> {
-	return request<Analysis>(analysisPath(analysisId));
+	return fetched<Analysis>(
+		api.GET('/api/v1/analyses/{analysis_id}', { params: { path: { analysis_id: analysisId } } })
+	);
 }
 
-/** The finished report for one analysis. */
+/**
+ * The finished report for one analysis.
+ *
+ * Nested under the analysis rather than a top-level `/reports/{id}`: a report is identified
+ * by the analysis that produced it, and there is no second identifier for it.
+ */
 export function fetchReport(analysisId: string): Promise<Fetched<Report>> {
-	return request<Report>(reportPath(analysisId));
+	return fetched<Report>(
+		api.GET('/api/v1/analyses/{analysis_id}/report', {
+			params: { path: { analysis_id: analysisId } }
+		})
+	);
 }
