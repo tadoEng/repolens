@@ -8,6 +8,14 @@ by accident:
 
 - **Determinism.** The same inputs must produce the same report, and when they
   do not, the report must say which input changed.
+
+  Bounded precisely, because the unbounded version is false: two runs receive
+  different `analysis_id`s and different `completed_at` timestamps, so complete
+  wire reports are never byte-identical. What must not vary is everything
+  derived from the reproducibility key, which `Report::analytical_payload`
+  defines by removing exactly those two execution-metadata fields. The claim
+  lives in code rather than in this sentence, so it cannot quietly outgrow what
+  holds.
 - **Honesty about limits.** "We could not see everything" has to be
   representable and visible. A truncated tree or an abandoned line count is a
   result, not an error to be swallowed.
@@ -307,14 +315,33 @@ base-image digest.
 The plan's rule — no abstraction before real code requires it — applies to this
 document too.
 
-- **No analysis or report endpoints.** The wire contract itself is settled
-  (issue #14): the DTOs live in `crates/repolens-server/src/contract` and their
-  schemas are registered on the OpenAPI document directly rather than collected
-  from paths, so the generated client and the executable fixtures exist before
-  any route does. Serving them is issue #6. Types in `repolens-core` marked
-  **PROVISIONAL** still express a boundary rather than a wire format — the wire
-  format is owned by `contracts/`, and a `serde` derive in the domain crate
-  promises nothing to a client.
+- **No durable execution.** The analysis and report endpoints now exist —
+  `POST /api/v1/analyses`, `GET /api/v1/analyses/{analysis_id}`, and
+  `GET /api/v1/analyses/{analysis_id}/report` — and the seed ruleset runs
+  against a real repository at an exact commit. **What does not exist is the
+  worker claiming that work.** The create handler writes the row and then runs
+  the pipeline on a `tokio::spawn`ed task inside the API process, which
+  contradicts the run-once worker described above and the rule that an HTTP
+  request never performs analysis.
+
+  Stated plainly because it is the kind of gap that is discovered rather than
+  read: **an analysis dies with the process.** A deploy or a revision rollout
+  mid-run leaves a row in `ANALYZING` that nothing will ever move — there is no
+  lease to expire and no recovery to reclaim it. The `worker` binary compiles
+  and does nothing. Issue #7 replaces the spawn with a PostgreSQL claim
+  (`FOR UPDATE SKIP LOCKED`, explicit leases, abandoned-lease recovery, bounded
+  retries, idempotent effects), and until it lands the three-role split above is
+  the design rather than a description of `master`.
+
+  Types in `repolens-core` marked **PROVISIONAL** still express a boundary
+  rather than a wire format — the wire format is owned by `contracts/`, and a
+  `serde` derive in the domain crate promises nothing to a client.
+- **No idempotent reuse or evidence cache.** Every equivalent `POST` mints a
+  fresh analysis id, a fresh row, and a fresh GitHub traversal. There is no
+  reuse of an existing analysis for the same commit, no immutable-evidence
+  cache, no eviction policy, and no hit/miss observability, so an unchanged
+  repeat costs the same request budget as the first run. Issue #6 stays open for
+  that work, which lands with #7 rather than here.
 - **No deployed verification.** `/api/v1/system/probe` and its database
   reporting now exist and are confirmed against a real Neon project, but only
   from a local process. `wrangler.jsonc` declares the assets-only Cloudflare
@@ -324,8 +351,12 @@ document too.
   until something is actually deployed. `vite preview` is not Cloudflare and
   cannot stand in for it.
 - **No CORS by default.** A layer is applied only when `CORS_ALLOWED_ORIGIN`
-  names one exact origin. It is never a wildcard: that would need revisiting the
-  moment an endpoint requires credentials, and a permissive default is a
-  security decision made by omission.
+  names one exact origin, and the origin is passed into `api::build` rather than
+  read inside it — reading configuration in the router builder is what made the
+  policy untestable, and the method set shipped allowing `GET` alone while the
+  one write this API has went unreachable from a browser. It permits `GET` and
+  `POST`, and it is never a wildcard: that would need revisiting the moment an
+  endpoint requires credentials, and a permissive default is a security decision
+  made by omission.
 - **No fourth crate.** Extraction, the Tokei adapter, the worker, and auth stay
   inside `repolens-server` until real code justifies splitting them.
