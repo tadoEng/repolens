@@ -61,6 +61,10 @@ token verification, the Cloud Run Jobs execution trigger, and
 `infrastructure::composition` — hardened archive extraction, the Tokei adapter,
 and the exclusion policy.
 
+That list is the crate's charter, not an inventory of its contents. The API, the
+`analysis-v1` DTOs, and the three binaries exist today; the rest arrives with the
+issue that needs it, and belongs here rather than in a fourth crate when it does.
+
 ## Forbidden dependency directions
 
 These are not style preferences. Each one, if violated, breaks a property the
@@ -177,38 +181,53 @@ Measured against a real Neon project, not assumed:
 
 ## The contract pipeline
 
-The frontend never sees a hand-written description of this API. One chain, with
-a gate at each end:
+The frontend never sees a hand-written description of this API. One source, two
+branches, and a gate on every committed artefact:
 
 ```text
-Axum routes + DTOs
-      ↓  utoipa, collected by OpenApiRouter from routes that actually exist
-contracts/openapi.json          ← committed
-      ↓  openapi-typescript
-packages/repolens-api-client/src/schema.ts   ← committed, generated
-      ↓  openapi-fetch
-web/  (SvelteKit)
+Axum routes + DTOs   (crates/repolens-server/src/contract)
+   │
+   ├── utoipa, collected by OpenApiRouter from routes that actually exist
+   │      ↓
+   │   contracts/openapi.json                       ← committed, generated
+   │      ↓  openapi-typescript
+   │   packages/repolens-api-client/src/schema.ts   ← committed, generated
+   │      ↓  openapi-fetch
+   │   web/  (SvelteKit)
+   │
+   └── serde, serialized by the fixture test from the same types
+          ↓
+       contracts/fixtures/analysis-v1/*.json        ← committed, generated
+          ↓  emitted as `satisfies` literals
+       packages/repolens-api-client/src/fixtures.ts ← committed, generated
+          ↓
+       @repolens/msw handlers  →  browser and end-to-end tests
 ```
 
 A route cannot be served without being documented, because the router and the
 document are produced by the same call and there is no way to obtain one
-without the other. Both committed artefacts are generated, so both can go
-stale; two gates make that a build failure rather than a runtime surprise:
+without the other. Every committed artefact on that chain is generated, so
+every one of them can go stale; four gates make that a build failure rather
+than a runtime surprise:
 
 | Gate                                            | Catches                                        |
 | ----------------------------------------------- | ---------------------------------------------- |
 | `cargo test -p repolens-server --test openapi`  | `contracts/openapi.json` no longer matches the routes |
-| `pnpm --filter @repolens/api-client test`       | `schema.ts` no longer matches the document     |
+| `cargo test -p repolens-server --test fixtures` | a fixture no longer matches the DTOs it was written from |
+| `pnpm --filter @repolens/api-client test`       | `schema.ts` or `fixtures.ts` no longer matches its input |
+| `pnpm -r check`                                 | a fixture shape the frontend cannot consume    |
 
-CI additionally asserts the working tree is clean, which catches a regeneration
-that was run but never committed.
+CI additionally asserts that `contracts/openapi.json` still matches the
+committed copy, which catches a regeneration that was run but never committed.
 
-After deliberately changing a route or DTO, regenerate both — in order, because
-the second reads the first's output:
+Nothing on either branch is edited by hand. After deliberately changing a route
+or a DTO, regenerate in order — each step reads the previous step's output:
 
 ```sh
 UPDATE_OPENAPI=1 cargo test -p repolens-server --test openapi
+UPDATE_FIXTURES=1 cargo test -p repolens-server --test fixtures
 pnpm --filter @repolens/api-client schema:update
+pnpm --filter @repolens/api-client fixtures:update
 ```
 
 Naming is settled (issue #14): **object fields are `snake_case`**, which is what
@@ -288,16 +307,22 @@ base-image digest.
 The plan's rule — no abstraction before real code requires it — applies to this
 document too.
 
-- **No analysis or report DTOs.** Their shapes are owned by executable fixtures
-  under `contracts/fixtures/` (issue #14) so that a drifting contract fails CI
-  rather than a specification document. Types in `repolens-core` marked
-  **PROVISIONAL** exist to express a boundary, not to fix a wire format.
+- **No analysis or report endpoints.** The wire contract itself is settled
+  (issue #14): the DTOs live in `crates/repolens-server/src/contract` and their
+  schemas are registered on the OpenAPI document directly rather than collected
+  from paths, so the generated client and the executable fixtures exist before
+  any route does. Serving them is issue #6. Types in `repolens-core` marked
+  **PROVISIONAL** still express a boundary rather than a wire format — the wire
+  format is owned by `contracts/`, and a `serde` derive in the domain crate
+  promises nothing to a client.
 - **No deployed verification.** `/api/v1/system/probe` and its database
   reporting now exist and are confirmed against a real Neon project, but only
-  from a local process. Static hosting, `not_found_handling`, the CSP
-  `connect-src` allowlist against a deployed origin, and cold-start behaviour
-  remain unproven until the deployment half of issue #11. `vite preview` is not
-  Cloudflare and cannot stand in for it.
+  from a local process. `wrangler.jsonc` declares the assets-only Cloudflare
+  configuration (issue #11), and that is a written intention rather than an
+  observation: static hosting, `not_found_handling`, the CSP `connect-src`
+  allowlist against a deployed origin, and cold-start behaviour stay unproven
+  until something is actually deployed. `vite preview` is not Cloudflare and
+  cannot stand in for it.
 - **No CORS by default.** A layer is applied only when `CORS_ALLOWED_ORIGIN`
   names one exact origin. It is never a wildcard: that would need revisiting the
   moment an endpoint requires credentials, and a permissive default is a
