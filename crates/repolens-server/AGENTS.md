@@ -101,7 +101,15 @@ the query set ever earns it.
 Migrations are authored with `sqlx migrate add <name>`, are append-only once
 deployed, and run over the direct endpoint via `cargo run --bin migrate`.
 
-There are no PostgreSQL integration tests yet, and CI provisions no database.
-The first ones must fail loudly when `DATABASE_URL` is unset rather than skip
-into a green run, and must arrive together with the CI service that runs them —
-a suite nothing executes is a suite nobody maintains.
+`tests/postgres.rs` runs against a real PostgreSQL and **panics when
+`DATABASE_URL` is unset rather than skipping** — a suite that disappears with
+its dependency reports green while proving nothing. CI provisions a
+`postgres:17` service and applies `migrations/` with the `migrate` binary, so
+the schema under test is never a fixture free to drift. Locally, export both
+database URLs and run `cargo run --bin migrate` once.
+
+It holds what cannot be checked without a database: that a terminal write
+carries the canonical repository coordinate. Adopting that coordinate
+mid-pipeline is best-effort, so the only durable guarantee is the one
+`store::complete` and `store::fail` make in the statement that sets the terminal
+state — a property of the SQL, not of any Rust value.
