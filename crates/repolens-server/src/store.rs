@@ -139,6 +139,34 @@ pub async fn advance(
     Ok(())
 }
 
+/// Adopts the canonical coordinate GitHub resolved a submission to.
+///
+/// A renamed or transferred repository still answers under its old address, so
+/// the row created from the submission can name something that no longer
+/// identifies it. Overwriting with GitHub's answer keeps the progress record
+/// pointing at the repository that was actually read.
+///
+/// # Errors
+///
+/// Returns [`StoreError::Query`] when the update fails.
+pub async fn adopt_coordinate(
+    pool: &PgPool,
+    id: Uuid,
+    coordinate: &RepositoryCoordinate,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "UPDATE analyses
+            SET owner = $2, name = $3, updated_at = now()
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(&coordinate.owner)
+    .bind(&coordinate.name)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Records a failure, with the retry decision the server has made.
 ///
 /// The decision is persisted rather than derived at read time, so two readers
@@ -337,6 +365,10 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::RateLimited => "RATE_LIMITED",
         ErrorCode::WorkerFailedRetriable => "WORKER_FAILED_RETRIABLE",
         ErrorCode::AnalyzerFailedPermanent => "ANALYZER_FAILED_PERMANENT",
+        ErrorCode::MalformedRequest => "MALFORMED_REQUEST",
+        ErrorCode::RequestTooLarge => "REQUEST_TOO_LARGE",
+        ErrorCode::RequestTimedOut => "REQUEST_TIMED_OUT",
+        ErrorCode::InternalError => "INTERNAL_ERROR",
     }
 }
 

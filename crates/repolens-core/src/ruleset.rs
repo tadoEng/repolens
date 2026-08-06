@@ -25,7 +25,13 @@ use serde::{Deserialize, Serialize};
 /// threshold, a different evidence path. Two reports with the same commit and
 /// different ruleset versions are allowed to disagree; two with the same
 /// version are not.
-pub const RULESET_VERSION: &str = "1";
+///
+/// `2` renamed `contract.openapi` to `contract.openapi.committed` and narrowed
+/// its title to the filename it actually tests. A rule id is how a stored
+/// report is read back, so the rename alone would make version `1` reports
+/// disagree with version `2` reports about a rule that never changed its
+/// verdict — which is precisely what the version exists to explain.
+pub const RULESET_VERSION: &str = "2";
 
 /// What a rule concluded.
 ///
@@ -83,7 +89,19 @@ const RULES: &[PathRule] = &[
         },
     },
     PathRule {
-        rule_id: "contract.openapi",
+        // Named for the filename convention it tests, not for the property a
+        // reader wishes it tested. "This repository publishes an OpenAPI
+        // contract" is a strictly broader claim than "a file with this name is
+        // committed", and only the second is decidable from a path.
+        //
+        // `rust-lang/crates.io` at 7bef82ce is the case that settles it: it
+        // generates its document with utoipa and commits it, as a 174 KB insta
+        // snapshot at `src/tests/snapshots/integration__openapi__openapi_snapshot-2.snap`.
+        // No `openapi.json` or `openapi.yaml` exists, so this rule reports
+        // MISSING over a complete tree — correct for the narrow claim, and a
+        // false negative for the broad one. Detecting the general case needs a
+        // content or dependency rule, which is #5.
+        rule_id: "contract.openapi.committed",
         matches: |path| path.ends_with("openapi.json") || path.ends_with("openapi.yaml"),
     },
     PathRule {
@@ -221,6 +239,43 @@ mod tests {
             .map(|o| o.rule_id)
             .collect();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn the_openapi_rule_claims_only_the_filename_it_tests() {
+        // Both halves matter, and the second is the one that keeps the title
+        // honest.
+        let committed = evaluate(&paths(&["contracts/openapi.json"]), false);
+        let found = committed
+            .iter()
+            .find(|o| o.rule_id == "contract.openapi.committed")
+            .unwrap();
+        assert_eq!(found.outcome, Outcome::Detected);
+
+        // `rust-lang/crates.io` at 7bef82ce: utoipa generates the document and
+        // the repository commits it — as an insta snapshot, under a name this
+        // rule cannot recognise. MISSING is the correct answer to "is there a
+        // committed openapi.json or openapi.yaml" and the wrong answer to "does
+        // this repository publish an OpenAPI contract", which is why the
+        // finding's title asks only the first.
+        let snapshot = evaluate(
+            &paths(&[
+                "src/openapi.rs",
+                "src/tests/openapi.rs",
+                "src/tests/snapshots/integration__openapi__openapi_snapshot-2.snap",
+            ]),
+            false,
+        );
+        let found = snapshot
+            .iter()
+            .find(|o| o.rule_id == "contract.openapi.committed")
+            .unwrap();
+        assert_eq!(
+            found.outcome,
+            Outcome::Missing,
+            "a path-based rule cannot see an OpenAPI document committed under another name; \
+             if this ever detects one, the title must widen to match"
+        );
     }
 
     #[test]

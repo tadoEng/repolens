@@ -1076,16 +1076,17 @@ impl GitHubRestClient {
 
         let malformed = || GitHubSourceError::MalformedResponse { resource: "commit" };
 
-        // Both digests are validated even though only one is kept as a typed
-        // value. They become the analysis' identity, and an identity assembled
-        // from unvalidated strings is one that can be forged by a malformed
-        // response rather than chosen.
+        // Both digests are validated and both stay typed. They become the
+        // analysis' identity, and an identity assembled from unvalidated
+        // strings is one that can be forged by a malformed response rather than
+        // chosen. Keeping the tree as a `TreeSha` all the way to the wire DTO
+        // is what stops it from being swapped with `sha` downstream.
         let sha = CommitSha::parse(&payload.sha).map_err(|_| malformed())?;
         let tree_sha = TreeSha::parse(&payload.commit.tree.sha).map_err(|_| malformed())?;
 
         Ok(ResolvedCommit {
             sha,
-            tree_sha: tree_sha.as_str().to_owned(),
+            tree_sha,
             committed_at: payload.commit.committer.date,
         })
     }

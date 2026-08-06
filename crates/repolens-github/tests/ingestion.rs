@@ -1262,7 +1262,7 @@ async fn a_reference_resolves_to_an_exact_commit_and_its_tree() {
         .expect("the branch resolves");
 
     assert_eq!(resolved.sha.as_str(), COMMIT_SHA);
-    assert_eq!(resolved.tree_sha, TREE_SHA);
+    assert_eq!(resolved.tree_sha.as_str(), TREE_SHA);
     // 2026-08-04T19:58:17Z, the timestamp the fixture carries.
     assert_eq!(resolved.committed_at.unix_timestamp(), 1_785_873_497);
 }

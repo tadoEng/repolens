@@ -42,7 +42,7 @@ pub use rest::{GitHubClientConfig, GitHubRestClient};
 use std::future::Future;
 use std::path::Path;
 
-use repolens_core::{CommitSha, ContentDigest, RepositoryCoordinate};
+use repolens_core::{CommitSha, ContentDigest, RepositoryCoordinate, TreeSha};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -78,7 +78,14 @@ pub struct ResolvedCommit {
     /// The commit itself.
     pub sha: CommitSha,
     /// Root tree of that commit. Part of canonical identity alongside `sha`.
-    pub tree_sha: String,
+    ///
+    /// A [`TreeSha`] rather than a `String`, which is what makes transposing
+    /// the two halves of the identity a compile error rather than a review
+    /// question. Both are 40-character SHA-1 digests, so a `String` here would
+    /// accept `sha` — the exact substitution that once wrote the commit SHA
+    /// into both fields and read as correct because it was a well-formed
+    /// digest. Convert to a string only when producing the wire DTO.
+    pub tree_sha: TreeSha,
     /// Commit timestamp, displayed so a reader can see how current the
     /// analyzed state is.
     pub committed_at: OffsetDateTime,

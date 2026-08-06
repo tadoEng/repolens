@@ -65,7 +65,7 @@ async fn execute<S>(
     pool: &PgPool,
     source: &S,
     id: Uuid,
-    coordinate: &RepositoryCoordinate,
+    submitted: &RepositoryCoordinate,
 ) -> Result<(), ApiError>
 where
     S: GitHubRepositorySource,
@@ -73,7 +73,7 @@ where
     advance(pool, id, AnalysisState::Resolving, None).await;
 
     let repository = source
-        .resolve_repository(coordinate)
+        .resolve_repository(submitted)
         .await
         .map_err(translate)?;
 
@@ -83,6 +83,26 @@ where
             "This repository is archived. It can still be read, but it is not under active \
              development, which is worth knowing before drawing conclusions from it.",
         ));
+    }
+
+    // Everything past this point uses the coordinate GitHub answered with,
+    // never the one that was submitted.
+    //
+    // A renamed or transferred repository still resolves under its old address
+    // — GitHub redirects — so the submission succeeds while naming something
+    // that no longer exists. Carrying that address onward would pin the
+    // remaining requests, the progress record, and the published report to a
+    // coordinate that does not identify what was actually read, and the report
+    // would cite a repository nobody can navigate to.
+    let coordinate = &repository.coordinate;
+    if coordinate != submitted {
+        tracing::info!(
+            analysis = %id,
+            submitted = %submitted,
+            canonical = %coordinate,
+            "the submission redirected; adopting the canonical coordinate"
+        );
+        adopt_coordinate(pool, id, coordinate).await;
     }
 
     let commit = source
@@ -138,6 +158,22 @@ async fn advance(pool: &PgPool, id: Uuid, state: AnalysisState, commit_sha: Opti
     }
 }
 
+/// Persists the canonical coordinate, logging rather than failing if it cannot.
+///
+/// Same trade as [`advance`]: losing this write costs the progress record its
+/// corrected name, while aborting over it would cost the whole report. The
+/// analysis continues against the canonical coordinate either way, so the
+/// report — which is built from it, not from the row — stays correct.
+async fn adopt_coordinate(pool: &PgPool, id: Uuid, coordinate: &RepositoryCoordinate) {
+    if let Err(error) = store::adopt_coordinate(pool, id, coordinate).await {
+        tracing::warn!(
+            analysis = %id,
+            error = %error,
+            "could not record the canonical coordinate"
+        );
+    }
+}
+
 /// Maps an ingestion failure onto the public error contract.
 ///
 /// The mapping is where a private repository stops being distinguishable from a
@@ -150,14 +186,32 @@ fn translate(error: GitHubSourceError) -> ApiError {
             "No public repository was found at that address. Check the owner and name, and note \
              that private repositories are not supported.",
         ),
-        GitHubSourceError::RateLimited { reset_at, .. } => {
-            let seconds = reset_at
-                .and_then(|reset| {
-                    (reset - OffsetDateTime::now_utc())
-                        .whole_seconds()
-                        .try_into()
-                        .ok()
+        GitHubSourceError::RateLimited {
+            retry_after_seconds,
+            reset_at,
+        } => {
+            // GitHub's own `retry-after` wins whenever it was sent.
+            //
+            // It accompanies the *secondary* rate limit, where there is no
+            // window to reset and `x-ratelimit-reset` is typically absent or
+            // points at the unrelated primary window. Consulting `reset_at`
+            // first — or ignoring `retry-after` outright — publishes a wait
+            // GitHub never asked for, and the fallback below then invents 60
+            // seconds out of nothing. Retrying earlier than GitHub said is how
+            // a secondary limit escalates.
+            let seconds = retry_after_seconds
+                .and_then(|seconds| u32::try_from(seconds).ok())
+                .or_else(|| {
+                    reset_at.and_then(|reset| {
+                        (reset - OffsetDateTime::now_utc())
+                            .whole_seconds()
+                            .try_into()
+                            .ok()
+                    })
                 })
+                // Neither header arrived. This is a guess and the only one
+                // available; it is deliberately the last resort rather than the
+                // common path.
                 .unwrap_or(60);
             ApiError::rate_limited(
                 "The GitHub rate limit is exhausted. This is temporary.",
@@ -248,7 +302,9 @@ fn build_report(
         // be one value repeated. Verified against `rust-lang/crates.io` at
         // 7bef82ce: the tree endpoint answers `7bef82ce…` when asked by commit
         // and `47ce74b3…` when asked by tree, for byte-identical entries.
-        tree_sha: commit.tree_sha.clone(),
+        // `TreeSha` → `String` happens here and only here: the wire DTO is the
+        // one place the typed identity has to be flattened.
+        tree_sha: commit.tree_sha.as_str().to_owned(),
         analyzer_version: ANALYZER_VERSION.to_owned(),
         ruleset_version: ruleset::RULESET_VERSION.to_owned(),
         completed_at: OffsetDateTime::now_utc(),
@@ -336,10 +392,13 @@ fn describe(rule_id: &str) -> (&'static str, &'static str, FindingCategory) {
              means they are not written down, not that the architecture is poor.",
             FindingCategory::SourceAndDocumentation,
         ),
-        "contract.openapi" => (
-            "OpenAPI contract present",
-            "An OpenAPI document is committed, which is what allows a generated client rather \
-             than a hand-written one.",
+        "contract.openapi.committed" => (
+            "Committed openapi.json or openapi.yaml",
+            "A file named openapi.json or openapi.yaml is committed, which is what allows a \
+             generated client rather than a hand-written one. This states nothing about \
+             repositories that publish an OpenAPI document another way — generated at runtime, \
+             or committed under a different name such as a snapshot test — which this \
+             path-based rule cannot see and does not claim to.",
             FindingCategory::Architecture,
         ),
         "database.migrations" => (
@@ -409,7 +468,7 @@ mod tests {
 
         let commit = repolens_github::ResolvedCommit {
             sha: repolens_core::CommitSha::parse(COMMIT).expect("a literal digest"),
-            tree_sha: TREE.to_owned(),
+            tree_sha: repolens_core::TreeSha::parse(TREE).expect("a literal digest"),
             committed_at: OffsetDateTime::from_unix_timestamp(1_785_873_497)
                 .expect("a literal timestamp"),
         };
@@ -438,6 +497,199 @@ mod tests {
             report.tree_sha, report.commit_sha,
             "a commit and its root tree are different objects"
         );
+    }
+
+    #[test]
+    fn the_rate_limit_wait_is_githubs_when_github_supplied_one() {
+        // GitHub sends `retry-after` with the *secondary* rate limit, where
+        // there is no window to reset. Preferring `reset_at` — or ignoring
+        // `retry-after` entirely and falling through to the invented 60 —
+        // publishes a wait GitHub never asked for, and retrying a secondary
+        // limit early is how it escalates.
+        let error = translate(GitHubSourceError::RateLimited {
+            retry_after_seconds: Some(37),
+            // Deliberately present and deliberately different: if `reset_at`
+            // won, this would read 3600 rather than 37.
+            reset_at: Some(OffsetDateTime::now_utc() + time::Duration::hours(1)),
+        });
+
+        assert_eq!(error.code(), ErrorCode::RateLimited);
+        assert_eq!(
+            error.retry_after_seconds(),
+            Some(37),
+            "GitHub's own retry-after must win over a window reset"
+        );
+    }
+
+    #[test]
+    fn the_rate_limit_wait_falls_back_to_the_window_reset() {
+        // The primary limit usually sends no `retry-after`, only a reset
+        // instant. That is still measured rather than guessed.
+        let error = translate(GitHubSourceError::RateLimited {
+            retry_after_seconds: None,
+            reset_at: Some(OffsetDateTime::now_utc() + time::Duration::seconds(120)),
+        });
+
+        let seconds = error.retry_after_seconds().expect("a wait is published");
+        assert!(
+            (118..=120).contains(&seconds),
+            "expected roughly 120 seconds from the reset instant, got {seconds}"
+        );
+    }
+
+    #[test]
+    fn the_invented_wait_is_the_last_resort_only() {
+        // Neither header arrived. 60 is a guess, and it must be reachable only
+        // when there is genuinely nothing to measure.
+        let error = translate(GitHubSourceError::RateLimited {
+            retry_after_seconds: None,
+            reset_at: None,
+        });
+        assert_eq!(error.retry_after_seconds(), Some(60));
+    }
+
+    /// Records the coordinate every call was made with.
+    ///
+    /// The whole point of the fake: the finding is not about what the pipeline
+    /// returns, it is about *which repository it asks GitHub for* after a
+    /// redirect.
+    struct RecordingSource {
+        canonical: RepositoryCoordinate,
+        seen: std::sync::Mutex<Vec<RepositoryCoordinate>>,
+    }
+
+    impl GitHubRepositorySource for RecordingSource {
+        async fn resolve_repository(
+            &self,
+            coordinate: &RepositoryCoordinate,
+        ) -> Result<repolens_github::ResolvedRepository, GitHubSourceError> {
+            self.seen.lock().unwrap().push(coordinate.clone());
+            // What GitHub does for a renamed or transferred repository: the old
+            // address resolves, and the answer names the new one.
+            Ok(repolens_github::ResolvedRepository {
+                coordinate: self.canonical.clone(),
+                default_branch: "main".to_owned(),
+                archived: false,
+                size_kilobytes: 1,
+            })
+        }
+
+        async fn resolve_commit(
+            &self,
+            coordinate: &RepositoryCoordinate,
+            _reference: &str,
+        ) -> Result<repolens_github::ResolvedCommit, GitHubSourceError> {
+            self.seen.lock().unwrap().push(coordinate.clone());
+            Ok(repolens_github::ResolvedCommit {
+                sha: repolens_core::CommitSha::parse(&"a".repeat(40)).expect("a literal digest"),
+                tree_sha: repolens_core::TreeSha::parse(&"b".repeat(40)).expect("a literal digest"),
+                committed_at: OffsetDateTime::UNIX_EPOCH,
+            })
+        }
+
+        async fn fetch_tree(
+            &self,
+            coordinate: &RepositoryCoordinate,
+            _commit: &repolens_core::CommitSha,
+        ) -> Result<repolens_github::RepositoryTree, GitHubSourceError> {
+            self.seen.lock().unwrap().push(coordinate.clone());
+            Ok(repolens_github::RepositoryTree {
+                sha: "a".repeat(40),
+                entries: Vec::new(),
+                truncated: false,
+            })
+        }
+
+        async fn fetch_selected_blobs(
+            &self,
+            _coordinate: &RepositoryCoordinate,
+            _commit: &repolens_core::CommitSha,
+            _paths: &[String],
+        ) -> Result<Vec<repolens_github::BlobContent>, GitHubSourceError> {
+            unreachable!("the seed ruleset reads paths only")
+        }
+
+        async fn download_archive(
+            &self,
+            _coordinate: &RepositoryCoordinate,
+            _commit: &repolens_core::CommitSha,
+            _max_compressed_bytes: u64,
+            _destination: &std::path::Path,
+        ) -> Result<repolens_github::ArchiveDownload, GitHubSourceError> {
+            unreachable!("composition is #12")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redirected_submission_is_analyzed_under_its_canonical_coordinate() {
+        // A pool that can never connect, with an acquire timeout short enough
+        // that each store call fails immediately. Every write this pipeline
+        // makes is either log-and-continue or the final `complete`, so the
+        // traversal under test runs to the end regardless — and what is under
+        // test is which coordinate GitHub was asked for, not what was stored.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(1))
+            // Port 1 on loopback refuses immediately, so each store call fails
+            // fast rather than waiting out a DNS or connect timeout. The
+            // credentials are named rather than plausible: a fixture that
+            // merely looks real still trips credential scanners and still makes
+            // a reviewer stop and check.
+            .connect_lazy("postgres://EXAMPLE_USER:EXAMPLE_PASSWORD@127.0.0.1:1/none")
+            .expect("a lazy pool never connects at construction");
+
+        let submitted = RepositoryCoordinate::new("old-owner", "old-name");
+        let canonical = RepositoryCoordinate::new("new-owner", "new-name");
+        let source = RecordingSource {
+            canonical: canonical.clone(),
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let _ = execute(&pool, &source, Uuid::nil(), &submitted).await;
+
+        let seen = source.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.first(),
+            Some(&submitted),
+            "the first call is the submission itself; that is how the redirect is discovered"
+        );
+        assert!(
+            seen.len() > 1,
+            "the pipeline must get past resolution for this test to mean anything"
+        );
+        assert!(
+            seen[1..].iter().all(|coordinate| coordinate == &canonical),
+            "every call after resolution must use the coordinate GitHub answered \
+             with, not the submitted one; saw {seen:?}"
+        );
+    }
+
+    #[test]
+    fn the_report_names_the_repository_it_was_built_for() {
+        // The other half of the same finding: a report that cited the submitted
+        // coordinate would point a reader at an address that no longer
+        // identifies what was analyzed.
+        let canonical = RepositoryCoordinate::new("new-owner", "new-name");
+        let commit = repolens_github::ResolvedCommit {
+            sha: repolens_core::CommitSha::parse(&"a".repeat(40)).expect("a literal digest"),
+            tree_sha: repolens_core::TreeSha::parse(&"b".repeat(40)).expect("a literal digest"),
+            committed_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let tree = repolens_github::RepositoryTree {
+            sha: "a".repeat(40),
+            entries: Vec::new(),
+            truncated: false,
+        };
+
+        let report = build_report(
+            Uuid::nil(),
+            &canonical,
+            &commit,
+            &tree,
+            &ruleset::evaluate(&[], false),
+        );
+
+        assert_eq!(report.repository.owner, "new-owner");
+        assert_eq!(report.repository.name, "new-name");
     }
 
     #[test]
