@@ -196,6 +196,26 @@ jobs:
           [ "$found" -eq 0 ] || exit 1
           echo "bundle scan clean: ${#patterns[@]} patterns, no match"
 
+      - name: Assert the visual baselines exist for this platform
+        # `visual.spec.ts` skips when the running platform has no baseline, which
+        # is right for a developer on a machine CI never uses — but on the
+        # merge-gating platform a skip means the visual assertions protect
+        # nothing while reporting green. This turns that silence into a failure.
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in report-completed-chromium-linux.png                       report-completed-narrow-mobile-360-linux.png                       progress-failed-retriable-chromium-linux.png                       report-loc-unavailable-chromium-linux.png; do
+            if [ ! -f "web/e2e/visual.spec.ts-snapshots/$name" ]; then
+              echo "::error::missing Linux visual baseline: $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Capture them with the 'Visual baselines' workflow, review the artefact, and commit it."
+            exit 1
+          fi
+          echo "all four Linux baselines present"
+
       - name: Browser and accessibility tests
         # Includes the axe WCAG 2.1 AA scans across all three routes at
         # 360/768/1280px — the accessibility contract is a gate, not a review step.

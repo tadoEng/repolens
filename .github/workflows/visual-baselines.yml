@@ -8,12 +8,6 @@ name: Visual baselines
 # for a person to look at. Committing them stays a deliberate act.
 on:
   workflow_dispatch:
-  # TEMPORARY, removed in the commit that lands the baselines. workflow_dispatch
-  # only works from the default branch, so a one-off push trigger is the only way
-  # to capture Linux baselines before this branch merges.
-  push:
-    branches: [feat/8-report-ui]
-    paths: ['.github/workflows/visual-baselines.yml']
 
 permissions:
   contents: read
