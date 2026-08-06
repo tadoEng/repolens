@@ -99,6 +99,34 @@ html {
   border: 0;
 }
 
+/*
+ * SvelteKit's route-change announcer, restyled from a stylesheet rather than relying on
+ * the framework's own inline `style` attribute.
+ *
+ * The router injects `<div id="svelte-announcer" style="position: absolute; …">` from
+ * client JavaScript. Under our CSP that attribute is blocked — `style-src-attr` falls back
+ * to `style-src 'self'`, and there is no hash for an attribute a bundle writes at runtime.
+ * The visible consequence is a stray line of route-title text appearing at the top of the
+ * page after every client-side navigation, which is exactly the kind of defect that only
+ * shows up once the policy is enforced.
+ *
+ * This rule restores the intended presentation from a file the policy already allows. It
+ * does not silence the violation report — `e2e/report.spec.ts` still records it, so the
+ * day SvelteKit fixes this upstream we find out rather than carrying the workaround
+ * forever.
+ */
+#svelte-announcer {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Skip link: hidden until focused, then pinned to the top-left of the viewport. */
 .skip-link {
   position: absolute;

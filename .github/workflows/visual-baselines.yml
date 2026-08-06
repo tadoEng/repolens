@@ -1,0 +1,53 @@
+name: Visual baselines
+
+# Manual only. Baselines are a decision, not a build artefact: a run that wrote
+# them automatically would approve whatever it happened to render, which is the
+# failure `updateSnapshots: 'none'` exists to prevent.
+#
+# This job captures candidates on the platform CI actually uses and uploads them
+# for a person to look at. Committing them stays a deliberate act.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    name: Capture Linux baselines
+    runs-on: ubuntu-latest
+
+    env:
+      PUBLIC_API_ORIGIN: http://localhost:8080
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm --filter @repolens/web exec playwright install --with-deps chromium chromium-headless-shell
+
+      - name: Capture
+        # --update-snapshots overrides updateSnapshots: 'none' deliberately, which is
+        # the only place that override is allowed to happen.
+        run: pnpm --filter @repolens/web exec playwright test visual.spec.ts --update-snapshots
+
+      - name: Upload for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-visual-baselines
+          path: web/e2e/visual.spec.ts-snapshots/*-linux.png
+          if-no-files-found: error
+          retention-days: 7
