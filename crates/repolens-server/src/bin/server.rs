@@ -4,6 +4,7 @@
 //! this one by overriding the entrypoint on the Service.
 
 use anyhow::Context as _;
+use repolens_github::{GitHubClientConfig, GitHubRestClient};
 use repolens_server::state::AppState;
 use repolens_server::{api, config, telemetry};
 use tokio::net::TcpListener;
@@ -23,14 +24,30 @@ async fn main() -> anyhow::Result<()> {
     // reports the database as unavailable — which is true — and the frontend
     // can still be developed against a running API. Deployed environments set
     // the variable, and the probe is what proves they did.
+    // Always built. The token only raises GitHub's rate-limit ceiling; it never
+    // widens what can be read, because only public repositories are analyzed.
+    // A deployment without one is slower, not broken, and finding out which is
+    // GitHub's job rather than this function's.
+    let token = config::github_token();
+    let mut github = GitHubClientConfig::new();
+    if let Some(token) = token {
+        github = github.with_token(token);
+    } else {
+        tracing::warn!(
+            "GH_ANALYSIS_TOKEN is not set; GitHub requests are unauthenticated and limited to \
+             roughly sixty an hour"
+        );
+    }
+    let github = GitHubRestClient::new(github).context("building the GitHub client")?;
+
     let state = match config::database_url() {
         Ok(url) => {
             let pool = AppState::connect_lazy(&url).context("configuring the database pool")?;
-            AppState::with_pool(pool)
+            AppState::with_pool(pool, github)
         }
         Err(error) => {
             tracing::warn!(%error, "starting without a database; the system probe will report it as unavailable");
-            AppState::without_database()
+            AppState::without_database(github)
         }
     };
 

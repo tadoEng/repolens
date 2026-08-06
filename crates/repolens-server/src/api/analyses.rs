@@ -108,22 +108,18 @@ async fn create(
     // Inline execution, spawned so the response is not held for the length of an
     // analysis. Issue #7 replaces this with a durable claim; until then an
     // analysis does not survive the process, which is recorded in `pipeline`.
-    if let Some(source) = state.github() {
-        let (pool, source, id) = (pool.clone(), std::sync::Arc::clone(source), analysis.id);
-        tokio::spawn(async move { pipeline::run(&pool, &*source, id, &coordinate).await });
-    } else {
-        // No credentials configured. Recorded on the analysis rather than returned,
-        // so the failure appears where a user is already looking instead of in a
-        // response they will not see again.
-        let (pool, id) = (pool.clone(), analysis.id);
-        tokio::spawn(async move {
-            let error = ApiError::new(
-                ErrorCode::RepositoryInaccessible,
-                "This deployment has no GitHub access configured, so no repository can be read.",
-            );
-            let _ = store::fail(&pool, id, &error).await;
-        });
-    }
+    //
+    // There is no branch here for missing credentials. The client exists
+    // whether or not a token was configured, and an unauthenticated request to
+    // a public repository is a request GitHub may well answer. If it declines —
+    // rate limit, removal, or anything else — that response is what decides the
+    // error code, rather than this process deciding on its behalf.
+    let (pool, source, id) = (
+        pool.clone(),
+        std::sync::Arc::clone(state.github()),
+        analysis.id,
+    );
+    tokio::spawn(async move { pipeline::run(&pool, &*source, id, &coordinate).await });
 
     // 202, not 201: the analysis exists, but the thing the caller actually wants
     // does not yet. `Location` is the progress resource they should poll.

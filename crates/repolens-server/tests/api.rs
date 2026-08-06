@@ -5,13 +5,25 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use repolens_github::{GitHubClientConfig, GitHubRestClient};
 use repolens_server::api;
 use repolens_server::state::AppState;
 use tower::ServiceExt as _;
 
+/// A client with no token, which is what an unconfigured deployment gets.
+///
+/// These tests never reach the network — none of the routes exercised here
+/// makes an outbound request — so the client is here to satisfy the state, and
+/// its being trivially constructible is the point: if building one could fail,
+/// `AppState` would need to model its absence again.
+fn unauthenticated_github() -> GitHubRestClient {
+    GitHubRestClient::new(GitHubClientConfig::new())
+        .expect("a client with the default API base and no token is always constructible")
+}
+
 /// Sends one request through the fully built router.
 async fn get(uri: &str) -> (StatusCode, serde_json::Value) {
-    let (app, _openapi) = api::build(AppState::without_database());
+    let (app, _openapi) = api::build(AppState::without_database(unauthenticated_github()));
 
     let response = app
         .oneshot(
@@ -88,7 +100,7 @@ async fn unknown_paths_are_not_found() {
     let (status, _body) = get("/healthz").await;
     assert_eq!(status, StatusCode::OK);
 
-    let (app, _openapi) = api::build(AppState::without_database());
+    let (app, _openapi) = api::build(AppState::without_database(unauthenticated_github()));
     let response = app
         .oneshot(
             Request::builder()
@@ -126,7 +138,7 @@ async fn no_cors_headers_without_a_configured_origin() {
     // Absent configuration must mean *no* CORS layer, not a permissive one. A
     // wildcard would have to be revisited the moment an endpoint needs
     // credentials, so its absence is asserted rather than assumed.
-    let (app, _openapi) = api::build(AppState::without_database());
+    let (app, _openapi) = api::build(AppState::without_database(unauthenticated_github()));
 
     let response = app
         .oneshot(
@@ -150,7 +162,7 @@ async fn no_cors_headers_without_a_configured_origin() {
 
 #[test]
 fn openapi_document_is_collected_from_the_live_router() {
-    let (_app, openapi) = api::build(AppState::without_database());
+    let (_app, openapi) = api::build(AppState::without_database(unauthenticated_github()));
 
     for path in ["/healthz", "/api/v1/system/probe"] {
         assert!(

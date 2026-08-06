@@ -1489,6 +1489,7 @@ dependencies = [
  "dotenvy",
  "repolens-core",
  "repolens-github",
+ "secrecy",
  "serde",
  "serde_json",
  "sqlx",

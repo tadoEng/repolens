@@ -1294,3 +1294,49 @@ async fn a_commit_response_that_is_not_a_digest_is_refused() {
         GitHubSourceError::MalformedResponse { resource: "commit" }
     ));
 }
+
+#[tokio::test]
+async fn a_client_with_no_token_reads_a_public_repository_and_sends_no_credential() {
+    // The deployment shape this covers is the ordinary one: `GH_ANALYSIS_TOKEN`
+    // is optional, so a server that has none still builds a client and still
+    // analyzes. The server used to model that as "no GitHub access" and answer
+    // REPOSITORY_INACCESSIBLE without asking, which reported a failure for a
+    // repository that is in fact readable. Only public repositories are ever
+    // analyzed, so a token raises the rate-limit ceiling and nothing else.
+    //
+    // Both halves matter. That the call succeeds proves the credential is not
+    // required; that no `authorization` header appears proves the absent token
+    // does not become an empty or malformed one, which GitHub answers with 401
+    // — a failure that would look like a permissions problem rather than a
+    // configuration one.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/tadoEng/repolens"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "full_name": "tadoEng/repolens",
+            "default_branch": "master",
+            "archived": false,
+            "size": 10,
+            "private": false,
+        })))
+        .mount(&server)
+        .await;
+
+    let config = GitHubClientConfig::new()
+        .with_api_base(Url::parse(&server.uri()).expect("the local base is a valid URL"))
+        .allow_insecure_loopback();
+    let client = GitHubRestClient::new(config).expect("a client without a token is constructible");
+
+    let resolved = client
+        .resolve_repository(&coordinate())
+        .await
+        .expect("a public repository is readable without a credential");
+    assert_eq!(resolved.coordinate.name, "repolens");
+
+    let requests = server.received_requests().await.expect("recorded");
+    assert_eq!(requests.len(), 1);
+    assert!(
+        !requests[0].headers.contains_key("authorization"),
+        "an absent token must send no header at all, not an empty one"
+    );
+}

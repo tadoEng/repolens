@@ -40,45 +40,44 @@ pub struct AppState {
     /// the truthful answer — better than refusing to boot and blocking UI
     /// development, and better than pretending the database is fine.
     pool: Option<PgPool>,
-    /// GitHub access, absent when no token or base is configured.
+    /// GitHub access. Always present.
+    ///
+    /// Deliberately not an `Option`, unlike the pool. A client can always be
+    /// built: the public API base is a compile-time constant and the token is
+    /// optional, so "no GitHub access" describes no reachable configuration.
+    /// Modelling it as absent would let a handler answer
+    /// `REPOSITORY_INACCESSIBLE` without asking GitHub — inventing a failure for
+    /// a repository that is very likely accessible, since only public ones are
+    /// read. Whether a request succeeds is GitHub's answer to give.
     ///
     /// `Arc` because the client is not `Clone` — it holds a configured
     /// `reqwest::Client` and a secret — and an analysis is spawned onto a task
-    /// that outlives the request. Optional for the same reason the pool is: the
-    /// server must still start for frontend work, and the probe reports what is
-    /// missing rather than the process refusing to boot.
-    github: Option<Arc<GitHubRestClient>>,
+    /// that outlives the request.
+    github: Arc<GitHubRestClient>,
 }
 
 impl AppState {
     /// Builds state with a live pool.
     #[must_use]
-    pub fn with_pool(pool: PgPool) -> Self {
+    pub fn with_pool(pool: PgPool, github: GitHubRestClient) -> Self {
         Self {
             pool: Some(pool),
-            github: None,
+            github: Arc::new(github),
         }
     }
 
-    /// Attaches GitHub access.
+    /// Borrows the GitHub client.
     #[must_use]
-    pub fn with_github(mut self, client: GitHubRestClient) -> Self {
-        self.github = Some(Arc::new(client));
-        self
-    }
-
-    /// Borrows the GitHub client, if one was configured.
-    #[must_use]
-    pub fn github(&self) -> Option<&Arc<GitHubRestClient>> {
-        self.github.as_ref()
+    pub fn github(&self) -> &Arc<GitHubRestClient> {
+        &self.github
     }
 
     /// Builds state with no database configured.
     #[must_use]
-    pub fn without_database() -> Self {
+    pub fn without_database(github: GitHubRestClient) -> Self {
         Self {
             pool: None,
-            github: None,
+            github: Arc::new(github),
         }
     }
 

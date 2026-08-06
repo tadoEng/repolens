@@ -21,8 +21,16 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
+use repolens_github::{GitHubClientConfig, GitHubRestClient};
 use repolens_server::api;
 use repolens_server::state::AppState;
+
+/// A client with no token. Nothing here makes an outbound request; the document
+/// is generated from the router's shape, which does not depend on credentials.
+fn unauthenticated_github() -> GitHubRestClient {
+    GitHubRestClient::new(GitHubClientConfig::new())
+        .expect("a client with the default API base and no token is always constructible")
+}
 
 /// Location of the committed document, relative to this crate.
 fn document_path() -> PathBuf {
@@ -35,7 +43,7 @@ fn document_path() -> PathBuf {
 /// as a diff rather than as one line, and so it matches what an editor would
 /// leave behind.
 fn generate() -> String {
-    let (_router, openapi) = api::build(AppState::without_database());
+    let (_router, openapi) = api::build(AppState::without_database(unauthenticated_github()));
     let mut json = serde_json::to_string_pretty(&openapi).expect("the document always serializes");
     json.push('\n');
     json

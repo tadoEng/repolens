@@ -5,12 +5,17 @@
 //! multi-format layering would be unused weight. What matters is failing fast
 //! and naming the missing variable, which is what these functions do.
 //!
-//! Secrets are returned as plain `String` today. Wrapping them in `secrecy`
-//! arrives with the ingestion stage that introduces the first outbound
-//! credential (issue #4); see plan §4.3.
+//! The one outbound credential, `GH_ANALYSIS_TOKEN`, is returned as a
+//! `SecretString` so it cannot reach a log through an accidental `Debug` or
+//! `Display`. Database URLs are still plain `String`, because `sqlx` takes a
+//! `&str` and wrapping a value only to unwrap it at the single call site would
+//! be ceremony rather than protection — `warn_on_weak_tls` below is written to
+//! never emit one.
 
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+use secrecy::SecretString;
 
 /// Cloud Run injects the listening port; the default matches its convention.
 const DEFAULT_PORT: u16 = 8080;
@@ -177,6 +182,25 @@ pub fn database_url() -> Result<String, ConfigError> {
 /// advisory locks — which is exactly what schema changes rely on.
 pub fn database_direct_url() -> Result<String, ConfigError> {
     required("DATABASE_DIRECT_URL")
+}
+
+/// Credential raising the GitHub rate-limit ceiling, if one is configured.
+///
+/// Optional on purpose. Unauthenticated ingestion works — GitHub allows roughly
+/// sixty requests an hour from an anonymous client, and only public
+/// repositories are ever read, so a token widens the budget without widening
+/// what is visible.
+///
+/// Absent is therefore a *lower ceiling*, not a broken deployment. Treating it
+/// as fatal would invent a failure before trying, and would report
+/// `REPOSITORY_INACCESSIBLE` for a repository that is in fact perfectly
+/// accessible. Whether a request succeeds is GitHub's answer to give.
+pub fn github_token() -> Option<SecretString> {
+    let raw = env::var("GH_ANALYSIS_TOKEN").ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    Some(SecretString::from(raw))
 }
 
 fn required(name: &'static str) -> Result<String, ConfigError> {
