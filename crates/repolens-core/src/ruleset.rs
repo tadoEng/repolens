@@ -102,7 +102,17 @@ const RULES: &[PathRule] = &[
         // false negative for the broad one. Detecting the general case needs a
         // content or dependency rule, which is #5.
         rule_id: "contract.openapi.committed",
-        matches: |path| path.ends_with("openapi.json") || path.ends_with("openapi.yaml"),
+        // The **final path component**, compared exactly. `ends_with` was wrong
+        // in the direction that matters: `notopenapi.json`, `my-openapi.yaml`
+        // and `vendor/legacy-openapi.json` all end with the string and none of
+        // them is the conventional artifact this rule claims to find. A rule
+        // whose title names a filename has to compare a filename.
+        matches: |path| {
+            matches!(
+                path.rsplit('/').next(),
+                Some("openapi.json" | "openapi.yaml")
+            )
+        },
     },
     PathRule {
         rule_id: "database.migrations",
@@ -276,6 +286,52 @@ mod tests {
             "a path-based rule cannot see an OpenAPI document committed under another name; \
              if this ever detects one, the title must widen to match"
         );
+    }
+
+    #[test]
+    fn the_openapi_rule_compares_a_filename_rather_than_a_suffix() {
+        let outcome = |items: &[&str]| {
+            evaluate(&paths(items), false)
+                .into_iter()
+                .find(|o| o.rule_id == "contract.openapi.committed")
+                .unwrap()
+                .outcome
+        };
+
+        // The conventional artifact, at the root and nested.
+        for accepted in [
+            "openapi.json",
+            "openapi.yaml",
+            "contracts/openapi.json",
+            "api/v1/openapi.yaml",
+        ] {
+            assert_eq!(
+                outcome(&[accepted]),
+                Outcome::Detected,
+                "should detect {accepted}"
+            );
+        }
+
+        // Near misses. Every one of these ends with the string the rule used to
+        // test, and not one of them is a committed OpenAPI document — a false
+        // DETECTED is worse than the false MISSING this rule was narrowed to
+        // avoid, because it claims evidence that does not exist.
+        for rejected in [
+            "notopenapi.json",
+            "my-openapi.yaml",
+            "vendor/legacy-openapi.json",
+            "openapi.json.bak",
+            "openapi.yaml.tmpl",
+            "openapi.jsonc",
+            "docs/openapi.md",
+            "openapi.yml",
+        ] {
+            assert_eq!(
+                outcome(&[rejected]),
+                Outcome::Missing,
+                "should not accept {rejected}"
+            );
+        }
     }
 
     #[test]

@@ -47,10 +47,16 @@ pub async fn run<S>(pool: &PgPool, source: &S, id: Uuid, coordinate: &Repository
 where
     S: GitHubRepositorySource,
 {
-    if let Err(error) = execute(pool, source, id, coordinate).await {
+    // Set as soon as GitHub answers, and carried out here so that a *failure*
+    // is also recorded under the canonical coordinate. Without it, an archived
+    // or too-large repository that had been renamed would reach a terminal
+    // state still naming the address the submitter typed.
+    let mut canonical: Option<RepositoryCoordinate> = None;
+
+    if let Err(error) = execute(pool, source, id, coordinate, &mut canonical).await {
         // The store failing here is the one case that cannot be recorded, since
         // recording is what failed. Logged by category, never with the URL.
-        if let Err(store_error) = store::fail(pool, id, &error).await {
+        if let Err(store_error) = store::fail(pool, id, &error, canonical.as_ref()).await {
             tracing::error!(
                 analysis = %id,
                 error = %store_error,
@@ -61,11 +67,16 @@ where
 }
 
 /// The pipeline proper. Returns the failure to record, if any.
+///
+/// `canonical` is an out-parameter rather than a return value because it must
+/// survive the error path: the caller needs it precisely when this function
+/// returns `Err`.
 async fn execute<S>(
     pool: &PgPool,
     source: &S,
     id: Uuid,
     submitted: &RepositoryCoordinate,
+    canonical: &mut Option<RepositoryCoordinate>,
 ) -> Result<(), ApiError>
 where
     S: GitHubRepositorySource,
@@ -77,32 +88,44 @@ where
         .await
         .map_err(translate)?;
 
-    if repository.archived {
-        return Err(ApiError::new(
-            ErrorCode::RepositoryArchived,
-            "This repository is archived. It can still be read, but it is not under active \
-             development, which is worth knowing before drawing conclusions from it.",
-        ));
-    }
-
-    // Everything past this point uses the coordinate GitHub answered with,
-    // never the one that was submitted.
+    // Adopted *before* any decision that can reject the repository.
     //
-    // A renamed or transferred repository still resolves under its old address
-    // — GitHub redirects — so the submission succeeds while naming something
-    // that no longer exists. Carrying that address onward would pin the
-    // remaining requests, the progress record, and the published report to a
-    // coordinate that does not identify what was actually read, and the report
-    // would cite a repository nobody can navigate to.
-    let coordinate = &repository.coordinate;
-    if coordinate != submitted {
+    // The archived check below returns early, and it used to do so before this
+    // ran — so an archived repository that had also been renamed reached a
+    // terminal state under the submitted coordinate, which is the one case
+    // where the reader most needs to be told the real name. A rejection is
+    // still a result about a specific repository, and it must name the one
+    // GitHub identified.
+    //
+    // Everything past this point uses the coordinate GitHub answered with,
+    // never the one that was submitted. A renamed or transferred repository
+    // still resolves under its old address — GitHub redirects — so the
+    // submission succeeds while naming something that no longer exists.
+    let coordinate = repository.coordinate.clone();
+    *canonical = Some(coordinate.clone());
+    if coordinate != *submitted {
         tracing::info!(
             analysis = %id,
             submitted = %submitted,
             canonical = %coordinate,
             "the submission redirected; adopting the canonical coordinate"
         );
-        adopt_coordinate(pool, id, coordinate).await;
+        // Best-effort, and deliberately not the only place this is written.
+        // The terminal writes in `store::complete` and `store::fail` set
+        // owner/name too, in the same transaction that sets the terminal
+        // state, so losing this update costs the progress display its
+        // corrected name and cannot leave a finished analysis disagreeing with
+        // its own report.
+        adopt_coordinate(pool, id, &coordinate).await;
+    }
+    let coordinate = &coordinate;
+
+    if repository.archived {
+        return Err(ApiError::new(
+            ErrorCode::RepositoryArchived,
+            "This repository is archived. It can still be read, but it is not under active \
+             development, which is worth knowing before drawing conclusions from it.",
+        ));
     }
 
     let commit = source
@@ -140,9 +163,17 @@ where
 
     store::complete(pool, id, &report).await.map_err(|error| {
         tracing::error!(analysis = %id, error = %error, "could not store the report");
+        // Retriable, not permanent. The analysis itself *succeeded* — the
+        // report was built — and what failed was the write. That is a
+        // connection, a pool timeout, or a failover, none of which the same
+        // commit and ruleset will reproduce. `ANALYZER_FAILED_PERMANENT` told
+        // the UI to withhold retry forever over a fault that would very likely
+        // clear on the next attempt, and it named the analyzer for a failure
+        // the analyzer did not have.
         ApiError::new(
-            ErrorCode::AnalyzerFailedPermanent,
-            "The analysis finished but its report could not be stored.",
+            ErrorCode::WorkerFailedRetriable,
+            "The analysis finished but its report could not be stored. This is usually \
+             temporary.",
         )
     })
 }
@@ -394,11 +425,11 @@ fn describe(rule_id: &str) -> (&'static str, &'static str, FindingCategory) {
         ),
         "contract.openapi.committed" => (
             "Committed openapi.json or openapi.yaml",
-            "A file named openapi.json or openapi.yaml is committed, which is what allows a \
-             generated client rather than a hand-written one. This states nothing about \
-             repositories that publish an OpenAPI document another way — generated at runtime, \
-             or committed under a different name such as a snapshot test — which this \
-             path-based rule cannot see and does not claim to.",
+            "A file whose name is exactly openapi.json or openapi.yaml is committed, which is \
+             what allows a generated client rather than a hand-written one. Those two names \
+             and no others: openapi.yml, a snapshot of a document generated at runtime, or any \
+             other spelling is not detected by this rule and its absence here is not a claim \
+             that the repository has no OpenAPI contract.",
             FindingCategory::Architecture,
         ),
         "database.migrations" => (
@@ -555,6 +586,7 @@ mod tests {
     /// redirect.
     struct RecordingSource {
         canonical: RepositoryCoordinate,
+        archived: bool,
         seen: std::sync::Mutex<Vec<RepositoryCoordinate>>,
     }
 
@@ -569,7 +601,7 @@ mod tests {
             Ok(repolens_github::ResolvedRepository {
                 coordinate: self.canonical.clone(),
                 default_branch: "main".to_owned(),
-                archived: false,
+                archived: self.archived,
                 size_kilobytes: 1,
             })
         }
@@ -627,24 +659,25 @@ mod tests {
         // makes is either log-and-continue or the final `complete`, so the
         // traversal under test runs to the end regardless — and what is under
         // test is which coordinate GitHub was asked for, not what was stored.
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(std::time::Duration::from_millis(1))
-            // Port 1 on loopback refuses immediately, so each store call fails
-            // fast rather than waiting out a DNS or connect timeout. The
-            // credentials are named rather than plausible: a fixture that
-            // merely looks real still trips credential scanners and still makes
-            // a reviewer stop and check.
-            .connect_lazy("postgres://EXAMPLE_USER:EXAMPLE_PASSWORD@127.0.0.1:1/none")
-            .expect("a lazy pool never connects at construction");
+        let pool = unreachable_pool();
 
         let submitted = RepositoryCoordinate::new("old-owner", "old-name");
         let canonical = RepositoryCoordinate::new("new-owner", "new-name");
         let source = RecordingSource {
             canonical: canonical.clone(),
+            archived: false,
             seen: std::sync::Mutex::new(Vec::new()),
         };
 
-        let _ = execute(&pool, &source, Uuid::nil(), &submitted).await;
+        let mut reported = None;
+        let _ = execute(&pool, &source, Uuid::nil(), &submitted, &mut reported).await;
+
+        assert_eq!(
+            reported.as_ref(),
+            Some(&canonical),
+            "the canonical coordinate must reach the caller, which is what lets a \
+             terminal failure be recorded under it"
+        );
 
         let seen = source.seen.lock().unwrap().clone();
         assert_eq!(
@@ -660,6 +693,91 @@ mod tests {
             seen[1..].iter().all(|coordinate| coordinate == &canonical),
             "every call after resolution must use the coordinate GitHub answered \
              with, not the submitted one; saw {seen:?}"
+        );
+    }
+
+    /// A pool that can never connect, failing fast enough to use in a test.
+    fn unreachable_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(1))
+            // Port 1 on loopback refuses immediately, so each store call fails
+            // fast rather than waiting out a DNS or connect timeout. The
+            // credentials are named rather than plausible: a fixture that
+            // merely looks real still trips credential scanners and still makes
+            // a reviewer stop and check.
+            .connect_lazy("postgres://EXAMPLE_USER:EXAMPLE_PASSWORD@127.0.0.1:1/none")
+            .expect("a lazy pool never connects at construction")
+    }
+
+    #[tokio::test]
+    async fn an_archived_repository_still_reports_its_canonical_coordinate() {
+        // The archived check returns early. It used to do so *before* the
+        // coordinate was adopted, so an archived repository that had also been
+        // renamed reached a terminal state under the address the submitter
+        // typed — the one case where the reader most needs the real name,
+        // because they are being told to go and look at the repository.
+        let submitted = RepositoryCoordinate::new("old-owner", "old-name");
+        let canonical = RepositoryCoordinate::new("new-owner", "new-name");
+        let source = RecordingSource {
+            canonical: canonical.clone(),
+            archived: true,
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let mut reported = None;
+        let outcome = execute(
+            &unreachable_pool(),
+            &source,
+            Uuid::nil(),
+            &submitted,
+            &mut reported,
+        )
+        .await;
+
+        assert_eq!(
+            outcome
+                .expect_err("an archived repository is rejected")
+                .code(),
+            ErrorCode::RepositoryArchived
+        );
+        assert_eq!(
+            reported.as_ref(),
+            Some(&canonical),
+            "the rejection must still be recorded against the coordinate GitHub \
+             identified, not the one that was submitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_report_that_cannot_be_stored_is_retriable() {
+        // The analysis itself succeeded — the report was built — and what failed
+        // was the write. A connection, a pool timeout, or a failover is not
+        // something the same commit and ruleset reproduce, so classifying it as
+        // ANALYZER_FAILED_PERMANENT told the UI to withhold retry forever over a
+        // fault that would very likely clear, and blamed the analyzer for a
+        // failure it did not have.
+        let coordinate = RepositoryCoordinate::new("owner", "name");
+        let source = RecordingSource {
+            canonical: coordinate.clone(),
+            archived: false,
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let mut reported = None;
+        let error = execute(
+            &unreachable_pool(),
+            &source,
+            Uuid::nil(),
+            &coordinate,
+            &mut reported,
+        )
+        .await
+        .expect_err("the report cannot be stored against a pool that cannot connect");
+
+        assert_eq!(error.code(), ErrorCode::WorkerFailedRetriable);
+        assert!(
+            error.code().is_retriable(),
+            "a transient write failure must leave retry available"
         );
     }
 

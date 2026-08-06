@@ -175,7 +175,12 @@ pub async fn adopt_coordinate(
 /// # Errors
 ///
 /// Returns [`StoreError::Query`] when the update fails.
-pub async fn fail(pool: &PgPool, id: Uuid, error: &ApiError) -> Result<(), StoreError> {
+pub async fn fail(
+    pool: &PgPool,
+    id: Uuid,
+    error: &ApiError,
+    canonical: Option<&RepositoryCoordinate>,
+) -> Result<(), StoreError> {
     let retriable = error.code().is_retriable();
     let state = if retriable {
         AnalysisState::FailedRetriable
@@ -183,6 +188,11 @@ pub async fn fail(pool: &PgPool, id: Uuid, error: &ApiError) -> Result<(), Store
         AnalysisState::FailedPermanent
     };
 
+    // Owner and name are written here, with the terminal state, rather than
+    // relying on the best-effort update made when the redirect was discovered.
+    // `COALESCE` leaves them untouched when resolution never got far enough to
+    // learn the canonical coordinate — a submission that failed before GitHub
+    // answered has nothing better than what the submitter typed.
     sqlx::query(
         "UPDATE analyses
             SET state = $2,
@@ -191,6 +201,8 @@ pub async fn fail(pool: &PgPool, id: Uuid, error: &ApiError) -> Result<(), Store
                 retry_after_seconds = $5,
                 retry_allowed = $6,
                 retry_reason = $7,
+                owner = COALESCE($8, owner),
+                name = COALESCE($9, name),
                 updated_at = now()
           WHERE id = $1",
     )
@@ -213,6 +225,8 @@ pub async fn fail(pool: &PgPool, id: Uuid, error: &ApiError) -> Result<(), Store
     } else {
         "This failure is deterministic: the same commit and ruleset will fail again."
     })
+    .bind(canonical.map(|coordinate| coordinate.owner.as_str()))
+    .bind(canonical.map(|coordinate| coordinate.name.as_str()))
     .execute(pool)
     .await?;
     Ok(())
@@ -239,13 +253,28 @@ pub async fn complete(pool: &PgPool, id: Uuid, report: &Report) -> Result<(), St
         .execute(&mut *transaction)
         .await?;
 
+    // Owner and name come from the report, in the same transaction that marks
+    // the analysis complete.
+    //
+    // They were previously left to a separate best-effort update made when the
+    // redirect was discovered, so a transient failure of that write left a
+    // COMPLETED analysis naming one repository while its own report named
+    // another — two answers to "what was analyzed" from one row and its
+    // document. The report is the authority here because it is what the
+    // pipeline actually built its findings from.
     sqlx::query(
         "UPDATE analyses
-            SET state = 'COMPLETED', commit_sha = $2, updated_at = now()
+            SET state = 'COMPLETED',
+                commit_sha = $2,
+                owner = $3,
+                name = $4,
+                updated_at = now()
           WHERE id = $1",
     )
     .bind(id)
     .bind(&report.commit_sha)
+    .bind(&report.repository.owner)
+    .bind(&report.repository.name)
     .execute(&mut *transaction)
     .await?;
 
@@ -365,6 +394,7 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::RateLimited => "RATE_LIMITED",
         ErrorCode::WorkerFailedRetriable => "WORKER_FAILED_RETRIABLE",
         ErrorCode::AnalyzerFailedPermanent => "ANALYZER_FAILED_PERMANENT",
+        ErrorCode::AnalysisNotFound => "ANALYSIS_NOT_FOUND",
         ErrorCode::MalformedRequest => "MALFORMED_REQUEST",
         ErrorCode::RequestTooLarge => "REQUEST_TOO_LARGE",
         ErrorCode::RequestTimedOut => "REQUEST_TIMED_OUT",
