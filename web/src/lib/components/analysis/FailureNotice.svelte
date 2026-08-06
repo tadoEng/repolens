@@ -15,18 +15,15 @@
 	import { duration } from '$lib/contract/format';
 	import type { ApiError, RetryPolicy } from '@repolens/api-client';
 
-	import RetryControl from './RetryControl.svelte';
+	import RetryNotice from './RetryNotice.svelte';
 
 	interface Props {
 		/** Present on both failure states, but the contract makes it optional — so is this. */
 		error: ApiError | null | undefined;
 		retry: RetryPolicy;
-		onRetry: () => void | Promise<void>;
-		busy?: boolean;
-		problem?: string | null;
 	}
 
-	let { error, retry, onRetry, busy = false, problem = null }: Props = $props();
+	let { error, retry }: Props = $props();
 
 	const code = $derived(errorCode(error?.code));
 </script>
@@ -50,7 +47,7 @@
 		</p>
 	{/if}
 
-	<RetryControl {retry} {onRetry} {busy} {problem} />
+	<RetryNotice {retry} />
 </div>
 
 <style>

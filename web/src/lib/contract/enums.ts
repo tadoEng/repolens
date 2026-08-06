@@ -20,6 +20,7 @@
 
 import {
 	describeAnalysisState,
+	describeCodeRole,
 	describeConfidence,
 	describeErrorCode,
 	describeEvidenceKind,
@@ -97,6 +98,17 @@ export function findingCategory(raw: string | null | undefined): EnumDisplay {
 	return present(describeFindingCategory, raw);
 }
 
+/**
+ * How a counted file was classified. Structural evidence, never a quality score.
+ *
+ * `GENERATED` in particular is the reason this is rendered at all: a 1,980-line generated
+ * client at the top of the largest-files list is not the same fact as a 1,980-line
+ * hand-written module, and a list that omits the role invites exactly that misreading.
+ */
+export function codeRole(raw: string | null | undefined): EnumDisplay {
+	return present(describeCodeRole, raw);
+}
+
 export function evidenceKind(raw: string | null | undefined): EnumDisplay {
 	return present(describeEvidenceKind, raw);
 }
@@ -114,34 +126,88 @@ export function errorCode(raw: string | null | undefined): EnumDisplay {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Step order                                                                  */
+/* The analysis-state partition                                                */
 /* -------------------------------------------------------------------------- */
 
 /**
- * The five steps of the pipeline, in the order the contract documents.
+ * What one `AnalysisState` *is*: a numbered step of the pipeline, or a terminal outcome.
  *
- * `AnalysisState` is "ordered as the work actually proceeds, so a UI can render a checklist
- * by position without a second table mapping states to steps" — so this array *is* that
- * order. The three terminal states are absent because they are not steps: `COMPLETED` means
- * every step is behind us, and neither failure says which step it reached.
- *
- * `satisfies readonly AnalysisState[]` rather than a bare array: a state renamed in the
- * Rust enum fails to compile here instead of producing a timeline that silently stops
- * advancing.
+ * A discriminated union rather than two optional fields, so the two impossible shapes —
+ * a step that is also terminal, and a terminal state carrying a step number — are not
+ * merely discouraged but unrepresentable.
  */
-export const ANALYSIS_STEPS = [
-	'QUEUED',
-	'RESOLVING',
-	'COLLECTING',
-	'ANALYZING',
-	'BUILDING_REPORT'
-] as const satisfies readonly AnalysisState[];
+export type AnalysisStatePhase =
+	| { readonly phase: 'step'; readonly order: number }
+	| { readonly phase: 'terminal'; readonly failure: boolean };
 
-const TERMINAL_STATES = [
-	'COMPLETED',
-	'FAILED_RETRIABLE',
-	'FAILED_PERMANENT'
-] as const satisfies readonly AnalysisState[];
+/**
+ * Every `AnalysisState`, partitioned. **This is the single source of step order.**
+ *
+ * ## Why a `Record`, and not two arrays
+ *
+ * The obvious shape is `['QUEUED', …] as const satisfies readonly AnalysisState[]`, and it
+ * is not enough. `satisfies` proves every value *listed* is a valid state; it proves
+ * nothing about the states that are not listed. A state added to the Rust enum flows
+ * through utoipa into `schema.ts`, gets a correct label from the contract package's
+ * `Record<AnalysisState, string>` gate — and is still absent from both arrays, while this
+ * file compiles and the timeline silently stops advancing at the state before it.
+ *
+ * A total `Record<AnalysisState, …>` closes that. The compiler then rejects all four ways
+ * the partition can go wrong:
+ *
+ *   - a **missing** state — the object literal lacks a required key;
+ *   - an **extra** state, left behind after a rename — the key is not in `AnalysisState`;
+ *   - a **duplicated** state — TypeScript refuses repeated keys in an object literal;
+ *   - a **miscategorised** state — the union above makes a terminal step unwritable.
+ *
+ * `src/tests/analysis-state-partition.test.ts` re-checks the same properties at run time
+ * against the contract package's own variant list, because the type-level gate is defeated
+ * by one person widening the annotation to unblock themselves.
+ *
+ * `AnalysisState` is documented as "ordered as the work actually proceeds", so `order`
+ * restates the contract's own sequence rather than inventing one. The terminal states have
+ * no order because neither failure reports how far it got, and `COMPLETED` means every
+ * step is behind us.
+ */
+export const ANALYSIS_STATE_PARTITION: Readonly<Record<AnalysisState, AnalysisStatePhase>> = {
+	QUEUED: { phase: 'step', order: 1 },
+	RESOLVING: { phase: 'step', order: 2 },
+	COLLECTING: { phase: 'step', order: 3 },
+	ANALYZING: { phase: 'step', order: 4 },
+	BUILDING_REPORT: { phase: 'step', order: 5 },
+	COMPLETED: { phase: 'terminal', failure: false },
+	FAILED_RETRIABLE: { phase: 'terminal', failure: true },
+	FAILED_PERMANENT: { phase: 'terminal', failure: true }
+};
+
+/**
+ * The pipeline steps, in order — derived, never written down a second time.
+ *
+ * A hand-maintained copy of this list is precisely the drift the partition exists to
+ * prevent, so the timeline reads it from the partition and sorts by the declared order
+ * rather than trusting object key order.
+ */
+export const ANALYSIS_STEPS: readonly AnalysisState[] = Object.entries(ANALYSIS_STATE_PARTITION)
+	.flatMap(([state, phase]) =>
+		phase.phase === 'step' ? [{ state: state as AnalysisState, order: phase.order }] : []
+	)
+	.sort((left, right) => left.order - right.order)
+	.map((entry) => entry.state);
+
+/**
+ * The partition entry for a wire value, or `null` when this build has never seen it.
+ *
+ * `Object.hasOwn` rather than a bare lookup: `constructor` and `toString` are inherited
+ * from `Object.prototype`, so a bare lookup would report them as recognised states and
+ * hand a *function* to the caller. Only a misbehaving server sends one, which is exactly
+ * the case the unknown-variant policy exists for.
+ */
+function phaseOf(raw: string | null | undefined): AnalysisStatePhase | null {
+	if (raw === null || raw === undefined) return null;
+	return Object.hasOwn(ANALYSIS_STATE_PARTITION, raw)
+		? ANALYSIS_STATE_PARTITION[raw as AnalysisState]
+		: null;
+}
 
 /**
  * Whether polling should stop.
@@ -151,16 +217,17 @@ const TERMINAL_STATES = [
  * asking, which the server's `poll_after_ms` bounds anyway.
  */
 export function isTerminal(raw: string | null | undefined): boolean {
-	return TERMINAL_STATES.some((state) => state === raw);
+	return phaseOf(raw)?.phase === 'terminal';
 }
 
 /** Whether the analysis failed. Unrecognised values are not failures, for the same reason. */
 export function isFailure(raw: string | null | undefined): boolean {
-	return raw === 'FAILED_RETRIABLE' || raw === 'FAILED_PERMANENT';
+	const phase = phaseOf(raw);
+	return phase !== null && phase.phase === 'terminal' && phase.failure;
 }
 
 /** 1-based step position, or `null` for terminal and unrecognised states. */
 export function analysisStepNumber(raw: string | null | undefined): number | null {
-	const index = ANALYSIS_STEPS.findIndex((step) => step === raw);
-	return index === -1 ? null : index + 1;
+	const phase = phaseOf(raw);
+	return phase !== null && phase.phase === 'step' ? phase.order : null;
 }

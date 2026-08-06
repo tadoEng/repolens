@@ -6,13 +6,13 @@ import {
 	RESOLVING_FIXTURE
 } from '@repolens/api-client';
 import { tick } from 'svelte';
-import { expect, test, vi } from 'vitest';
+import { expect, test } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 
 import AnalysisIdentityHeader from '$lib/components/analysis/AnalysisIdentityHeader.svelte';
 import FailureNotice from '$lib/components/analysis/FailureNotice.svelte';
 import ProgressTimeline from '$lib/components/analysis/ProgressTimeline.svelte';
-import RetryControl from '$lib/components/analysis/RetryControl.svelte';
+import RetryNotice from '$lib/components/analysis/RetryNotice.svelte';
 import '$lib/styles/global.css';
 
 /**
@@ -141,64 +141,69 @@ test('the live region is polite and stays silent when a poll changes nothing', a
 	observer.disconnect();
 });
 
-test('retry is offered when the server allows it, and calls back on click', async () => {
+test('a server-permitted retry offers no control, and says why instead', async () => {
+	/*
+	 * The blocker this locks down. Retry is an authenticated mutation that starts paid work,
+	 * and the contract defines no operation for it — so there is no button, no matter what
+	 * the server says it would accept.
+	 *
+	 * The important half is the second one: the affordance is *withheld with a reason*, not
+	 * silently dropped. A failure page that just omits it reads as a rendering bug and
+	 * leaves the reader with no account of whether another attempt is possible at all.
+	 */
 	const analysis = FAILED_RETRIABLE_FIXTURE.analysis;
 	expect(analysis.retry.allowed).toBe(true);
 
-	const onRetry = vi.fn();
-	const screen = await render(RetryControl, { props: { retry: analysis.retry, onRetry } });
+	const screen = await render(RetryNotice, { props: { retry: analysis.retry } });
+	const text = screen.container.textContent ?? '';
 
-	const button = screen.getByRole('button', { name: 'Retry this analysis' });
-	await expect.element(button).toBeInTheDocument();
-
-	// No confirmation dialog: confirmations are for destructive actions, and retry is
-	// idempotent.
-	await button.click();
-	expect(onRetry).toHaveBeenCalledTimes(1);
+	expect(screen.container.querySelector('button')).toBeNull();
+	expect(text).toContain('Retry is not available in this build');
+	// The reason, not merely the refusal.
+	expect(text).toContain('the published API contract does not define yet');
+	// And what is still true: the analysis is untouched.
+	expect(text).toContain('Reload this page');
 });
 
-test('FAILED_PERMANENT offers no retry and shows the server reason verbatim', async () => {
+test('FAILED_PERMANENT shows the server reason verbatim, not the build limitation', async () => {
 	const analysis = FAILED_PERMANENT_FIXTURE.analysis;
 	expect(analysis.retry.allowed).toBe(false);
 
-	const screen = await render(RetryControl, {
-		props: { retry: analysis.retry, onRetry: vi.fn() }
-	});
+	const screen = await render(RetryNotice, { props: { retry: analysis.retry } });
+	const text = screen.container.textContent ?? '';
 
 	expect(screen.container.querySelector('button')).toBeNull();
 	// Displayed verbatim, because it explains rather than merely denies.
-	expect(screen.container.textContent).toContain(analysis.retry.reason ?? '');
+	expect(text).toContain(analysis.retry.reason ?? '');
+	// "The server refused" and "we cannot ask yet" are different facts and must not merge.
+	expect(text).not.toContain('in this build');
 });
 
-test('retry follows retry.allowed, never the state name', async () => {
+test('what is said about retry follows retry.allowed, never the state name', async () => {
 	/*
-	 * The defect this rules out: a frontend that renders a retry button because the state
-	 * is called `FAILED_RETRIABLE`. Whether a retry is accepted also depends on attempts
-	 * already spent and whether the work is still claimable — facts only the server holds.
-	 *
-	 * So: the retriable failure's own error, paired with a policy that refuses. A UI keyed
-	 * off the state name shows a button here and it does nothing.
+	 * The retriable failure's own error, paired with a policy that refuses. A UI keyed off
+	 * the state name would report `FAILED_RETRIABLE` as retriable and contradict the server.
 	 */
 	const screen = await render(FailureNotice, {
 		props: {
 			error: FAILED_RETRIABLE_FIXTURE.analysis.error,
-			retry: FAILED_PERMANENT_FIXTURE.analysis.retry,
-			onRetry: vi.fn()
+			retry: FAILED_PERMANENT_FIXTURE.analysis.retry
 		}
 	});
+	const text = screen.container.textContent ?? '';
 
 	expect(screen.container.querySelector('button')).toBeNull();
-	expect(screen.container.textContent).toContain('Retry is not available');
+	expect(text).toContain(FAILED_PERMANENT_FIXTURE.analysis.retry.reason ?? '');
+	expect(text).not.toContain('in this build');
 	// The failure itself is still fully described.
-	expect(screen.container.textContent).toContain('RATE_LIMITED');
+	expect(text).toContain('RATE_LIMITED');
 });
 
 test('a supplied retry-after is rendered as words, and an absent one is not invented', async () => {
 	const withWait = await render(FailureNotice, {
 		props: {
 			error: FAILED_RETRIABLE_FIXTURE.analysis.error,
-			retry: FAILED_RETRIABLE_FIXTURE.analysis.retry,
-			onRetry: vi.fn()
+			retry: FAILED_RETRIABLE_FIXTURE.analysis.retry
 		}
 	});
 	expect(FAILED_RETRIABLE_FIXTURE.analysis.error?.retry_after_seconds).toBe(900);
@@ -207,8 +212,7 @@ test('a supplied retry-after is rendered as words, and an absent one is not inve
 	const withoutWait = await render(FailureNotice, {
 		props: {
 			error: FAILED_PERMANENT_FIXTURE.analysis.error,
-			retry: FAILED_PERMANENT_FIXTURE.analysis.retry,
-			onRetry: vi.fn()
+			retry: FAILED_PERMANENT_FIXTURE.analysis.retry
 		}
 	});
 	// Absent rather than zero when unknown: "retry in 0s" from a missing value is worse

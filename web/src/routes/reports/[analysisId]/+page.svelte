@@ -9,21 +9,49 @@
 	 * carries the summarization load, every finding separates state, severity and
 	 * confidence, and every conclusion is traceable to evidence a reader can check against
 	 * the commit.
+	 *
+	 * ## The hierarchy is the accepted one, not a flat findings list
+	 *
+	 * Technology, Architecture, Engineering system and Maintenance are first-class sections,
+	 * built by grouping the server-ordered findings on `FindingCategory` — a view of data
+	 * the response already carries, never a second taxonomy and never a place to synthesise
+	 * a finding a section would otherwise lack. `sections.ts` owns the mapping and fails to
+	 * compile if the contract gains a category.
+	 *
+	 * Every finding renders as a full card exactly once, in the section it reads under, so
+	 * its `finding-…` anchor is unique. Findings is an index over those cards; it repeats
+	 * none of them, except for any finding whose category this build does not recognise,
+	 * which has nowhere else to go and is rendered there in full rather than dropped.
 	 */
 	import { page } from '$app/state';
+	import { SvelteSet } from 'svelte/reactivity';
 
 	import { fetchReport, type Report } from '$lib/api/analysis';
+	import CategoryFindings from '$lib/components/report/CategoryFindings.svelte';
 	import CompositionSection from '$lib/components/report/CompositionSection.svelte';
 	import EvidenceAppendix from '$lib/components/report/EvidenceAppendix.svelte';
-	import FindingsSection from '$lib/components/report/FindingsSection.svelte';
+	import EvidenceExpander from '$lib/components/report/EvidenceExpander.svelte';
+	import FindingsIndex from '$lib/components/report/FindingsIndex.svelte';
 	import OverviewSection from '$lib/components/report/OverviewSection.svelte';
 	import ReportHeader from '$lib/components/report/ReportHeader.svelte';
 	import ReportNav from '$lib/components/report/ReportNav.svelte';
 	import ReportSection from '$lib/components/report/ReportSection.svelte';
-	import { REPORT_SECTIONS } from '$lib/components/report/sections';
+	import {
+		findingsForSection,
+		REPORT_SECTIONS,
+		unplacedFindings
+	} from '$lib/components/report/sections';
 	import { errorCode } from '$lib/contract/enums';
 
 	const analysisId = $derived(page.params.analysisId ?? '');
+
+	/**
+	 * Expanded evidence, keyed by finding id, for the whole document.
+	 *
+	 * Owned here rather than by a section, because "Expand all evidence" now spans four
+	 * category sections and the cards it opens live in all of them.
+	 */
+	const expanded = new SvelteSet<string>();
 
 	type LoadState =
 		| { kind: 'loading' }
@@ -133,9 +161,14 @@
 		{/if}
 	</div>
 {:else}
+	{@const findings = load.report.findings}
+	{@const unplaced = unplacedFindings(findings)}
+
 	<ReportHeader report={load.report} />
 
 	<ReportNav sections={REPORT_SECTIONS} />
+
+	<EvidenceExpander {findings} {expanded} />
 
 	<ReportSection
 		id="overview"
@@ -144,17 +177,33 @@
 	>
 		<OverviewSection
 			overview={load.report.overview}
-			findings={load.report.findings}
+			{findings}
 			limitations={load.report.limitations}
 		/>
 	</ReportSection>
 
 	<ReportSection
-		id="findings"
-		title="Findings"
-		lead="Every conclusion the ruleset reached, in the order the server fixed. State, severity and confidence are three separate answers and are never merged."
+		id="technology"
+		title="Technology"
+		lead="What the repository is built with, as the ruleset observed it rather than as its documentation claims."
 	>
-		<FindingsSection findings={load.report.findings} />
+		<CategoryFindings
+			findings={findingsForSection(findings, 'technology')}
+			{expanded}
+			emptyLabel="technology"
+		/>
+	</ReportSection>
+
+	<ReportSection
+		id="architecture"
+		title="Architecture"
+		lead="How the repository is put together: its shape, boundaries and the structure a newcomer has to hold in their head."
+	>
+		<CategoryFindings
+			findings={findingsForSection(findings, 'architecture')}
+			{expanded}
+			emptyLabel="architecture"
+		/>
 	</ReportSection>
 
 	<ReportSection id="composition" title="Composition">
@@ -165,11 +214,57 @@
 	</ReportSection>
 
 	<ReportSection
+		id="engineering-system"
+		title="Engineering system"
+		lead="How the code is built, tested, documented and shipped — the machinery around the source rather than the source itself."
+	>
+		<CategoryFindings
+			findings={findingsForSection(findings, 'engineering-system')}
+			{expanded}
+			emptyLabel="the engineering system"
+		/>
+	</ReportSection>
+
+	<ReportSection
+		id="maintenance"
+		title="Maintenance"
+		lead="What keeping this repository alive looks like: operational surface, security posture and the signals that age badly."
+	>
+		<CategoryFindings
+			findings={findingsForSection(findings, 'maintenance')}
+			{expanded}
+			emptyLabel="maintenance"
+		/>
+	</ReportSection>
+
+	<ReportSection
+		id="findings"
+		title="Findings"
+		lead="Every conclusion the ruleset reached, indexed in the order the server fixed. Each row links to the card in the section it reads under, where its evidence and limitations live. State, severity and confidence are three separate answers and are never merged."
+	>
+		<FindingsIndex {findings} />
+
+		{#if unplaced.length > 0}
+			<!--
+				A category from a newer backend than this bundle. It has no section to read
+				under, and omitting it would be the silent drop the unknown-variant policy
+				forbids — so the card is rendered here, in full, and named for what it is.
+			-->
+			<p class="report__unplaced">
+				{unplaced.length === 1 ? 'One finding uses' : `${unplaced.length} findings use`} a category this
+				build does not recognise, so {unplaced.length === 1 ? 'it has' : 'they have'} no section above.
+				{unplaced.length === 1 ? 'It is' : 'They are'} shown here in full.
+			</p>
+			<CategoryFindings findings={unplaced} {expanded} emptyLabel="an unrecognised category" />
+		{/if}
+	</ReportSection>
+
+	<ReportSection
 		id="evidence"
 		title="Evidence"
 		lead="Every cited path and digest in one index, so the report stays searchable and printable."
 	>
-		<EvidenceAppendix findings={load.report.findings} />
+		<EvidenceAppendix {findings} />
 	</ReportSection>
 {/if}
 
@@ -206,6 +301,12 @@
 
 	.report__code {
 		font-size: var(--font-size-sm);
+		color: var(--text-secondary);
+	}
+
+	.report__unplaced {
+		max-inline-size: var(--measure);
+		margin: 0;
 		color: var(--text-secondary);
 	}
 </style>

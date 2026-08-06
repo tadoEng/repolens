@@ -39,6 +39,11 @@ function share(value: number, total: number): number {
  * Append the shortfall between a breakdown and its total, when there is one.
  *
  * Only when it is a whole line or more: floating point noise is not a finding.
+ *
+ * A listed sum that *exceeds* the total gets no row here, because there is no honest one to
+ * write — a negative remainder is not a category of code. That case is an inconsistency in
+ * the response rather than a gap in the breakdown, and `overCountedBreakdowns` surfaces it
+ * as one instead of letting each bar clamp independently and hide it.
  */
 function withRemainder(rows: MetricRow[], total: number, label: string): MetricRow[] {
 	const listed = rows.reduce((sum, row) => sum + row.value, 0);
@@ -80,31 +85,88 @@ export function areaCodeRows(composition: LineCountSummary): MetricRow[] {
 	return withRemainder(rows, composition.code_lines, 'Not listed individually');
 }
 
+/** One row of the production / test / generated table. */
+export interface RoleRow {
+	/** Raw wire value, so an unrecognised role can still be named on screen. */
+	readonly role: string;
+	readonly files: number;
+	readonly codeLines: number;
+	/** Share of the server-reported code lines, clamped to `[0, 1]`. */
+	readonly proportion: number;
+}
+
 /**
- * Code, comment and blank lines for the repository as a whole.
+ * Lines of code per role, in the server's order.
  *
- * A single composition rather than a comparison, which is why it is a table with one
- * proportion bar rather than a third chart.
+ * Table three of three, and **no bar** — the acceptance criterion is two bar views, and the
+ * two comparative ones earn them. This is a single composition of a known whole, which a
+ * share column states exactly and a bar only approximates.
+ *
+ * No synthesised remainder row here, unlike the language and area breakdowns. `CodeRole` is
+ * a closed contract enum, and appending a sixth pseudo-role for whatever the policy did not
+ * attribute would put a value on screen that the API can never send. The shortfall is
+ * reported as a sentence by `roleCoverage` instead.
  */
-export function lineKindRows(composition: LineCountSummary): MetricRow[] {
-	const total = composition.total_lines;
-	return [
+export function roleRows(composition: LineCountSummary): RoleRow[] {
+	return composition.roles.map((role) => ({
+		role: role.role,
+		files: role.files,
+		codeLines: role.code_lines,
+		proportion: share(role.code_lines, composition.code_lines)
+	}));
+}
+
+/** How much of the counted code the role breakdown accounts for. */
+export interface RoleCoverage {
+	readonly listed: number;
+	readonly total: number;
+	/** True when the listed roles account for every counted code line. */
+	readonly complete: boolean;
+}
+
+export function roleCoverage(composition: LineCountSummary): RoleCoverage {
+	const listed = composition.roles.reduce((sum, role) => sum + role.code_lines, 0);
+	return {
+		listed,
+		total: composition.code_lines,
+		// Whole lines: a sub-line discrepancy is floating point, not an unattributed file.
+		complete: Math.abs(composition.code_lines - listed) < 1
+	};
+}
+
+/** A breakdown whose listed rows add up to more than the server's own total. */
+export interface OverCount {
+	readonly label: string;
+	readonly listed: number;
+	readonly total: number;
+}
+
+/**
+ * Breakdowns that over-count, so the response can say so rather than the bars hiding it.
+ *
+ * Each proportion is independently clamped to `[0, 1]`, which is the right behaviour for a
+ * single bar and the wrong behaviour for a set of them: three rows at 60% of the same total
+ * render as three plausible bars and one impossible sum. Clamping alone would leave the
+ * reader with a chart that quietly does not add up. Naming the inconsistency costs one
+ * sentence and is the difference between a limitation and a lie.
+ */
+export function overCountedBreakdowns(composition: LineCountSummary): OverCount[] {
+	const total = composition.code_lines;
+	const sums: OverCount[] = [
 		{
-			label: 'Code',
-			value: composition.code_lines,
-			proportion: share(composition.code_lines, total)
+			label: 'per-language',
+			listed: composition.languages.reduce((sum, entry) => sum + entry.code_lines, 0),
+			total
 		},
 		{
-			label: 'Comments',
-			value: composition.comment_lines,
-			proportion: share(composition.comment_lines, total)
+			label: 'per-area',
+			listed: composition.areas.reduce((sum, entry) => sum + entry.code_lines, 0),
+			total
 		},
-		{
-			label: 'Blank',
-			value: composition.blank_lines,
-			proportion: share(composition.blank_lines, total)
-		}
+		{ label: 'per-role', listed: roleCoverage(composition).listed, total }
 	];
+
+	return sums.filter((entry) => entry.listed - entry.total >= 1);
 }
 
 /**

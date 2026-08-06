@@ -2,25 +2,35 @@
 	/*
 	 * Repository composition — the section most easily misread as a score.
 	 *
-	 * ## Why two charts and three tables, and not five charts
+	 * ## Two charts and three tables, meant literally
 	 *
-	 * LOC is genuinely comparative, so bars earn their place exactly twice: code by
+	 * LOC is genuinely comparative, so bars earn their place **exactly twice**: code by
 	 * language, and code by top-level area (the more architecturally useful of the pair —
 	 * it answers frontend-heavy, test-heavy or tooling-dominated at a glance). Everything
-	 * else here is a table, because the payload is either three series at once, where
-	 * stacked bars hide small values, or a single composition, which is not a comparison.
+	 * else is a table, because the payload is either three series at once, where stacked
+	 * bars hide small values and read poorly aloud, or a single composition of a known
+	 * whole, which a share column states exactly and a bar only approximates.
 	 *
 	 *   1. Code by language ............ bars   (comparing magnitudes)
 	 *   2. Code by top-level area ...... bars   (comparing magnitudes)
 	 *   3. Code / comments / blanks .... table  (3 series x N languages)
-	 *   4. Repository line composition . table + proportion bars (one composition)
-	 *   5. Exclusion ledger ............ table  (long rule strings, not magnitudes)
+	 *   4. Production / test / generated table  (one composition)
+	 *   5. Largest source files ........ table  (long paths, not magnitudes)
 	 *
-	 * View 4 stands in for the "production / test / generated" split named in the design
-	 * direction: **`analysis-v1` carries no such classification**, and inventing one in the
-	 * frontend would be exactly the fabrication the contract pipeline exists to prevent.
-	 * The repository's own code/comment/blank composition is the equivalent single
-	 * composition the contract does report.
+	 * Views 4 and 5 render `LineCountSummary.roles` and `.largest_files`, which the contract
+	 * now carries. An earlier head substituted other data for them; that is why the count of
+	 * bar-drawing views is asserted in both the browser and end-to-end suites rather than
+	 * left to review.
+	 *
+	 * The exclusion ledger follows, **in addition to** the five views rather than in place of
+	 * any of them: it is what makes the five checkable.
+	 *
+	 * ## Role is rendered, not just counted
+	 *
+	 * `largest_files` carries a `CodeRole` per row because size alone is a review-priority
+	 * signal and a *generated* file at the top of the list is not the same fact as a
+	 * hand-written one. Dropping the column is the most common way this particular list
+	 * misleads.
 	 *
 	 * ## The disclaimer is in-section, not a footnote
 	 *
@@ -34,9 +44,12 @@
 		areaCodeRows,
 		exclusionLedger,
 		languageCodeRows,
-		lineKindRows
+		overCountedBreakdowns,
+		roleCoverage,
+		roleRows
 	} from '$lib/contract/composition';
-	import { bytes, integer } from '$lib/contract/format';
+	import { codeRole } from '$lib/contract/enums';
+	import { bytes, integer, percent } from '$lib/contract/format';
 	import type { Limitation, LineCountSummary } from '@repolens/api-client';
 
 	import LimitationsList from './LimitationsList.svelte';
@@ -55,6 +68,9 @@
 	let { composition, limitations }: Props = $props();
 
 	const ledger = $derived(composition ? exclusionLedger(composition) : null);
+	const roles = $derived(composition ? roleRows(composition) : []);
+	const coverage = $derived(composition ? roleCoverage(composition) : null);
+	const overCounted = $derived(composition ? overCountedBreakdowns(composition) : []);
 </script>
 
 <!--
@@ -132,17 +148,123 @@
 		</table>
 	</ScrollRegion>
 
-	<MetricTable
-		caption="Repository line composition: how the total splits into code, comments and blank lines."
-		rowHeader="Kind"
-		valueHeader="Lines"
-		rows={lineKindRows(composition)}
-	/>
+	<!--
+		Production / test / generated. A table with a share column and no bar: the acceptance
+		criterion is two bar views, and the two comparative ones have them.
+	-->
+	{#if roles.length === 0}
+		<p class="composition__lead">
+			<StatusChip state="UNABLE_TO_VERIFY" />
+			<span>
+				This analysis reported no breakdown by role, so what share of the repository is production
+				code is not established here. That is not a claim that none of it is.
+			</span>
+		</p>
+	{:else}
+		<ScrollRegion label="Code lines by role: production, test, generated and tooling">
+			<table class="composition__table">
+				<caption>
+					Code lines by role. Structural evidence, not a judgement: generated code is named as
+					generated so it is not counted as hand-written work.
+				</caption>
+				<thead>
+					<tr>
+						<th scope="col">Role</th>
+						<th scope="col" class="composition__number">Files</th>
+						<th scope="col" class="composition__number">Code</th>
+						<th scope="col" class="composition__number">Share</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each roles as row (row.role)}
+						{@const role = codeRole(row.role)}
+						<tr>
+							<th scope="row" data-role={role.raw}>{role.label}</th>
+							<td class="composition__number">{integer(row.files)}</td>
+							<td class="composition__number">{integer(row.codeLines)}</td>
+							<td class="composition__number">{percent(row.proportion)}</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</ScrollRegion>
+
+		{#if coverage && !coverage.complete && coverage.listed < coverage.total}
+			<!--
+				Stated rather than absorbed into a synthesised sixth role. `CodeRole` is a closed
+				contract enum, and inventing a row the API can never send is the fabrication this
+				whole pipeline exists to prevent.
+			-->
+			<p class="composition__lead">
+				The listed roles account for {integer(coverage.listed)} of {integer(coverage.total)} counted code
+				lines. The remainder was not attributed to a role.
+			</p>
+		{/if}
+	{/if}
+
+	<!--
+		Largest source files. A table because the payload is a long path plus a number, and
+		bars handle long labels badly. The list is server-ordered and bounded by the contract.
+	-->
+	{#if composition.largest_files.length === 0}
+		<p class="composition__lead">This analysis reported no largest-file list.</p>
+	{:else}
+		<ScrollRegion label="Largest source files by line count">
+			<table class="composition__table composition__table--files">
+				<caption>
+					The largest source files by line count, server-ordered and capped at ten. Size is a
+					review-priority signal rather than a defect — and the role column is what stops a large
+					generated file being read as a large hand-written one.
+				</caption>
+				<thead>
+					<tr>
+						<th scope="col">Path</th>
+						<th scope="col">Language</th>
+						<th scope="col">Role</th>
+						<th scope="col" class="composition__number">Code</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each composition.largest_files as file (file.path)}
+						{@const role = codeRole(file.role)}
+						<tr>
+							<th scope="row"><code class="composition__path">{file.path}</code></th>
+							<td>{file.language}</td>
+							<td><span class="composition__role" data-role={role.raw}>{role.label}</span></td>
+							<td class="composition__number">{integer(file.code_lines)}</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		</ScrollRegion>
+	{/if}
 
 	<p class="composition__total">
 		{integer(composition.total_lines)} physical lines across {integer(composition.total_files)} counted
 		files.
 	</p>
+
+	{#if overCounted.length > 0}
+		<!--
+			A breakdown that sums to more than the total it is a breakdown *of*. Each bar is
+			clamped independently, so without this the reader sees a set of plausible bars whose
+			sum is impossible and no indication that anything is wrong.
+		-->
+		<div class="composition__inconsistency">
+			<p class="composition__inconsistency-lead">
+				<StatusChip state="UNABLE_TO_VERIFY" />
+				<span>Part of this breakdown does not add up, and is reported rather than adjusted.</span>
+			</p>
+			<ul>
+				{#each overCounted as entry (entry.label)}
+					<li>
+						The {entry.label} rows total {integer(entry.listed)} code lines, more than the
+						{integer(entry.total)} the analysis reported overall.
+					</li>
+				{/each}
+			</ul>
+		</div>
+	{/if}
 
 	<h3 class="composition__ledger-heading" id="composition-ledger">What was counted</h3>
 
@@ -244,6 +366,54 @@
 
 	.composition__table {
 		min-inline-size: 28rem;
+	}
+
+	.composition__table--files {
+		min-inline-size: 34rem;
+	}
+
+	.composition__path {
+		overflow-wrap: anywhere;
+	}
+
+	/*
+	 * Neutral for every role, deliberately. A role is structural evidence, not a verdict:
+	 * colouring `GENERATED` as a warning would smuggle in a judgement the analyzer never
+	 * made. The word carries the whole meaning, which is also what makes it correct in
+	 * greyscale and forced colours.
+	 */
+	.composition__role {
+		display: inline-block;
+		padding: 0 var(--space-2);
+		border: var(--border-width) solid var(--border-subtle);
+		border-radius: var(--radius-sm);
+		font-size: var(--font-size-sm);
+		white-space: nowrap;
+	}
+
+	.composition__inconsistency {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+		max-inline-size: var(--measure);
+		padding: var(--space-3);
+		border: var(--border-width) dashed var(--border-strong);
+		border-radius: var(--radius-sm);
+	}
+
+	.composition__inconsistency-lead {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: var(--space-2);
+		margin: 0;
+	}
+
+	.composition__inconsistency ul {
+		margin: 0;
+		padding-inline-start: var(--space-6);
+		font-size: var(--font-size-sm);
+		color: var(--text-secondary);
 	}
 
 	.composition__number {

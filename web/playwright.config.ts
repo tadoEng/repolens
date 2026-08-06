@@ -28,6 +28,21 @@ export default defineConfig({
 	retries: process.env.CI ? 2 : 0,
 	reporter: process.env.CI ? 'github' : 'list',
 
+	/*
+	 * Visual baselines are never written by an ordinary run.
+	 *
+	 * Playwright's default is `missing`, which silently writes a baseline for anything that
+	 * has none — so the first run on a new platform *approves whatever it happened to
+	 * render*, including a regression, and every run afterwards compares against it. A
+	 * baseline has to be looked at by a person before it becomes the truth, which means
+	 * writing one is an explicit act: `--update-snapshots`, which overrides this.
+	 *
+	 * `e2e/visual.spec.ts` also reads this value: with no baseline for the current platform
+	 * it skips and names the command, rather than failing on an absence nobody can fix from
+	 * a CI log.
+	 */
+	updateSnapshots: 'none',
+
 	webServer: {
 		command: 'pnpm run build && pnpm run preview --port 4173 --strictPort',
 		url: 'http://localhost:4173',

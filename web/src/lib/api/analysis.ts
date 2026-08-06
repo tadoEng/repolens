@@ -21,9 +21,27 @@
  *     `@repolens/msw`'s `analysis-handlers.ts` intercepts. That is deliberate: the mock and
  *     the client have to agree, and the cheapest way to guarantee it is a test that asserts
  *     these builders against the handler paths (`src/tests/analysis-api.svelte.test.ts`).
+ *   - **Everything here is a `GET`, and that is a boundary rather than a coincidence.**
  *
- * When #6 lands the endpoints, the regenerated `paths` makes them callable and each
- * function below collapses to a single `api.GET(...)`. The exported types and the outcome
+ * ## Why there is no retry request
+ *
+ * There was one, and it is gone. A provisional path is defensible for a read: it is
+ * idempotent, it is anonymous by design — the unguessable analysis ID *is* the capability —
+ * and it is pinned to a matching MSW handler, so a drifting URL fails a test rather than a
+ * deployment. None of that transfers to `POST …/retry`. That request **starts work**: it is
+ * an authenticated mutation on the paid path, and hand-writing it here would have meant
+ * inventing four things the contract does not yet carry — the operation, its request and
+ * error schemas, the Firebase bearer credential (#13), and its idempotency semantics.
+ *
+ * A retry sent without those is not a smaller version of the real feature. It is a request
+ * whose behaviour on a double-click, on a replay, or against a server that has already
+ * requeued the work is undefined, and the failure mode is duplicate paid analyses rather
+ * than an error message. So the affordance is withheld, visibly and with the reason stated
+ * on screen (`RetryNotice.svelte`) rather than silently dropped.
+ *
+ * When #6 lands the endpoints, the regenerated `paths` makes the reads callable and each
+ * function below collapses to a single `api.GET(...)`; retry arrives at the same time as
+ * its generated, authenticated operation, not before. The exported types and the outcome
  * union do not change, so no component is touched.
  */
 
@@ -64,11 +82,6 @@ export function reportPath(analysisId: string): string {
 	return `${analysisPath(analysisId)}/report`;
 }
 
-/** `POST` this to ask for a retry. Provisional — see the banner above. */
-export function retryPath(analysisId: string): string {
-	return `${analysisPath(analysisId)}/retry`;
-}
-
 /** Absolute URL for a path, against the single configured API origin. */
 export function apiUrl(path: string): string {
 	return `${ORIGIN}${path}`;
@@ -99,12 +112,19 @@ function asApiError(body: unknown): ApiError | null {
 	};
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<Fetched<T>> {
+/**
+ * One `GET`.
+ *
+ * The method is fixed here rather than passed in. A `method` parameter is a one-line change
+ * away from a mutation, and the whole point of this module's boundary is that a mutation
+ * has to arrive through a generated, authenticated operation instead.
+ */
+async function request<T>(path: string): Promise<Fetched<T>> {
 	let response: Response;
 	try {
 		response = await fetch(apiUrl(path), {
-			...init,
-			headers: { accept: 'application/json', ...init?.headers }
+			method: 'GET',
+			headers: { accept: 'application/json' }
 		});
 	} catch {
 		return { kind: 'unreachable' };
@@ -133,16 +153,4 @@ export function fetchAnalysis(analysisId: string): Promise<Fetched<Analysis>> {
 /** The finished report for one analysis. */
 export function fetchReport(analysisId: string): Promise<Fetched<Report>> {
 	return request<Report>(reportPath(analysisId));
-}
-
-/**
- * Ask the server to retry a failed analysis.
- *
- * Called only when `retry.allowed` is true — never inferred from a state name, and never
- * behind a confirmation dialog. Retry is idempotent; confirmations are for destructive
- * actions. The response is the updated analysis, so the caller can render the new state
- * without a second round trip.
- */
-export function requestRetry(analysisId: string): Promise<Fetched<Analysis>> {
-	return request<Analysis>(retryPath(analysisId), { method: 'POST' });
 }

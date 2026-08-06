@@ -2,14 +2,8 @@ import { COMPLETED_REPORT_FIXTURE } from '@repolens/api-client';
 import { analysisScenario, createMockFetch, type RequestHandler } from '@repolens/msw';
 import { afterEach, expect, test } from 'vitest';
 
-import {
-	analysisPath,
-	apiUrl,
-	fetchAnalysis,
-	fetchReport,
-	reportPath,
-	retryPath
-} from '$lib/api/analysis';
+import * as transport from '$lib/api/analysis';
+import { analysisPath, apiUrl, fetchAnalysis, fetchReport, reportPath } from '$lib/api/analysis';
 
 /**
  * The transport seam, against the shared MSW handlers.
@@ -20,6 +14,10 @@ import {
  * `/api/v1/analyses/:id` and `/api/v1/analyses/:id/report`, and `createMockFetch` **throws**
  * on an unmatched request rather than answering 404. So a client that builds a different
  * URL fails here loudly, instead of shipping and reporting "analysis not found".
+ *
+ * The provisional seam is acceptable **only because every path through it is a `GET`**: a
+ * read is idempotent, is anonymous by design, and is pinned to a matching mock. A mutation
+ * is none of those, so this file also asserts that the module exposes none.
  */
 
 const ANALYSIS_ID = COMPLETED_REPORT_FIXTURE.analysis.id;
@@ -40,12 +38,40 @@ test('the paths are the ones the shared handlers intercept', () => {
 	// Nested under the analysis: a report is identified by the analysis that produced it,
 	// and there is no second identifier for it.
 	expect(reportPath(ANALYSIS_ID)).toBe(`/api/v1/analyses/${ANALYSIS_ID}/report`);
-	expect(retryPath(ANALYSIS_ID)).toBe(`/api/v1/analyses/${ANALYSIS_ID}/retry`);
 
 	// The origin comes from PUBLIC_API_ORIGIN and is never hardcoded, so assert the shape.
 	expect(apiUrl(analysisPath(ANALYSIS_ID))).toMatch(
 		new RegExp(`^https?://\\S+/api/v1/analyses/${ANALYSIS_ID}$`)
 	);
+});
+
+test('the module exposes no mutation, and every request it makes is a GET', async () => {
+	/*
+	 * The blocker this locks down. A hand-written `POST …/retry` shipped here once: absent
+	 * from OpenAPI, absent from the MSW handlers, carrying no Firebase credential, with no
+	 * declared idempotency semantics — and it *starts paid work*. A provisional path is
+	 * defensible for a read and is not defensible for that.
+	 *
+	 * Asserted over the module's own surface rather than by naming the function that was
+	 * deleted, so re-adding it under any name fails here.
+	 */
+	const exported = Object.keys(transport);
+	expect(exported).not.toContain('retryPath');
+	expect(exported.filter((name) => /retry|create|submit|cancel|delete/i.test(name))).toEqual([]);
+
+	const methods: (string | undefined)[] = [];
+	const mock = createMockFetch(analysisScenario('completed-report'));
+	globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+		methods.push(init?.method);
+		return mock(input, init);
+	}) as typeof globalThis.fetch;
+
+	await fetchAnalysis(ANALYSIS_ID);
+	await fetchReport(ANALYSIS_ID);
+
+	// Explicit, not defaulted: `request` fixes the method so that adding one is a visible
+	// change to this file rather than a new argument at a call site.
+	expect(methods).toEqual(['GET', 'GET']);
 });
 
 test('an id with URL-significant characters is encoded, not interpolated raw', () => {

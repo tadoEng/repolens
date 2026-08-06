@@ -5,6 +5,7 @@ import { expect, test } from '@playwright/test';
 import {
 	ANALYSIS_ID,
 	readCspViolations,
+	recordApiRequests,
 	recordCspViolations,
 	serveScenario
 } from './support/api-mock';
@@ -47,6 +48,100 @@ test.describe('a completed report', () => {
 		// Composition, with the counter that produced it.
 		await expect(page.getByText('tokei', { exact: false }).first()).toBeVisible();
 		await expect(page.getByText('Counted: 842', { exact: false })).toBeVisible();
+	});
+
+	test('renders the accepted section hierarchy, not a flat findings block', async ({ page }) => {
+		await page.goto(REPORT_URL);
+		// The report resolves asynchronously; without this the DOM query below runs against
+		// the loading state and reports an empty hierarchy as a passing one.
+		await expect(page.getByRole('heading', { name: 'Evidence' })).toBeVisible();
+
+		// Four category-led sections are first-class, between Overview and Findings.
+		const headings = await page
+			.locator('section[aria-labelledby] > h2')
+			.evaluateAll((nodes) => nodes.map((node) => node.id));
+
+		expect(headings).toEqual([
+			'overview',
+			'technology',
+			'architecture',
+			'composition',
+			'engineering-system',
+			'maintenance',
+			'findings',
+			'evidence'
+		]);
+
+		// Populated from the server's own categories: TECHNOLOGY reads under Technology,
+		// and CI_CD and SOURCE_AND_DOCUMENTATION under Engineering system.
+		const technology = page.locator('section[aria-labelledby="technology"]');
+		await expect(technology.getByText('rust.workspace.detected')).toBeVisible();
+
+		const engineering = page.locator('section[aria-labelledby="engineering-system"]');
+		await expect(engineering.getByText('ci.tests.unverifiable')).toBeVisible();
+		await expect(engineering.getByText('docs.architecture.missing')).toBeVisible();
+
+		// A category the ruleset produced nothing for says so, honestly and without
+		// borrowing a FindingState it did not earn.
+		const architecture = page.locator('section[aria-labelledby="architecture"]');
+		await expect(architecture.getByText('No finding in this report is categorised')).toBeVisible();
+
+		// Every finding is a card exactly once, so no `finding-…` anchor is duplicated.
+		const anchors = await page
+			.locator('[id^="finding-"]')
+			.evaluateAll((nodes) => nodes.map((node) => node.id));
+		expect(anchors).toHaveLength(REPORT.findings.length);
+		expect(new Set(anchors).size).toBe(anchors.length);
+	});
+
+	test('the findings index links to each card and moves focus to it', async ({ page }) => {
+		await page.goto(REPORT_URL);
+
+		const finding = REPORT.findings[0];
+		const index = page.locator('section[aria-labelledby="findings"]');
+		await index.getByRole('link', { name: finding?.title ?? '' }).click();
+
+		const focused = await page.evaluate(() => document.activeElement?.id ?? null);
+		expect(focused).toBe(`finding-${finding?.id}`);
+	});
+
+	test('the report route sends no mutation', async ({ page }) => {
+		// Reading a report is anonymous by design and changes nothing. Asserted on the wire,
+		// because "no button" and "no request" are different claims.
+		const requests = recordApiRequests(page);
+		await page.goto(REPORT_URL);
+		await expect(page.getByRole('heading', { name: 'Composition' })).toBeVisible();
+
+		expect(requests().every((request) => request.method === 'GET')).toBe(true);
+		expect(requests().length).toBeGreaterThan(0);
+	});
+
+	test('composition draws exactly two bars, and names the role of every large file', async ({
+		page
+	}) => {
+		await page.goto(REPORT_URL);
+		await expect(page.getByRole('heading', { name: 'Composition' })).toBeVisible();
+
+		const composition = page.locator('section[aria-labelledby="composition"]');
+
+		// "Two charts, three tables" is meant literally. Asserted against the rendered
+		// artifact rather than the component, because this is where the CSP applies.
+		await expect(composition.locator('table.metric-table--bars')).toHaveCount(2);
+
+		// Production / test / generated, from `LineCountSummary.roles`.
+		await expect(composition.locator('[data-role="PRODUCTION"]').first()).toBeVisible();
+		await expect(composition.locator('[data-role="TEST"]').first()).toBeVisible();
+
+		// Largest files, with the role that stops a generated file reading as hand-written.
+		const generated = REPORT.composition?.largest_files.find((file) => file.role === 'GENERATED');
+		expect(generated, 'the fixture must carry a GENERATED largest file').toBeDefined();
+		const files = composition.locator('.composition__table--files');
+		await expect(files.getByText(generated?.path ?? '')).toBeVisible();
+		await expect(files.locator('[data-role="GENERATED"]')).toHaveCount(1);
+
+		// The exclusion ledger survives alongside them; it is required in addition to the
+		// five views, never in place of largest files.
+		await expect(composition.getByText('Excluded: 126', { exact: false })).toBeVisible();
 	});
 
 	test('has exactly one h1 and skips no heading levels', async ({ page }) => {

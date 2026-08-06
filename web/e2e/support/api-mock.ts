@@ -67,6 +67,35 @@ export function serveScenario(page: Page, name: AnalysisFixtureName): Promise<vo
 	return serveFixture(page, ANALYSIS_FIXTURES[name]);
 }
 
+/** One request the page made to the API. */
+export interface ApiRequest {
+	readonly method: string;
+	readonly url: string;
+}
+
+/**
+ * Record every request the page sends to the API origin.
+ *
+ * Standing guard over the mutation boundary. The report and progress routes are read-only
+ * surfaces: a `POST`, `PUT`, `PATCH` or `DELETE` from either of them is an authenticated
+ * operation the contract has not defined yet, and the whole failure mode is that it
+ * *succeeds* — starting duplicate paid work rather than raising an error anyone would see.
+ * Asserting on the wire is the only place that distinguishes "no button" from "no request".
+ *
+ * Registered before `page.goto`, so nothing can slip through before the listener exists.
+ */
+export function recordApiRequests(page: Page): () => ApiRequest[] {
+	const seen: ApiRequest[] = [];
+
+	page.on('request', (request) => {
+		if (request.url().startsWith(API_ORIGIN)) {
+			seen.push({ method: request.method(), url: request.url() });
+		}
+	});
+
+	return () => [...seen];
+}
+
 /**
  * Record every Content Security Policy violation the page reports.
  *

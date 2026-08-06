@@ -1,20 +1,34 @@
 import {
 	COMPLETED_REPORT_FIXTURE,
+	HANDLED_VARIANTS,
 	LOC_UNAVAILABLE_FIXTURE,
-	type LineCountSummary
+	type Finding,
+	type LargestSourceFile,
+	type LineCountSummary,
+	type RoleLineCount
 } from '@repolens/api-client';
 import { createRawSnippet } from 'svelte';
+import { SvelteSet } from 'svelte/reactivity';
 import { expect, test } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 
+import CategoryFindings from '$lib/components/report/CategoryFindings.svelte';
 import CompositionSection from '$lib/components/report/CompositionSection.svelte';
 import EvidenceAppendix from '$lib/components/report/EvidenceAppendix.svelte';
-import FindingsSection from '$lib/components/report/FindingsSection.svelte';
+import EvidenceExpander from '$lib/components/report/EvidenceExpander.svelte';
+import FindingsIndex from '$lib/components/report/FindingsIndex.svelte';
 import OverviewSection from '$lib/components/report/OverviewSection.svelte';
 import ReportHeader from '$lib/components/report/ReportHeader.svelte';
 import ReportNav from '$lib/components/report/ReportNav.svelte';
 import ReportSection from '$lib/components/report/ReportSection.svelte';
-import { REPORT_SECTIONS } from '$lib/components/report/sections';
+import {
+	FINDING_CATEGORY_SECTION,
+	findingsForSection,
+	REPORT_SECTIONS,
+	sectionForCategory,
+	unplacedFindings,
+	type CategorySectionId
+} from '$lib/components/report/sections';
 import '$lib/styles/global.css';
 
 /**
@@ -29,6 +43,13 @@ import '$lib/styles/global.css';
 
 const REPORT = COMPLETED_REPORT_FIXTURE.report;
 const COMPOSITION = REPORT.composition;
+
+/** All findings in one shared expanded set, exactly as the route wires them. */
+function renderCategory(findings: Finding[], emptyLabel = 'this category') {
+	return render(CategoryFindings, {
+		props: { findings, expanded: new SvelteSet<string>(), emptyLabel }
+	});
+}
 
 test('the report header carries commit, tree, analyzer and ruleset versions', async () => {
 	const screen = await render(ReportHeader, { props: { report: REPORT } });
@@ -79,8 +100,138 @@ test('overview statements carry their own confidence and link to supporting find
 	expect(supporting.getAttribute('href')).toBe(`#finding-${REPORT.findings[0]?.id}`);
 });
 
+test('the accepted hierarchy is present, in order, and every link has a section', async () => {
+	/*
+	 * The blocker this locks down: an earlier head exposed only Overview, Findings,
+	 * Composition and Evidence, collapsing the whole report taxonomy into one flat findings
+	 * block. Technology, Architecture, Engineering system and Maintenance are first-class
+	 * sections in the accepted design, with Findings and Evidence after them.
+	 */
+	expect(REPORT_SECTIONS.map((section) => section.id)).toEqual([
+		'overview',
+		'technology',
+		'architecture',
+		'composition',
+		'engineering-system',
+		'maintenance',
+		'findings',
+		'evidence'
+	]);
+
+	// The nav renders exactly the sections, and nothing it links to is invented here.
+	const nav = await render(ReportNav, { props: { sections: REPORT_SECTIONS } });
+	const links = [...nav.container.querySelectorAll('a')];
+	expect(links.map((link) => link.getAttribute('href'))).toEqual(
+		REPORT_SECTIONS.map((section) => `#${section.id}`)
+	);
+});
+
+test('every finding category maps to exactly one section, with none left over', () => {
+	/*
+	 * The same discipline as the contract package's label maps, and for the same reason: a
+	 * category added to the Rust enum must not vanish from the reading hierarchy while still
+	 * compiling. `Readonly<Record<FindingCategory, …>>` is the compile-time half; this is the
+	 * half that survives someone widening the annotation.
+	 *
+	 * The list is read from `HANDLED_VARIANTS`, which `unknown-variant.test.ts` asserts
+	 * against `contracts/openapi.json`. Nothing in the chain is typed out here.
+	 */
+	const categories = HANDLED_VARIANTS.FindingCategory ?? [];
+	expect(categories.length).toBeGreaterThan(0);
+
+	expect([...Object.keys(FINDING_CATEGORY_SECTION)].sort()).toEqual([...categories].sort());
+
+	const sections = new Set<CategorySectionId>(Object.values(FINDING_CATEGORY_SECTION));
+	// Four category-led sections, each with at least one category feeding it. A section that
+	// no category can ever reach would be a permanently empty heading.
+	expect([...sections].sort()).toEqual([
+		'architecture',
+		'engineering-system',
+		'maintenance',
+		'technology'
+	]);
+});
+
+test('a category from a newer backend is placed nowhere and dropped from nothing', () => {
+	// A statically hosted bundle outlives the build it was compiled against, so this is the
+	// realistic case, not a hypothetical one.
+	const future = {
+		...(REPORT.findings[0] as Finding),
+		category: 'SUPPLY_CHAIN'
+	} as unknown as Finding;
+
+	expect(sectionForCategory('SUPPLY_CHAIN')).toBeNull();
+	// Inherited Object.prototype keys are not categories either.
+	expect(sectionForCategory('constructor')).toBeNull();
+
+	for (const section of [
+		'technology',
+		'architecture',
+		'engineering-system',
+		'maintenance'
+	] as const) {
+		expect(findingsForSection([future], section)).toEqual([]);
+	}
+
+	// Not dropped: it is routed to the Findings section instead, where it renders in full.
+	expect(unplacedFindings([future, ...REPORT.findings])).toEqual([future]);
+	expect(unplacedFindings(REPORT.findings)).toEqual([]);
+});
+
+test('the four category sections partition the findings, each card appearing once', async () => {
+	const placed = (['technology', 'architecture', 'engineering-system', 'maintenance'] as const)
+		.flatMap((section) => findingsForSection(REPORT.findings, section))
+		.map((finding) => finding.id);
+
+	// Exactly once, everywhere: a finding rendered in two sections would duplicate its
+	// `finding-…` anchor id, which is both an accessibility failure and a link that lands
+	// on whichever copy the browser reached first.
+	expect(placed.sort()).toEqual(REPORT.findings.map((finding) => finding.id).sort());
+	expect(new Set(placed).size).toBe(placed.length);
+
+	// The fixture exercises both halves: a populated section and an empty one.
+	expect(findingsForSection(REPORT.findings, 'technology')).toHaveLength(1);
+	expect(findingsForSection(REPORT.findings, 'engineering-system')).toHaveLength(2);
+	expect(findingsForSection(REPORT.findings, 'architecture')).toHaveLength(0);
+});
+
+test('an empty category section says so without borrowing a FindingState', async () => {
+	const screen = await renderCategory([], 'architecture');
+	const text = screen.container.textContent ?? '';
+
+	expect(text).toContain('No finding in this report is categorised under architecture');
+	// `MISSING` and `UNABLE_TO_VERIFY` are the analyzer's conclusions about a checked
+	// property. "This ruleset produced nothing here" is a fact about the ruleset, and
+	// dressing it in the contract's vocabulary would state something the analysis never did.
+	expect(screen.container.querySelector('[data-state]')).toBeNull();
+	expect(text).toContain('not a conclusion about the repository');
+});
+
+test('the findings index lists every finding once and links to its card', async () => {
+	const screen = await render(FindingsIndex, { props: { findings: REPORT.findings } });
+
+	const rows = [...screen.container.querySelectorAll('tbody tr')];
+	expect(rows).toHaveLength(REPORT.findings.length);
+
+	// Server order, preserved. Ordering is part of the contract.
+	REPORT.findings.forEach((finding, index) => {
+		const row = rows[index] as HTMLElement;
+		expect(row.textContent).toContain(finding.title);
+		expect(row.querySelector('a')?.getAttribute('href')).toBe(`#finding-${finding.id}`);
+		// Three axes, three cells. An index that merged any two would be the merged-badge
+		// defect, just wider.
+		expect(row.querySelector(`[data-state="${finding.state}"]`)).not.toBeNull();
+		expect(row.querySelector(`[data-severity="${finding.severity}"]`)).not.toBeNull();
+		expect(row.querySelector(`[data-confidence="${finding.confidence}"]`)).not.toBeNull();
+	});
+
+	// An index, not a second set of cards: no `finding-…` anchor is defined here, so
+	// nothing it links to is a duplicate of itself.
+	expect(screen.container.querySelector('[id^="finding-"]')).toBeNull();
+});
+
 test('every finding shows state, severity and confidence as three separate values', async () => {
-	const screen = await render(FindingsSection, { props: { findings: REPORT.findings } });
+	const screen = await renderCategory(REPORT.findings);
 
 	for (const finding of REPORT.findings) {
 		const card = screen.container.querySelector(
@@ -97,7 +248,7 @@ test('every finding shows state, severity and confidence as three separate value
 });
 
 test('a MISSING finding is not presented as a failure', async () => {
-	const screen = await render(FindingsSection, { props: { findings: REPORT.findings } });
+	const screen = await renderCategory(REPORT.findings);
 
 	const missing = REPORT.findings.find((finding) => finding.state === 'MISSING');
 	expect(missing, 'the fixture must contain a MISSING finding').toBeDefined();
@@ -116,7 +267,7 @@ test('a MISSING finding is not presented as a failure', async () => {
 });
 
 test('a finding with no evidence says so instead of offering an empty disclosure', async () => {
-	const screen = await render(FindingsSection, { props: { findings: REPORT.findings } });
+	const screen = await renderCategory(REPORT.findings);
 
 	const unverifiable = REPORT.findings.find((finding) => finding.evidence.length === 0);
 	expect(unverifiable).toBeDefined();
@@ -131,21 +282,36 @@ test('a finding with no evidence says so instead of offering an empty disclosure
 	expect(card.textContent).toContain('FILE_TOO_LARGE');
 });
 
-test('"Expand all evidence" opens every disclosure, making excerpts findable', async () => {
-	const screen = await render(FindingsSection, { props: { findings: REPORT.findings } });
+test('"Expand all evidence" opens disclosures across sections it does not contain', async () => {
+	/*
+	 * The control now sits above four category sections rather than inside one, so the
+	 * state it drives has to live outside every component that reads it. Two separately
+	 * mounted trees sharing one `SvelteSet` is exactly how the route wires it, and the only
+	 * arrangement that proves the expander reaches cards it does not render itself.
+	 */
+	const expanded = new SvelteSet<string>();
+	const findings = findingsForSection(REPORT.findings, 'engineering-system');
+	expect(findings.length).toBeGreaterThan(0);
 
-	const closed = [...screen.container.querySelectorAll('details')];
+	const section = await render(CategoryFindings, {
+		props: { findings, expanded, emptyLabel: 'the engineering system' }
+	});
+	const controls = await render(EvidenceExpander, {
+		props: { findings: REPORT.findings, expanded }
+	});
+
+	const closed = [...section.container.querySelectorAll('details')];
 	expect(closed.length).toBeGreaterThan(0);
 	expect(closed.every((details) => !details.open)).toBe(true);
 
-	await screen.getByRole('button', { name: 'Expand all evidence' }).click();
+	await controls.getByRole('button', { name: 'Expand all evidence' }).click();
 
 	// The reason this control exists: content inside a closed <details> is invisible to
 	// browser find-in-page in several engines, and a file path is what people search for.
-	expect([...screen.container.querySelectorAll('details')].every((d) => d.open)).toBe(true);
+	expect([...section.container.querySelectorAll('details')].every((d) => d.open)).toBe(true);
 
-	await screen.getByRole('button', { name: 'Collapse all evidence' }).click();
-	expect([...screen.container.querySelectorAll('details')].every((d) => !d.open)).toBe(true);
+	await controls.getByRole('button', { name: 'Collapse all evidence' }).click();
+	expect([...section.container.querySelectorAll('details')].every((d) => !d.open)).toBe(true);
 });
 
 test('a null composition renders UNABLE_TO_VERIFY with the report-level limitation', async () => {
@@ -187,23 +353,182 @@ test('the composition disclaimer is in-section, not a footnote', async () => {
 	expect(first.textContent).toContain('not productivity or code quality');
 });
 
-test('composition renders exactly two bar views and three plain tables', async () => {
+test('exactly two views draw bars, and they are the two comparative ones', async () => {
 	const screen = await render(CompositionSection, {
 		props: { composition: COMPOSITION, limitations: REPORT.limitations }
 	});
 
-	// The exclusion table lives inside a closed disclosure; open it so all five are in the
-	// DOM and the count means what it says.
+	// The exclusion table lives inside a closed disclosure; open it so every table is in
+	// the DOM and the count means what it says.
 	for (const details of screen.container.querySelectorAll('details')) details.open = true;
 
 	const tables = [...screen.container.querySelectorAll('table')];
 	const withBars = tables.filter((table) => table.classList.contains('metric-table--bars'));
 
-	// Bars are earned, not default: LOC is comparative exactly twice, plus the single
-	// composition table the design direction calls "table + one proportion bar".
-	expect(tables).toHaveLength(5);
-	expect(withBars).toHaveLength(3);
-	expect(tables.length - withBars.length).toBe(2);
+	/*
+	 * "Two charts, three tables" is meant literally, and an earlier head drew three. Bars
+	 * are earned by comparison across items, not by a value having a denominator: a single
+	 * composition of a known whole is stated exactly by a share column, and a bar only
+	 * approximates it.
+	 */
+	expect(withBars).toHaveLength(2);
+	expect(withBars.map((table) => table.querySelector('caption')?.textContent?.trim())).toEqual([
+		'Lines of code by language, as a share of all counted code lines.',
+		'Lines of code by top-level area, as a share of all counted code lines.'
+	]);
+
+	// Five composition views plus the exclusion ledger's own table, which is required in
+	// addition to them rather than in place of any.
+	expect(tables).toHaveLength(6);
+
+	// The per-language code/comment/blank table specifically: three series at once, where a
+	// bar hides the small values and reads poorly aloud.
+	const kinds = tables.find((table) =>
+		table.querySelector('caption')?.textContent?.includes('Code, comment and blank lines')
+	);
+	expect(kinds?.classList.contains('metric-table--bars')).toBe(false);
+	expect(kinds?.querySelector('.metric-cell')).toBeNull();
+});
+
+test('the role table renders production, test and generated from the contract', async () => {
+	// Guards the fixture: an empty `roles` array would make every assertion below vacuous.
+	expect(COMPOSITION.roles.length).toBeGreaterThan(0);
+
+	const screen = await render(CompositionSection, {
+		props: { composition: COMPOSITION, limitations: REPORT.limitations }
+	});
+
+	const table = [...screen.container.querySelectorAll('table')].find((candidate) =>
+		candidate.querySelector('caption')?.textContent?.includes('Code lines by role')
+	) as HTMLTableElement;
+	expect(table).toBeDefined();
+
+	const rows = [...table.querySelectorAll('tbody tr')];
+	expect(rows).toHaveLength(COMPOSITION.roles.length);
+
+	COMPOSITION.roles.forEach((role, index) => {
+		const row = rows[index] as HTMLElement;
+		// The raw wire value is carried on the row, so an unrecognised role stays reportable.
+		expect(row.querySelector(`[data-role="${role.role}"]`)).not.toBeNull();
+		expect(row.textContent).toContain(role.code_lines.toLocaleString('en'));
+		expect(row.textContent).toContain(role.files.toLocaleString('en'));
+	});
+
+	// PRODUCTION is 63,400 of 78,310 code lines.
+	expect(rows[0]?.textContent).toContain('81%');
+	// A single composition, stated by its share column. No bar.
+	expect(table.classList.contains('metric-table--bars')).toBe(false);
+});
+
+test('the largest-file list names each role, so generated code is not read as hand-written', async () => {
+	const generated = COMPOSITION.largest_files.find((file) => file.role === 'GENERATED');
+	// Guards the fixture: this is the exact misreading the column exists to prevent, and
+	// without a GENERATED row the assertion would pass while proving nothing.
+	expect(generated, 'the fixture must contain a GENERATED largest file').toBeDefined();
+
+	const screen = await render(CompositionSection, {
+		props: { composition: COMPOSITION, limitations: REPORT.limitations }
+	});
+
+	const table = [...screen.container.querySelectorAll('table')].find((candidate) =>
+		candidate.querySelector('caption')?.textContent?.includes('largest source files')
+	) as HTMLTableElement;
+	expect(table).toBeDefined();
+
+	const rows = [...table.querySelectorAll('tbody tr')];
+	expect(rows).toHaveLength(COMPOSITION.largest_files.length);
+
+	// Server order, descending, preserved rather than re-sorted here.
+	COMPOSITION.largest_files.forEach((file, index) => {
+		const row = rows[index] as HTMLElement;
+		expect(row.textContent).toContain(file.path);
+		expect(row.textContent).toContain(file.language);
+		expect(row.querySelector(`[data-role="${file.role}"]`)).not.toBeNull();
+	});
+
+	const row = rows.find((candidate) => candidate.textContent?.includes(generated?.path ?? ''));
+	expect(row?.textContent).toContain('Generated');
+	// Long paths, not magnitudes: a bar would handle the label badly and add nothing.
+	expect(table.querySelector('.metric-cell')).toBeNull();
+});
+
+test('an unrecognised role is named rather than dropped or crashed on', async () => {
+	/*
+	 * A statically hosted bundle outlives the build it was compiled against, so a browser
+	 * can hold this one for months while `CodeRole` gains a variant. Both rows are annotated
+	 * with the generated types and widened *only* at the enum, so everything except the
+	 * unknown variant is still checked against the contract.
+	 */
+	const role = { role: 'VENDORED', files: 3, code_lines: 40 } as unknown as RoleLineCount;
+	const file = {
+		path: 'vendor/thing.rs',
+		language: 'Rust',
+		code_lines: 900,
+		role: 'VENDORED'
+	} as unknown as LargestSourceFile;
+
+	const future: LineCountSummary = {
+		...COMPOSITION,
+		roles: [...COMPOSITION.roles, role],
+		largest_files: [...COMPOSITION.largest_files, file]
+	};
+
+	const screen = await render(CompositionSection, {
+		props: { composition: future, limitations: REPORT.limitations }
+	});
+	const text = screen.container.textContent ?? '';
+
+	// Named, in a fallback that cannot be mistaken for a role this build understands.
+	expect(text).toContain('Unrecognised (VENDORED)');
+	expect(screen.container.querySelectorAll('[data-role="VENDORED"]')).toHaveLength(2);
+	expect(text).toContain('vendor/thing.rs');
+});
+
+test('a role breakdown that leaves code unattributed says so, without inventing a role', async () => {
+	const partial: LineCountSummary = {
+		...COMPOSITION,
+		roles: [{ role: 'PRODUCTION', files: 604, code_lines: 63400 }]
+	};
+
+	const screen = await render(CompositionSection, {
+		props: { composition: partial, limitations: REPORT.limitations }
+	});
+	const text = (screen.container.textContent ?? '').replace(/\s+/g, ' ');
+
+	expect(text).toContain('The listed roles account for 63,400 of 78,310 counted code lines');
+	// `CodeRole` is a closed contract enum. A synthesised sixth row would put a value on
+	// screen that the API can never send — the fabrication the pipeline exists to prevent.
+	expect(screen.container.querySelector('[data-role="OTHER"]')).toBeNull();
+	expect(text).not.toContain('Unattributed');
+});
+
+test('a breakdown summing to more than its own total is reported, not clamped away', async () => {
+	/*
+	 * The quiet failure: every proportion is clamped to [0, 1] independently, which is right
+	 * for one bar and wrong for a set of them. Three rows at 60% of the same total render as
+	 * three plausible bars whose sum is impossible, with nothing on screen saying so.
+	 */
+	const impossible: LineCountSummary = {
+		...COMPOSITION,
+		areas: [
+			{ area: 'crates/', code_lines: 51800 },
+			{ area: 'web/', code_lines: 51800 }
+		]
+	};
+
+	const screen = await render(CompositionSection, {
+		props: { composition: impossible, limitations: REPORT.limitations }
+	});
+	const text = (screen.container.textContent ?? '').replace(/\s+/g, ' ');
+
+	expect(text).toContain('does not add up');
+	expect(text).toContain('The per-area rows total 103,600 code lines, more than the 78,310');
+
+	// And a consistent response says nothing of the sort.
+	const clean = await render(CompositionSection, {
+		props: { composition: COMPOSITION, limitations: REPORT.limitations }
+	});
+	expect(clean.container.textContent).not.toContain('does not add up');
 });
 
 test('the bar is a background layer and cannot size the text of a sub-1% language', async () => {

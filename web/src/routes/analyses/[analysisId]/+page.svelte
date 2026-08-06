@@ -14,12 +14,15 @@
 	 *     it rather than a hardcoded interval, so the server can widen the gap as an
 	 *     analysis ages instead of paying for a frontend constant multiplied by every open
 	 *     tab.
-	 *   - `retry.allowed` decides the retry button. Never the state name.
+	 *   - `retry.allowed` decides what is said about retrying. Never the state name.
+	 *
+	 * Nothing on this page mutates anything. The retry request that used to live here was
+	 * removed rather than shipped unauthenticated — see the banner in `$lib/api/analysis`.
 	 */
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 
-	import { fetchAnalysis, requestRetry, type Analysis } from '$lib/api/analysis';
+	import { fetchAnalysis, type Analysis } from '$lib/api/analysis';
 	import AnalysisIdentityHeader from '$lib/components/analysis/AnalysisIdentityHeader.svelte';
 	import FailureNotice from '$lib/components/analysis/FailureNotice.svelte';
 	import ProgressTimeline from '$lib/components/analysis/ProgressTimeline.svelte';
@@ -35,16 +38,24 @@
 		| { kind: 'unreachable' };
 
 	let load = $state<LoadState>({ kind: 'loading' });
-	let retrying = $state(false);
-	let retryProblem = $state<string | null>(null);
 
-	/** Bumped after a successful retry, to restart the fetch-and-poll cycle. */
-	let reloadToken = $state(0);
+	/**
+	 * The failure heading, so focus can be moved to it.
+	 *
+	 * Bound rather than looked up by id: the effect below has to run *after* the element
+	 * exists, and a binding is the thing that tells it so.
+	 */
+	let failureHeading = $state<HTMLElement | null>(null);
+
+	/**
+	 * Which analysis has already taken focus.
+	 *
+	 * Plain `let`, not `$state`: writing it must not re-run the effect that reads it.
+	 */
+	let focusedFailureFor: string | null = null;
 
 	$effect(() => {
 		const id = analysisId;
-		// Read so a retry restarts polling; the effect otherwise depends only on the route.
-		void reloadToken;
 		if (!id) return;
 
 		let cancelled = false;
@@ -94,25 +105,39 @@
 		};
 	});
 
-	async function retry(): Promise<void> {
-		retrying = true;
-		retryProblem = null;
+	/*
+	 * Deterministic focus when an analysis turns out to have failed.
+	 *
+	 * The route opens in a loading state and resolves asynchronously, so without this a
+	 * keyboard or screen-reader user is left on `<body>` while the single most important
+	 * thing on the page — that the analysis stopped, and what can be done about it —
+	 * appears below the fold. Moving focus to the failure heading is the same criterion the
+	 * design calls for after navigation and after a retry; retry is gone, the criterion is
+	 * not.
+	 *
+	 * Two guards keep it from being intrusive:
+	 *
+	 *   - **Once per analysis.** Polling re-assigns `load` on every tick; re-focusing on
+	 *     each one would trap a reader who had tabbed away.
+	 *   - **Only when nothing else holds focus.** If the reader has already put focus
+	 *     somewhere, that intent wins. On a fresh load `document.body` is the active
+	 *     element, so the move is deterministic where it matters.
+	 *
+	 * Scrolling is deliberately *not* suppressed here, unlike `focusAnchor`: focus that
+	 * lands off-screen is focus the reader cannot see, and the heading is what they need to
+	 * be looking at.
+	 */
+	$effect(() => {
+		if (load.kind !== 'loaded' || !isFailure(load.analysis.state)) return;
 
-		const result = await requestRetry(analysisId);
-		retrying = false;
+		const heading = failureHeading;
+		const id = load.analysis.id;
+		if (!heading || focusedFailureFor === id) return;
 
-		if (result.kind === 'ok') {
-			load = { kind: 'loaded', analysis: result.value };
-			// Resume polling against the restarted analysis.
-			reloadToken += 1;
-			return;
-		}
-
-		retryProblem =
-			result.kind === 'unreachable'
-				? 'The retry request never reached the server. Nothing was started.'
-				: (result.error?.message ?? `The server refused the retry with status ${result.status}.`);
-	}
+		focusedFailureFor = id;
+		const active = document.activeElement;
+		if (active === null || active === document.body) heading.focus();
+	});
 </script>
 
 <svelte:head>
@@ -161,14 +186,8 @@
 
 	{#if isFailure(load.analysis.state)}
 		<section class="progress__section" aria-labelledby="failure">
-			<h2 id="failure" tabindex="-1">This analysis failed</h2>
-			<FailureNotice
-				error={load.analysis.error}
-				retry={load.analysis.retry}
-				onRetry={retry}
-				busy={retrying}
-				problem={retryProblem}
-			/>
+			<h2 id="failure" tabindex="-1" bind:this={failureHeading}>This analysis failed</h2>
+			<FailureNotice error={load.analysis.error} retry={load.analysis.retry} />
 		</section>
 	{/if}
 
