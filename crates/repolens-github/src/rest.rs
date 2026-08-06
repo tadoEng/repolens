@@ -24,8 +24,10 @@
 //! a RepoLens domain type, so a field GitHub renames is a change here and
 //! nowhere else.
 
+use std::collections::HashSet;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::StreamExt;
 use reqwest::header::{self, HeaderMap};
@@ -34,7 +36,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
 use tokio::io::AsyncWriteExt;
-use url::Url;
+use url::{Host, Url};
 
 use repolens_core::{CommitSha, RepositoryCoordinate, TreeSha};
 
@@ -78,6 +80,14 @@ const ACCEPT_ANY: &str = "*/*";
 /// GitHub rejects requests without a `User-Agent`.
 const USER_AGENT_VALUE: &str = concat!("repolens/", env!("CARGO_PKG_VERSION"));
 
+/// Names tried when opening the archive's temporary file before giving up.
+///
+/// More than one because the name carries a process id and a counter, and a
+/// previous run killed mid-download can leave one behind; more than a handful
+/// would mean something other than a collision is wrong, and retrying would
+/// only postpone reporting it.
+const PART_FILE_ATTEMPTS: u32 = 8;
+
 /// Whether a request may negotiate a compressed transfer encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Transfer {
@@ -99,6 +109,7 @@ enum Transfer {
 pub struct GitHubClientConfig {
     api_base: Url,
     token: Option<SecretString>,
+    allow_insecure_loopback: bool,
 }
 
 impl GitHubClientConfig {
@@ -112,6 +123,7 @@ impl GitHubClientConfig {
         Self {
             api_base: Url::parse(DEFAULT_API_BASE).expect("the default API base is a literal"),
             token: None,
+            allow_insecure_loopback: false,
         }
     }
 
@@ -132,6 +144,23 @@ impl GitHubClientConfig {
         self.token = Some(token);
         self
     }
+
+    /// Permits plain HTTP, but only to a loopback address.
+    ///
+    /// **Development and tests only.** The suite runs against a local mock that
+    /// speaks HTTP, and the alternative — accepting HTTP whenever the host looks
+    /// local enough — is how a production deployment ends up sending an analysis
+    /// token in cleartext because a hostname resolved somewhere unexpected.
+    /// Making it an explicit, named opt-in means the insecure path exists in one
+    /// place that a reviewer can grep for, and is off by default.
+    ///
+    /// Loopback and nothing else: traffic to `127.0.0.0/8` or `::1` does not
+    /// leave the machine, so there is no path for it to be read or rewritten on.
+    #[must_use]
+    pub fn allow_insecure_loopback(mut self) -> Self {
+        self.allow_insecure_loopback = true;
+        self
+    }
 }
 
 impl Default for GitHubClientConfig {
@@ -146,8 +175,12 @@ impl fmt::Debug for GitHubClientConfig {
     /// away from wrong.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GitHubClientConfig")
-            .field("api_base", &self.api_base.as_str())
+            // Redacted rather than printed, because a configuration is
+            // `Debug`-printed while it still holds whatever was configured —
+            // including the embedded credential that construction will reject.
+            .field("api_base", &redacted_url(&self.api_base))
             .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .field("allow_insecure_loopback", &self.allow_insecure_loopback)
             .finish()
     }
 }
@@ -165,6 +198,7 @@ pub struct GitHubRestClient {
     http: reqwest::Client,
     api_base: Url,
     token: Option<SecretString>,
+    allow_insecure_loopback: bool,
 }
 
 impl fmt::Debug for GitHubRestClient {
@@ -172,7 +206,7 @@ impl fmt::Debug for GitHubRestClient {
     /// would be one careless field away from printing a secret.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GitHubRestClient")
-            .field("api_base", &self.api_base.as_str())
+            .field("api_base", &redacted_url(&self.api_base))
             .field("token", &self.token.as_ref().map(|_| "[redacted]"))
             // The connection pool is omitted: it is large, says nothing about
             // this client's configuration, and is the kind of output that makes
@@ -183,13 +217,13 @@ impl fmt::Debug for GitHubRestClient {
 
 impl GitHubRestClient {
     /// Builds a client from `config`.
+    ///
+    /// Every rule the base has to satisfy is checked once, here, rather than per
+    /// request: a configuration that would send a token in cleartext is a
+    /// deployment mistake, and a deployment mistake should stop a process at
+    /// startup instead of being discovered from a packet capture.
     pub fn new(config: GitHubClientConfig) -> Result<Self, GitHubSourceError> {
-        // Rejected once, here, so that every later URL construction can rely on
-        // the base being usable. `mailto:` and `data:` URLs have no path to
-        // extend and would otherwise fail per request instead of at startup.
-        if config.api_base.cannot_be_a_base() {
-            return Err(GitHubSourceError::InvalidApiBase);
-        }
+        check_api_base(&config.api_base, config.allow_insecure_loopback)?;
 
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -201,6 +235,7 @@ impl GitHubRestClient {
             http,
             api_base: config.api_base,
             token: config.token,
+            allow_insecure_loopback: config.allow_insecure_loopback,
         })
     }
 
@@ -226,9 +261,20 @@ impl GitHubRestClient {
     ) -> Result<BlobSelection, GitHubSourceError> {
         let mut selection = BlobSelection::default();
         let mut spent: u64 = 0;
+        let mut attempted: usize = 0;
+        let mut seen: HashSet<&str> = HashSet::with_capacity(paths.len());
 
         for path in paths {
-            if let Some(reason) = reject_before_request(tree, path, spent, &selection) {
+            // A repeated path is not a second file. Whatever became of it —
+            // retrieved or skipped — was decided and recorded the first time it
+            // appeared, and requesting it again would spend a request on bytes
+            // already held.
+            if !seen.insert(path.as_str()) {
+                continue;
+            }
+
+            let remaining = limits::MAX_TOTAL_FILE_BYTES.saturating_sub(spent);
+            if let Some(reason) = reject_before_request(tree, path, remaining, attempted) {
                 selection.skipped.push(SkippedPath {
                     path: path.clone(),
                     reason,
@@ -242,27 +288,36 @@ impl GitHubRestClient {
                 .find(|entry| &entry.path == path)
                 .expect("`reject_before_request` returns a reason when the path is absent");
 
-            let bytes = match self.fetch_blob(coordinate, &entry.sha).await {
+            // What is left of the analysis budget, never the per-file ceiling on
+            // its own. Passing the per-file cap here is what let a blob GitHub
+            // declined to measure transfer a further megabyte after the total
+            // was already spent.
+            let cap = limits::MAX_FILE_BYTES.min(remaining);
+
+            // Counted before the request rather than after a successful one.
+            // This is the ceiling on how many times this loop may talk to
+            // GitHub, and a count that only successes advanced would bound
+            // nothing: a caller submitting binary paths would skip every result
+            // and still spend a request on each.
+            attempted += 1;
+
+            let bytes = match self.fetch_blob(coordinate, &entry.sha, cap).await {
                 Ok(bytes) => bytes,
                 // The tree said it fit and the body disagreed. Recorded rather
                 // than raised: one file GitHub mismeasured is a limitation of
                 // the evidence, not a reason to discard the files already read.
-                Err(GitHubSourceError::LimitExceeded {
-                    limit_name: "file bytes",
-                    limit,
+                Err(ReadFailure::Oversized {
                     observed,
+                    transferred,
                 }) => {
-                    spent = spent.saturating_add(limit);
+                    spent = spent.saturating_add(transferred);
                     selection.skipped.push(SkippedPath {
                         path: path.clone(),
-                        reason: SkipReason::TooLarge {
-                            size_bytes: observed,
-                            limit_bytes: limit,
-                        },
+                        reason: oversize_reason(cap, observed),
                     });
                     continue;
                 }
-                Err(error) => return Err(error),
+                Err(ReadFailure::Other(error)) => return Err(error),
             };
 
             // Judged after retrieval because a path cannot tell you this. The
@@ -289,12 +344,19 @@ impl GitHubRestClient {
         Ok(selection)
     }
 
-    /// Retrieves one blob by its immutable object name.
+    /// Retrieves one blob by its immutable object name, reading at most `cap`
+    /// bytes.
+    ///
+    /// The cap is a parameter rather than a constant because it is the caller
+    /// that knows how much of the analysis budget is left, and a reader handed
+    /// only the per-file ceiling can overshoot the per-analysis one by a whole
+    /// file.
     async fn fetch_blob(
         &self,
         coordinate: &RepositoryCoordinate,
         blob_sha: &str,
-    ) -> Result<Vec<u8>, GitHubSourceError> {
+        cap: u64,
+    ) -> Result<Vec<u8>, ReadFailure> {
         let url = self.endpoint(&[
             "repos",
             &coordinate.owner,
@@ -303,11 +365,15 @@ impl GitHubRestClient {
             "blobs",
             blob_sha,
         ]);
-        let response = self.get(url, ACCEPT_RAW, Transfer::Negotiated).await?;
+        let response = self
+            .get(url, ACCEPT_RAW, Transfer::Negotiated)
+            .await
+            .map_err(ReadFailure::Other)?;
         check_status(&response, || {
             GitHubSourceError::ReferenceNotFound(blob_sha.to_owned())
-        })?;
-        read_body(response, limits::MAX_FILE_BYTES, "file bytes").await
+        })
+        .map_err(ReadFailure::Other)?;
+        read_body(response, cap).await
     }
 
     /// Builds an absolute endpoint URL from percent-encoded path segments.
@@ -340,7 +406,21 @@ impl GitHubRestClient {
         // rate-limit window.
         for _ in 0..=limits::MAX_REDIRECT_HOPS {
             let response = self.send_once(&target, accept, transfer).await?;
-            match redirect_target(&response, &target)? {
+
+            let next = {
+                let location = response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|value| value.to_str().ok());
+                redirect_target(
+                    response.status().as_u16(),
+                    location,
+                    &target,
+                    self.allow_insecure_loopback,
+                )?
+            };
+
+            match next {
                 Some(next) => target = next,
                 None => return Ok(response),
             }
@@ -403,13 +483,20 @@ impl GitHubRestClient {
 /// Every check that can be made from the tree is made here, before a request is
 /// spent. The only judgement that cannot — whether the content is binary — is
 /// made after retrieval, because no path can answer it.
+///
+/// `attempted` is how many requests this collection has already issued, and
+/// `remaining` how much of the per-analysis budget is left.
 fn reject_before_request(
     tree: &RepositoryTree,
     path: &str,
-    spent: u64,
-    selection: &BlobSelection,
+    remaining: u64,
+    attempted: usize,
 ) -> Option<SkipReason> {
-    if selection.retrieved.len() >= limits::MAX_SELECTED_FILES {
+    // Attempts, not results. `MAX_SELECTED_FILES` is stated as a ceiling on what
+    // one analysis costs GitHub, and counting only the files that came back
+    // usable would bound the output list while leaving the request count to the
+    // caller's imagination.
+    if attempted >= limits::MAX_SELECTED_FILES {
         return Some(SkipReason::SelectionFull {
             limit: limits::MAX_SELECTED_FILES,
         });
@@ -434,12 +521,11 @@ fn reject_before_request(
         });
     }
 
-    // Charged before the request, not after it, so the per-analysis budget is a
-    // ceiling rather than a ceiling plus one more file. A blob whose size GitHub
-    // omitted charges nothing here and is bounded instead by the per-file cap,
-    // which leaves a residual overshoot of at most one file's worth — and only
-    // for a response GitHub already declined to measure.
-    if spent.saturating_add(entry.size_bytes.unwrap_or(0)) > limits::MAX_TOTAL_FILE_BYTES {
+    // A size the tree reports is charged before the request, so a file that
+    // cannot fit costs nothing at all. A size GitHub omitted cannot be charged
+    // in advance — it is bounded instead by the cap the caller passes to the
+    // body reader, which is this same remainder.
+    if remaining == 0 || entry.size_bytes.unwrap_or(0) > remaining {
         return Some(SkipReason::BudgetSpent {
             limit_bytes: limits::MAX_TOTAL_FILE_BYTES,
         });
@@ -448,13 +534,40 @@ fn reject_before_request(
     None
 }
 
+/// Which ceiling a body exceeded, said in the report's vocabulary.
+///
+/// The two are not interchangeable to a reader: one file being pathological and
+/// the analysis having run out of budget call for different responses, and the
+/// cap in force is what distinguishes them.
+fn oversize_reason(cap: u64, observed: u64) -> SkipReason {
+    if cap < limits::MAX_FILE_BYTES {
+        SkipReason::BudgetSpent {
+            limit_bytes: limits::MAX_TOTAL_FILE_BYTES,
+        }
+    } else {
+        SkipReason::TooLarge {
+            size_bytes: observed,
+            limit_bytes: limits::MAX_FILE_BYTES,
+        }
+    }
+}
+
 /// The next URL to request, or `None` when the response is the answer.
 ///
 /// Only the five redirects that carry a `Location` are followed. `304 Not
 /// Modified` is also a `3xx` and has no `Location`, so treating "is a redirect"
 /// as "has somewhere to go" would turn a cache response into a malformed one.
-fn redirect_target(response: &Response, current: &Url) -> Result<Option<Url>, GitHubSourceError> {
-    if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+///
+/// Takes the status and the header rather than the response, so that the rule
+/// this function exists for — where a redirect may lead — is testable without a
+/// live TLS server to be redirected off.
+fn redirect_target(
+    status: u16,
+    location: Option<&str>,
+    current: &Url,
+    allow_insecure_loopback: bool,
+) -> Result<Option<Url>, GitHubSourceError> {
+    if !matches!(status, 301 | 302 | 303 | 307 | 308) {
         return Ok(None);
     }
 
@@ -462,20 +575,108 @@ fn redirect_target(response: &Response, current: &Url) -> Result<Option<Url>, Gi
         resource: "redirect",
     };
 
-    let location = response
-        .headers()
-        .get(header::LOCATION)
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(malformed)?;
+    let location = location.ok_or_else(malformed)?;
 
     // Resolved against the current URL, because `Location` is permitted to be
     // relative and GitHub's own redirects sometimes are.
     let next = current.join(location).map_err(|_| malformed())?;
-    if next.scheme() != "https" && next.scheme() != "http" {
-        return Err(malformed());
+
+    // A hop that began under TLS never leaves it, development option or not.
+    // The option exists so a local mock can speak plain HTTP, not so a response
+    // from a production origin can walk the analysis — and its credential — off
+    // the encrypted path it started on.
+    if current.scheme() == "https" && next.scheme() != "https" {
+        return Err(GitHubSourceError::InsecureRedirect);
     }
 
+    // Every hop is held to the rule the configured base was held to. A redirect
+    // is a URL chosen by the responding server, which is precisely why it does
+    // not get a weaker rule than the one an operator had to satisfy by hand.
+    secure_transport(&next, allow_insecure_loopback)
+        .map_err(|_| GitHubSourceError::InsecureRedirect)?;
+
     Ok(Some(next))
+}
+
+/// Whether `url` may be requested at all, given the development option.
+///
+/// HTTPS everywhere, with one hole that has to be opened deliberately: plain
+/// HTTP to a loopback address, which is what the test suite's mock speaks and
+/// what never leaves the machine. Anything else would mean the analysis token,
+/// the evidence, and the archive all cross a network in cleartext.
+fn secure_transport(url: &Url, allow_insecure_loopback: bool) -> Result<(), &'static str> {
+    if url.scheme() == "https" {
+        return Ok(());
+    }
+    if url.scheme() == "http" && allow_insecure_loopback && is_loopback(url) {
+        return Ok(());
+    }
+    Err("only HTTPS is accepted, or HTTP to a loopback address under the development option")
+}
+
+/// Whether `url` addresses this machine and only this machine.
+///
+/// Compared against the parsed host rather than the string, so that neither
+/// `127.1` nor `[::1]` nor a name that merely starts with `localhost` can be
+/// mistaken for — or hidden from — the loopback rule.
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        // Resolution is the operating system's business, but `localhost` is
+        // reserved for loopback by RFC 6761 and is what a local mock is usually
+        // reached by.
+        Some(Host::Domain(name)) => name == "localhost",
+        None => false,
+    }
+}
+
+/// Every rule the configured REST base has to satisfy.
+///
+/// All of them are about what the base *is*, not about what a request to it
+/// returns, so all of them can be — and are — settled once at construction.
+fn check_api_base(api_base: &Url, allow_insecure_loopback: bool) -> Result<(), GitHubSourceError> {
+    let invalid = |reason| GitHubSourceError::InvalidApiBase { reason };
+
+    // `mailto:` and `data:` URLs have no path to extend, so every later
+    // endpoint construction would fail per request instead of at startup.
+    if api_base.cannot_be_a_base() {
+        return Err(invalid("it cannot be used as a URL base"));
+    }
+
+    secure_transport(api_base, allow_insecure_loopback).map_err(invalid)?;
+
+    // A credential in the base is a credential in every log line that prints a
+    // URL, and it would be sent as basic auth alongside the bearer token that
+    // this boundary attaches deliberately.
+    if !api_base.username().is_empty() || api_base.password().is_some() {
+        return Err(invalid("it must not carry a username or password"));
+    }
+
+    // Endpoints are built by extending the base's path. A query or a fragment
+    // would be silently dropped from every request built from it, so a base
+    // carrying either does not mean what whoever configured it thinks it means.
+    if api_base.query().is_some() {
+        return Err(invalid("it must not carry a query string"));
+    }
+    if api_base.fragment().is_some() {
+        return Err(invalid("it must not carry a fragment"));
+    }
+
+    Ok(())
+}
+
+/// Renders a URL with every part a secret is put in removed.
+///
+/// Used by both `Debug` implementations. A configuration is printable before it
+/// is validated, so this assumes the worst about what it holds.
+fn redacted_url(url: &Url) -> String {
+    let mut safe = url.clone();
+    let _ = safe.set_username("");
+    let _ = safe.set_password(None);
+    safe.set_query(None);
+    safe.set_fragment(None);
+    safe.to_string()
 }
 
 /// Translates a refusal into the boundary's vocabulary.
@@ -503,14 +704,22 @@ fn check_status(
 
 /// Whether a refusal is a rate-limit refusal.
 ///
-/// The status alone cannot say. GitHub answers `403` for the primary limit and
-/// `429` for the secondary one, and `403` also means "forbidden" for reasons
-/// that will never improve by waiting. The headers are what distinguish "come
-/// back later" from "go away", and getting it wrong in either direction is
-/// expensive: retrying a real refusal burns the remaining budget, and failing a
-/// rate limit permanently discards an analysis that would have succeeded.
+/// `429` is one unconditionally. GitHub documents it for both the primary and
+/// the secondary limit, and documents the header-less case explicitly — wait at
+/// least a minute — so a `429` that carries no timing hint is a rate limit with
+/// no hint, not a permanent refusal. Treating it as permanent discarded an
+/// analysis that a minute's wait would have completed.
+///
+/// `403` keeps the stricter test, because GitHub also answers `403` for the
+/// primary limit *and* for refusals that will never improve by waiting. There
+/// the headers are the only thing that distinguishes "come back later" from "go
+/// away", and retrying a real refusal spends the rest of the window on a request
+/// that can never be allowed.
 fn is_rate_limited(status: StatusCode, headers: &HeaderMap) -> bool {
-    if status != StatusCode::FORBIDDEN && status != StatusCode::TOO_MANY_REQUESTS {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return true;
+    }
+    if status != StatusCode::FORBIDDEN {
         return false;
     }
     header_u64(headers, RATE_LIMIT_REMAINING_HEADER) == Some(0)
@@ -540,36 +749,74 @@ fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
     headers.get(name)?.to_str().ok()?.trim().parse().ok()
 }
 
+/// Why a bounded read produced no body.
+///
+/// The oversized case is kept apart from every other failure because the caller
+/// charges the analysis budget for what actually crossed the wire, and a
+/// declared length refused before the first byte cost nothing at all.
+enum ReadFailure {
+    /// The body did not fit the cap in force for this request.
+    Oversized {
+        /// What exceeded the cap: a declared length, or the point at which the
+        /// stream was cut.
+        observed: u64,
+        /// Bytes that actually arrived. Zero when a declared length was refused
+        /// before the body started.
+        transferred: u64,
+    },
+    /// Anything else, already in the boundary's vocabulary.
+    Other(GitHubSourceError),
+}
+
+impl ReadFailure {
+    /// Renders the failure as the boundary's own error, naming the ceiling.
+    ///
+    /// For callers that only propagate. The one caller that charges a budget
+    /// matches on the variant instead, because by then the distinction between
+    /// "declared" and "transferred" has been flattened away.
+    fn into_error(self, limit_name: &'static str, limit: u64) -> GitHubSourceError {
+        match self {
+            Self::Oversized { observed, .. } => GitHubSourceError::LimitExceeded {
+                limit_name,
+                limit,
+                observed,
+            },
+            Self::Other(error) => error,
+        }
+    }
+}
+
 /// Reads a response body, refusing to allocate more than `limit` bytes.
 ///
 /// `Content-Length` is checked first as a cheap refusal, and then again while
 /// reading, because a declared length is a claim about a body that has not
 /// arrived yet.
-async fn read_body(
-    response: Response,
-    limit: u64,
-    limit_name: &'static str,
-) -> Result<Vec<u8>, GitHubSourceError> {
-    let exceeded = |observed| GitHubSourceError::LimitExceeded {
-        limit_name,
-        limit,
-        observed,
-    };
-
+async fn read_body(response: Response, limit: u64) -> Result<Vec<u8>, ReadFailure> {
     if let Some(declared) = response.content_length()
         && declared > limit
     {
-        return Err(exceeded(declared));
+        // Nothing has been transferred: the refusal happens on the headers, and
+        // the body is dropped unread.
+        return Err(ReadFailure::Oversized {
+            observed: declared,
+            transferred: 0,
+        });
     }
 
-    let cap = usize::try_from(limit).unwrap_or(usize::MAX);
-    let mut body = Vec::new();
+    let mut body: Vec<u8> = Vec::new();
     let mut chunks = response.bytes_stream();
 
     while let Some(chunk) = chunks.next().await {
-        let chunk = chunk.map_err(|error| transport_failure(&error))?;
-        if body.len().saturating_add(chunk.len()) > cap {
-            return Err(exceeded(as_u64(body.len().saturating_add(chunk.len()))));
+        let chunk = chunk.map_err(|error| ReadFailure::Other(transport_failure(&error)))?;
+        let arrived = as_u64(body.len()).saturating_add(as_u64(chunk.len()));
+        if arrived > limit {
+            // The chunk that broke the cap arrived before it could be refused,
+            // so it is charged. Reporting only the bytes kept would understate
+            // what the transfer cost.
+            return Err(ReadFailure::Oversized {
+                observed: arrived,
+                transferred: arrived,
+            });
         }
         body.extend_from_slice(&chunk);
     }
@@ -577,35 +824,82 @@ async fn read_body(
     Ok(body)
 }
 
-/// Streams a response to `destination`, refusing to write more than `cap`.
+/// Reads a JSON response through the shared response ceiling.
+async fn read_response_body(response: Response) -> Result<Vec<u8>, GitHubSourceError> {
+    read_body(response, limits::MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|failure| failure.into_error("response bytes", limits::MAX_RESPONSE_BYTES))
+}
+
+/// The ceiling breach an archive reports.
+fn archive_exceeded(cap: u64, observed: u64) -> GitHubSourceError {
+    GitHubSourceError::LimitExceeded {
+        limit_name: "archive compressed bytes",
+        limit: cap,
+        observed,
+    }
+}
+
+/// Opens a file next to `destination` that did not exist a moment ago.
+///
+/// `create_new`, so an existing file is never opened and therefore never
+/// truncated — including `destination` itself, which may be a file the caller
+/// wrote and still needs. A sibling rather than a temporary directory, so the
+/// rename that follows stays within one filesystem: a cross-device rename is a
+/// copy, and copying an archive is the transfer this whole path exists to do
+/// only once.
+async fn create_part_file(
+    destination: &Path,
+) -> Result<(PathBuf, tokio::fs::File), GitHubSourceError> {
+    /// Distinguishes concurrent downloads within one process; the process id
+    /// distinguishes them between processes.
+    static NEXT_SERIAL: AtomicU64 = AtomicU64::new(0);
+
+    let failed = || GitHubSourceError::Io {
+        operation: "create the archive file",
+    };
+
+    let Some(file_name) = destination.file_name() else {
+        return Err(failed());
+    };
+
+    for _ in 0..PART_FILE_ATTEMPTS {
+        let serial = NEXT_SERIAL.fetch_add(1, Ordering::Relaxed);
+        let mut candidate_name = file_name.to_owned();
+        candidate_name.push(format!(".{}-{serial}.part", std::process::id()));
+        let candidate = destination.with_file_name(candidate_name);
+
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+            .await
+        {
+            Ok(file) => return Ok((candidate, file)),
+            // A leftover from a run that was killed mid-download. Trying the
+            // next name is cheaper than deciding whether it is safe to remove
+            // something another process may still be writing.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(failed()),
+        }
+    }
+
+    Err(failed())
+}
+
+/// Streams a response into `file`, refusing to write more than `cap`.
 ///
 /// Never buffers the whole body: extraction runs on a size-limited volume, and
 /// an archive held in memory would turn an exceeded budget into an out-of-memory
 /// kill that strands the worker's lease instead of a catchable error.
+///
+/// Takes the file by value, so the handle is closed before the caller renames
+/// it into place.
 async fn stream_to_file(
     response: Response,
     cap: u64,
-    destination: &Path,
+    mut file: tokio::fs::File,
 ) -> Result<u64, GitHubSourceError> {
-    let exceeded = |observed| GitHubSourceError::LimitExceeded {
-        limit_name: "archive compressed bytes",
-        limit: cap,
-        observed,
-    };
-
-    if let Some(declared) = response.content_length()
-        && declared > cap
-    {
-        return Err(exceeded(declared));
-    }
-
-    let mut file =
-        tokio::fs::File::create(destination)
-            .await
-            .map_err(|_| GitHubSourceError::Io {
-                operation: "create the archive file",
-            })?;
-
     let mut written: u64 = 0;
     let mut chunks = response.bytes_stream();
 
@@ -613,7 +907,7 @@ async fn stream_to_file(
         let chunk = chunk.map_err(|error| transport_failure(&error))?;
         written = written.saturating_add(as_u64(chunk.len()));
         if written > cap {
-            return Err(exceeded(written));
+            return Err(archive_exceeded(cap, written));
         }
         file.write_all(&chunk)
             .await
@@ -622,7 +916,10 @@ async fn stream_to_file(
             })?;
     }
 
-    file.flush().await.map_err(|_| GitHubSourceError::Io {
+    // Durable before it is named. A rename publishes the path to the extractor,
+    // and publishing a name whose bytes are still in a write-back cache would
+    // make a crash look like a corrupt archive rather than an absent one.
+    file.sync_all().await.map_err(|_| GitHubSourceError::Io {
         operation: "flush the archive file",
     })?;
 
@@ -719,7 +1016,7 @@ impl GitHubRestClient {
             GitHubSourceError::RepositoryNotFound(coordinate.clone())
         })?;
 
-        let body = read_body(response, limits::MAX_RESPONSE_BYTES, "response bytes").await?;
+        let body = read_response_body(response).await?;
         let payload: RepositoryPayload = parse_json(&body, "repository")?;
 
         // Reported exactly as an absent repository. GitHub already answers `404`
@@ -774,7 +1071,7 @@ impl GitHubRestClient {
             GitHubSourceError::ReferenceNotFound(reference.to_owned())
         })?;
 
-        let body = read_body(response, limits::MAX_RESPONSE_BYTES, "response bytes").await?;
+        let body = read_response_body(response).await?;
         let payload: CommitPayload = parse_json(&body, "commit")?;
 
         let malformed = || GitHubSourceError::MalformedResponse { resource: "commit" };
@@ -814,7 +1111,7 @@ impl GitHubRestClient {
             GitHubSourceError::ReferenceNotFound(commit.to_string())
         })?;
 
-        let body = read_body(response, limits::MAX_RESPONSE_BYTES, "response bytes").await?;
+        let body = read_response_body(response).await?;
         let payload: TreePayload = parse_json(&body, "tree")?;
 
         // Two independent reasons the listing may be short, and both mean the
@@ -867,16 +1164,37 @@ impl GitHubRestClient {
             GitHubSourceError::ReferenceNotFound(commit.to_string())
         })?;
 
-        match stream_to_file(response, cap, destination).await {
-            Ok(compressed_bytes) => Ok(ArchiveDownload { compressed_bytes }),
-            Err(error) => {
-                // A truncated tarball is not partial evidence, it is a file that
-                // the extractor would open and fail on later, somewhere with less
-                // context than here. Removed rather than left to be found.
-                drop(tokio::fs::remove_file(destination).await);
-                Err(error)
-            }
+        // Refused on the declared length before anything is created, so the
+        // common oversized case never touches the filesystem at all.
+        if let Some(declared) = response.content_length()
+            && declared > cap
+        {
+            return Err(archive_exceeded(cap, declared));
         }
+
+        let (part, file) = create_part_file(destination).await?;
+
+        // Everything after this point works on a file this call created. A
+        // truncated tarball is not partial evidence — it is a file the extractor
+        // would open and fail on later, somewhere with less context than here —
+        // so it is removed rather than left to be found. `destination` is
+        // deliberately not what gets removed: on a failure it still holds
+        // whatever the caller had there, which was never this call's to delete.
+        let outcome = match stream_to_file(response, cap, file).await {
+            Ok(compressed_bytes) => tokio::fs::rename(&part, destination)
+                .await
+                .map(|()| ArchiveDownload { compressed_bytes })
+                .map_err(|_| GitHubSourceError::Io {
+                    operation: "move the archive file into place",
+                }),
+            Err(error) => Err(error),
+        };
+
+        if outcome.is_err() {
+            drop(tokio::fs::remove_file(&part).await);
+        }
+
+        outcome
     }
 }
 
@@ -942,17 +1260,27 @@ mod tests {
 
     use super::{
         GitHubClientConfig, GitHubRestClient, RATE_LIMIT_REMAINING_HEADER, RATE_LIMIT_RESET_HEADER,
-        header_u64, is_binary, is_rate_limited, rate_limit_error, tree_entry_kind,
+        header_u64, is_binary, is_rate_limited, rate_limit_error, redirect_target, tree_entry_kind,
     };
     use crate::{GitHubSourceError, TreeEntryKind};
 
     const EXAMPLE_TOKEN: &str = "EXAMPLE_NOT_A_REAL_TOKEN";
 
     fn client_for(api_base: &str) -> GitHubRestClient {
-        let config = GitHubClientConfig::new()
+        GitHubRestClient::new(config_for(api_base)).expect("the test base is usable")
+    }
+
+    /// A configuration for `api_base`, with the loopback allowance a local base
+    /// needs and a production base ignores.
+    fn config_for(api_base: &str) -> GitHubClientConfig {
+        GitHubClientConfig::new()
             .with_api_base(Url::parse(api_base).expect("test base is a literal"))
-            .with_token(SecretString::from(EXAMPLE_TOKEN.to_owned()));
-        GitHubRestClient::new(config).expect("a http base is usable")
+            .with_token(SecretString::from(EXAMPLE_TOKEN.to_owned()))
+            .allow_insecure_loopback()
+    }
+
+    fn url(value: &str) -> Url {
+        Url::parse(value).expect("literal")
     }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -1018,8 +1346,167 @@ mod tests {
             .with_api_base(Url::parse("mailto:nobody@example.invalid").expect("literal"));
         assert!(matches!(
             GitHubRestClient::new(config),
-            Err(GitHubSourceError::InvalidApiBase)
+            Err(GitHubSourceError::InvalidApiBase { .. })
         ));
+    }
+
+    #[test]
+    fn a_base_that_would_carry_the_token_in_cleartext_is_refused() {
+        // The credential is attached to every request to the configured origin.
+        // A plain-HTTP origin therefore means the analysis token on the wire in
+        // cleartext, which no amount of care elsewhere in this file recovers
+        // from.
+        let insecure = GitHubClientConfig::new()
+            .with_api_base(url("http://api.example.invalid/"))
+            .with_token(SecretString::from(EXAMPLE_TOKEN.to_owned()));
+
+        assert!(matches!(
+            GitHubRestClient::new(insecure),
+            Err(GitHubSourceError::InvalidApiBase { .. })
+        ));
+    }
+
+    #[test]
+    fn plain_http_to_loopback_needs_the_development_option() {
+        // Off by default, even for loopback: the suite has to ask for the
+        // insecure path by name, so nothing acquires it by accident.
+        let without = GitHubClientConfig::new().with_api_base(url("http://127.0.0.1:9001/"));
+        assert!(matches!(
+            GitHubRestClient::new(without),
+            Err(GitHubSourceError::InvalidApiBase { .. })
+        ));
+
+        for local in [
+            "http://127.0.0.1:9001/",
+            "http://localhost:9001/",
+            "http://[::1]:9001/",
+        ] {
+            assert!(
+                GitHubRestClient::new(config_for(local)).is_ok(),
+                "{local} is loopback and the option was given"
+            );
+        }
+
+        // The option is loopback-only. A public host does not become acceptable
+        // because a developer switched it on.
+        let elsewhere = GitHubClientConfig::new()
+            .with_api_base(url("http://api.example.invalid/"))
+            .allow_insecure_loopback();
+        assert!(matches!(
+            GitHubRestClient::new(elsewhere),
+            Err(GitHubSourceError::InvalidApiBase { .. })
+        ));
+    }
+
+    #[test]
+    fn a_base_carrying_a_secret_or_a_query_is_refused() {
+        // Userinfo would be sent as basic auth beside the bearer token and
+        // printed by anything that logs a URL; a query or fragment is silently
+        // dropped when endpoints extend the path, so a base carrying either does
+        // not mean what whoever configured it thinks it means.
+        for base in [
+            "https://user:hunter2@api.github.com/",
+            "https://api.github.com/?access_token=secret",
+            "https://api.github.com/#fragment",
+        ] {
+            let config = GitHubClientConfig::new().with_api_base(url(base));
+            assert!(
+                matches!(
+                    GitHubRestClient::new(config),
+                    Err(GitHubSourceError::InvalidApiBase { .. })
+                ),
+                "{base} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_output_never_contains_a_credential_embedded_in_the_base() {
+        // A configuration is printable before it is validated, so the redaction
+        // cannot rely on construction having rejected this base already.
+        let config = GitHubClientConfig::new()
+            .with_api_base(url("https://user:hunter2@api.github.com/?token=secret"));
+
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!rendered.contains("secret"), "{rendered}");
+    }
+
+    #[test]
+    fn a_redirect_never_walks_the_request_off_tls() {
+        let secure = url("https://api.github.com/repos/o/r/tarball/abc");
+
+        assert!(matches!(
+            redirect_target(
+                302,
+                Some("http://codeload.example.invalid/x"),
+                &secure,
+                false
+            ),
+            Err(GitHubSourceError::InsecureRedirect)
+        ));
+        // Not even under the development option: that option exists so a local
+        // mock can speak HTTP, not so a production origin can be downgraded.
+        assert!(matches!(
+            redirect_target(302, Some("http://127.0.0.1:9001/x"), &secure, true),
+            Err(GitHubSourceError::InsecureRedirect)
+        ));
+
+        // The hops that are allowed still are. A signed archive URL on another
+        // HTTPS host is the whole reason redirects are followed at all.
+        let followed = redirect_target(
+            302,
+            Some("https://codeload.example.invalid/x?token=signed"),
+            &secure,
+            false,
+        )
+        .expect("an HTTPS hop is followed");
+        assert_eq!(
+            followed.map(|next| next.to_string()),
+            Some("https://codeload.example.invalid/x?token=signed".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_local_redirect_may_not_leave_the_machine_in_cleartext() {
+        // The development option is scoped the same way on a hop as it is on the
+        // base, so a mock cannot redirect the suite — or a developer's token —
+        // onto a public plain-HTTP host.
+        let local = url("http://127.0.0.1:9001/repos/o/r");
+
+        assert!(
+            redirect_target(302, Some("http://127.0.0.1:9002/x"), &local, true)
+                .expect("loopback to loopback is what the option is for")
+                .is_some()
+        );
+        assert!(matches!(
+            redirect_target(302, Some("http://codeload.example.invalid/x"), &local, true),
+            Err(GitHubSourceError::InsecureRedirect)
+        ));
+    }
+
+    #[test]
+    fn a_response_that_is_not_a_redirect_has_nowhere_to_go() {
+        // `304` is a `3xx` with no `Location`. Treating "is a redirect" as "has
+        // somewhere to go" would turn a cache response into a malformed one.
+        let current = url("https://api.github.com/repos/o/r");
+
+        assert_eq!(
+            redirect_target(304, None, &current, false).expect("not a redirect"),
+            None
+        );
+        assert!(matches!(
+            redirect_target(302, None, &current, false),
+            Err(GitHubSourceError::MalformedResponse {
+                resource: "redirect"
+            })
+        ));
+
+        // `Location` is permitted to be relative, and GitHub's own sometimes is.
+        let relative = redirect_target(301, Some("/repos/o/renamed"), &current, false)
+            .expect("a relative location resolves")
+            .expect("a redirect");
+        assert_eq!(relative.as_str(), "https://api.github.com/repos/o/renamed");
     }
 
     #[test]
@@ -1028,14 +1515,27 @@ mod tests {
         let plenty = headers(&[(RATE_LIMIT_REMAINING_HEADER, "4999")]);
 
         assert!(is_rate_limited(reqwest::StatusCode::FORBIDDEN, &exhausted));
-        assert!(is_rate_limited(
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            &exhausted
-        ));
         // A plain refusal. Retrying this would spend the remaining budget on a
         // request that will never be allowed.
         assert!(!is_rate_limited(reqwest::StatusCode::FORBIDDEN, &plenty));
         assert!(!is_rate_limited(reqwest::StatusCode::NOT_FOUND, &exhausted));
+    }
+
+    #[test]
+    fn every_too_many_requests_is_a_rate_limit_whatever_its_headers_say() {
+        // GitHub documents `429` for both limits and defines the header-less
+        // case — wait at least a minute. A `429` is therefore never a permanent
+        // refusal, and the headers only ever add a timing hint.
+        for map in [
+            headers(&[]),
+            headers(&[(RATE_LIMIT_REMAINING_HEADER, "4999")]),
+            headers(&[(RATE_LIMIT_REMAINING_HEADER, "0")]),
+        ] {
+            assert!(is_rate_limited(
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                &map
+            ));
+        }
     }
 
     #[test]

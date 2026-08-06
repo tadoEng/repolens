@@ -34,9 +34,10 @@ url = { workspace = true }
 # `Response::bytes_stream` yields a `Stream`, which needs `StreamExt` to drive.
 futures-util = { workspace = true }
 
-# Content digests for retrieved evidence.
+# Content digests for retrieved evidence. The hex spelling is
+# `repolens_core::ContentDigest`'s to own, so that the end producing digests and
+# the end publishing them cannot drift apart.
 sha2 = { workspace = true }
-hex = { workspace = true }
 
 # The analysis token. Never `String`: a plain token can be printed by a derived
 # `Debug` on any struct that transitively holds it.
@@ -62,6 +63,12 @@ time = { workspace = true, features = ["serde-well-known"] }
 # exhaustion cannot be provoked against the real API on purpose.
 [dev-dependencies]
 wiremock = "0.6"
+
+# `net`, for the few lines of raw HTTP that answer with a body of undeclared
+# length. A canned-response mock always knows its own `Content-Length`, and the
+# archive failure that matters most — a cap enforced against a body that is
+# still arriving — only exists when it does not.
+tokio = { workspace = true, features = ["net"] }
 
 [lints]
 workspace = true

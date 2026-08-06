@@ -42,7 +42,7 @@ pub use rest::{GitHubClientConfig, GitHubRestClient};
 use std::future::Future;
 use std::path::Path;
 
-use repolens_core::{CommitSha, RepositoryCoordinate};
+use repolens_core::{CommitSha, ContentDigest, RepositoryCoordinate};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -131,28 +131,33 @@ pub struct BlobContent {
     pub path: String,
     /// Git object name of the blob.
     pub sha: String,
-    /// SHA-256 of [`bytes`](BlobContent::bytes), lowercase hex. See
-    /// [`content_digest`].
-    pub content_digest: String,
+    /// SHA-256 of [`bytes`](BlobContent::bytes), in the contract's canonical
+    /// spelling. See [`content_digest`].
+    pub content_digest: ContentDigest,
     /// Raw bytes. Bounded by the per-blob cap the implementation applies at
     /// fetch time, not by the caller after the fact.
     pub bytes: Vec<u8>,
 }
 
-/// SHA-256 of retrieved bytes, lowercase hex.
+/// SHA-256 of retrieved bytes, as a [`ContentDigest`].
 ///
 /// Recorded alongside every piece of retrieved evidence so that a finding can be
 /// traced to the exact bytes it was drawn from — the point of an evidence-backed
 /// report is that a reader can check it, and a citation to a path is only a
 /// citation to whatever that path holds today.
 ///
+/// The spelling is `repolens-core`'s rather than this crate's. Ingestion
+/// produces digests and the wire contract publishes them; when each owned its
+/// own format the mismatch surfaced only at integration, as evidence that
+/// silently failed to match the commit it claimed to pin.
+///
 /// Deliberately not the Git blob SHA, which [`BlobContent::sha`] already
 /// carries. That is SHA-1 over a length-prefixed object rather than over the
 /// content, so it answers a different question, and SHA-1 is no longer a digest
 /// anything should be pinned on. Keeping both means a mismatch between them is
 /// itself detectable.
-pub fn content_digest(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+pub fn content_digest(bytes: &[u8]) -> ContentDigest {
+    ContentDigest::from_sha256(Sha256::digest(bytes).into())
 }
 
 /// Result of streaming an archive to disk.
@@ -222,11 +227,29 @@ pub enum GitHubSourceError {
         /// Which response disappointed: `repository`, `commit`, `tree`, ….
         resource: &'static str,
     },
-    /// The configured REST base cannot have a path appended, so no endpoint
-    /// could ever be built from it. Raised once at construction rather than on
-    /// every request.
-    #[error("the configured API base cannot be used as a URL base")]
-    InvalidApiBase,
+    /// The configured REST base is not one this boundary will send a request —
+    /// or a credential — to. Raised once at construction rather than on every
+    /// request.
+    ///
+    /// Names the rule that was broken, never the URL: a base is exactly the
+    /// place a credential can be embedded, and an error that echoed it would
+    /// print that credential into a log.
+    #[error("the configured API base is unusable: {reason}")]
+    InvalidApiBase {
+        /// Which rule the base broke, as a fixed phrase.
+        reason: &'static str,
+    },
+    /// A redirect pointed somewhere this boundary will not follow.
+    ///
+    /// Separate from [`MalformedResponse`](GitHubSourceError::MalformedResponse)
+    /// because the response was well-formed and the refusal was ours: following
+    /// it would have carried the analysis — and the evidence it collects — onto
+    /// a transport that anyone on the path can read or rewrite.
+    ///
+    /// Names nothing about the target, which for the archive endpoint carries a
+    /// signed query string.
+    #[error("a redirect onto an insecure transport was refused")]
+    InsecureRedirect,
     /// Writing retrieved bytes to disk failed.
     ///
     /// The path is named by the caller and is not rendered here.
@@ -262,7 +285,8 @@ impl GitHubSourceError {
             | Self::ReferenceNotFound(_)
             | Self::LimitExceeded { .. }
             | Self::MalformedResponse { .. }
-            | Self::InvalidApiBase
+            | Self::InvalidApiBase { .. }
+            | Self::InsecureRedirect
             | Self::Io { .. } => false,
         }
     }
@@ -325,6 +349,8 @@ pub trait GitHubRepositorySource {
 
 #[cfg(test)]
 mod tests {
+    use repolens_core::ContentDigest;
+
     use super::{GITHUB_REST_API_VERSION, GitHubSourceError, content_digest};
 
     /// The implicit default GitHub applies when the header is absent.
@@ -340,8 +366,19 @@ mod tests {
         let second = content_digest(b"# RepoLens\n");
 
         assert_eq!(first, second);
-        assert_eq!(first.len(), 64, "SHA-256 renders as 64 hex characters");
-        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(ContentDigest::parse(first.as_str()).is_ok());
+    }
+
+    #[test]
+    fn the_digest_is_the_contracts_spelling_rather_than_bare_hex() {
+        // The drift the shared type exists to prevent: this crate emitting bare
+        // hex while the wire contract publishes `sha256:<hex>`. Asserted here
+        // because the two ends are compiled separately and would otherwise only
+        // disagree once a real analysis was published.
+        let digest = content_digest(b"# RepoLens\n");
+
+        assert!(digest.as_str().starts_with("sha256:"), "{digest}");
+        assert_eq!(digest.as_str().len(), "sha256:".len() + 64);
     }
 
     #[test]
@@ -357,8 +394,8 @@ mod tests {
         // An empty file is evidence too — a zero-byte `LICENSE` is a fact about
         // a repository — so it must be citable like any other.
         assert_eq!(
-            content_digest(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            content_digest(b"").as_str(),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
 
