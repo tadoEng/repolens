@@ -26,6 +26,7 @@ import {
 	type AnalysisFixtureName
 } from './src/fixtures';
 import {
+	describeCodeRole,
 	HANDLED_VARIANTS,
 	describeAnalysisState,
 	describeConfidence,
@@ -53,6 +54,7 @@ const OPENAPI_DOCUMENT_PATH = fileURLToPath(
  */
 const DESCRIBERS: Readonly<Record<string, (raw: string) => VariantDescriptor<string>>> = {
 	AnalysisState: describeAnalysisState,
+	CodeRole: describeCodeRole,
 	Confidence: describeConfidence,
 	ErrorCode: describeErrorCode,
 	EvidenceKind: describeEvidenceKind,

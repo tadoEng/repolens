@@ -57,7 +57,7 @@
             "path": "Cargo.toml",
             "excerpt": "[workspace]\nmembers = [\"crates/*\"]",
             "truncated": true,
-            "digest": "sha256:6b8f9e2c1a4d7f30b5c8e1a2d4f6089b3c5e7a9d1f2408b6c8e0a2d4f6b8c0e2",
+            "digest": "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
             "line_range": {
               "start": 1,
               "end": 2
@@ -152,6 +152,37 @@
           "matched_rule": "vendor.node_modules",
           "file_count": 126,
           "bytes": 4182004
+        }
+      ],
+      "roles": [
+        {
+          "role": "PRODUCTION",
+          "files": 604,
+          "code_lines": 63400
+        },
+        {
+          "role": "TEST",
+          "files": 178,
+          "code_lines": 11710
+        },
+        {
+          "role": "GENERATED",
+          "files": 34,
+          "code_lines": 3200
+        }
+      ],
+      "largest_files": [
+        {
+          "path": "src/publication.rs",
+          "language": "Rust",
+          "code_lines": 2410,
+          "role": "PRODUCTION"
+        },
+        {
+          "path": "packages/api-client/src/schema.ts",
+          "language": "TypeScript",
+          "code_lines": 1980,
+          "role": "GENERATED"
         }
       ],
       "unclassified_files": 7

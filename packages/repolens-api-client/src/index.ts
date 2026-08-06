@@ -51,6 +51,7 @@ export {
 
 export {
 	ANALYSIS_STATE_LABELS,
+	CODE_ROLE_LABELS,
 	CONFIDENCE_LABELS,
 	ERROR_CODE_LABELS,
 	EVIDENCE_KIND_LABELS,
@@ -61,6 +62,7 @@ export {
 	SEVERITY_LABELS,
 	TRIGGER_STATUS_LABELS,
 	describeAnalysisState,
+	describeCodeRole,
 	describeConfidence,
 	describeErrorCode,
 	describeEvidenceKind,

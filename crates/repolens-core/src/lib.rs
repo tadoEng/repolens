@@ -15,6 +15,7 @@
 //! not from this crate.
 
 pub mod composition;
+pub mod digest;
 pub mod finding;
 pub mod ids;
 pub mod repository;
@@ -25,6 +26,7 @@ pub use composition::{
     CompositionLimitBreach, CompositionOutcome, LanguageComposition, RepositoryComposition,
     RepositoryCompositionCounter,
 };
+pub use digest::{ContentDigest, ContentDigestError};
 pub use finding::{Confidence, Evidence, Finding, Severity};
 pub use ids::{AnalysisId, FindingId, SnapshotId};
 pub use repository::{CommitSha, CommitShaError, RepositoryCoordinate, TreeSha};

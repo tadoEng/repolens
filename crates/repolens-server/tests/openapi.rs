@@ -84,6 +84,86 @@ fn probe_is_published_under_the_versioned_prefix() {
     );
 }
 
+/// Walks every schema property name in the document.
+///
+/// Recursive rather than a spot check: nesting is where a stray `rename_all`
+/// hides. A convention asserted only on the fields somebody remembered is a
+/// convention that holds until the first `struct` nobody thought to list.
+fn collect_property_names(node: &serde_json::Value, out: &mut Vec<String>) {
+    match node {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if key == "properties"
+                    && let Some(properties) = value.as_object()
+                {
+                    out.extend(properties.keys().cloned());
+                }
+                collect_property_names(value, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_property_names(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn every_property_name_is_snake_case() {
+    // Issue #14 settled snake_case object fields. Documenting that is not
+    // enforcing it: the failure mode is one DTO acquiring `rename_all`, which
+    // compiles, passes every existing test, and silently breaks every consumer
+    // reading the old name.
+    let document: serde_json::Value = serde_json::from_str(&generate()).expect("valid JSON");
+
+    let mut names = Vec::new();
+    collect_property_names(&document, &mut names);
+    assert!(
+        !names.is_empty(),
+        "no properties found — the walk is broken"
+    );
+
+    let offenders: Vec<&String> = names
+        .iter()
+        .filter(|name| name.chars().any(|c| c.is_ascii_uppercase()))
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "these property names are not snake_case: {offenders:?}"
+    );
+}
+
+#[test]
+fn every_enum_value_is_screaming_snake_case() {
+    // The mirror rule. Rust's PascalCase variants cannot produce it, so a
+    // missing `rename_all` on an enum shows up here rather than in a browser.
+    let document: serde_json::Value = serde_json::from_str(&generate()).expect("valid JSON");
+    let schemas = document["components"]["schemas"]
+        .as_object()
+        .expect("components.schemas");
+
+    let mut checked = 0;
+    for (name, schema) in schemas {
+        let Some(values) = schema.get("enum").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for value in values {
+            let text = value.as_str().expect("enum values are strings");
+            checked += 1;
+            assert!(
+                text.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+                "{name} has a non-SCREAMING_SNAKE_CASE value: {text}"
+            );
+        }
+    }
+
+    assert!(checked > 0, "no enum values found — the walk is broken");
+}
+
 #[test]
 fn contract_uses_the_settled_naming_convention() {
     // Issue #14 settled snake_case object fields and SCREAMING_SNAKE_CASE enum

@@ -33,6 +33,7 @@
 import type {
 	AnalysisState,
 	Confidence,
+	CodeRole,
 	ErrorCode,
 	EvidenceKind,
 	FindingCategory,
@@ -143,6 +144,16 @@ export const FINDING_CATEGORY_LABELS: Readonly<Record<FindingCategory, string>> 
 	SECURITY_AND_MAINTENANCE: 'Security and maintenance'
 };
 
+export const CODE_ROLE_LABELS: Readonly<Record<CodeRole, string>> = {
+	PRODUCTION: 'Production',
+	TEST: 'Test',
+	// Named explicitly rather than folded into production: counting machine-produced
+	// code as hand-written work overstates effort and understates how much of the
+	// repository is derived.
+	GENERATED: 'Generated',
+	TOOLING: 'Tooling'
+};
+
 export const FINDING_STATE_LABELS: Readonly<Record<FindingState, string>> = {
 	DETECTED: 'Detected',
 	DOCUMENTED: 'Documented',
@@ -175,6 +186,10 @@ export const TRIGGER_STATUS_LABELS: Readonly<Record<TriggerStatus, string>> = {
 
 export function describeAnalysisState(raw: string): VariantDescriptor<AnalysisState> {
 	return describeVariant(ANALYSIS_STATE_LABELS, raw);
+}
+
+export function describeCodeRole(raw: string): VariantDescriptor<CodeRole> {
+	return describeVariant(CODE_ROLE_LABELS, raw);
 }
 
 export function describeConfidence(raw: string): VariantDescriptor<Confidence> {
@@ -221,6 +236,7 @@ export function describeTriggerStatus(raw: string): VariantDescriptor<TriggerSta
  */
 export const HANDLED_VARIANTS: Readonly<Record<string, readonly string[]>> = {
 	AnalysisState: Object.keys(ANALYSIS_STATE_LABELS),
+	CodeRole: Object.keys(CODE_ROLE_LABELS),
 	Confidence: Object.keys(CONFIDENCE_LABELS),
 	ErrorCode: Object.keys(ERROR_CODE_LABELS),
 	EvidenceKind: Object.keys(EVIDENCE_KIND_LABELS),

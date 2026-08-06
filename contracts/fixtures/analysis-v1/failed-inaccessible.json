@@ -1,0 +1,26 @@
+{
+  "analysis": {
+    "id": "0193a5c0-0000-7000-8000-000000000001",
+    "repository": {
+      "owner": "rust-lang",
+      "name": "crates.io"
+    },
+    "commit_sha": "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+    "state": "FAILED_RETRIABLE",
+    "execution": {
+      "trigger_status": "SUCCEEDED",
+      "execution_id": "exec-0193a5c0",
+      "triggered_at": "2026-08-06T09:00:00Z"
+    },
+    "retry": {
+      "allowed": true
+    },
+    "error": {
+      "code": "REPOSITORY_INACCESSIBLE",
+      "message": "The repository could not be read. This is usually temporary."
+    },
+    "created_at": "2026-08-06T09:00:00Z",
+    "updated_at": "2026-08-06T09:00:04Z",
+    "report_available": false
+  }
+}

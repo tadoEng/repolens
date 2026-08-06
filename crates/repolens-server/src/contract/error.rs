@@ -44,6 +44,22 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Every code, in declaration order.
+    ///
+    /// Hand-maintained but *not* hand-trusted: `all_variants_are_listed` fails
+    /// if this drifts from the enum. Without it, a test that iterates "all
+    /// codes" would quietly iterate only the ones somebody remembered.
+    pub const ALL: [Self; 8] = [
+        Self::InvalidRepositoryUrl,
+        Self::RepositoryNotFound,
+        Self::RepositoryInaccessible,
+        Self::RepositoryArchived,
+        Self::RepositoryTooLarge,
+        Self::RateLimited,
+        Self::WorkerFailedRetriable,
+        Self::AnalyzerFailedPermanent,
+    ];
+
     /// Whether another attempt at the *same* input could plausibly succeed.
     ///
     /// Advisory only. The authority is [`super::analysis::RetryPolicy`] on the
@@ -86,12 +102,19 @@ impl ApiError {
         }
     }
 
-    /// Builds an error carrying a concrete wait.
-    pub fn retry_after(code: ErrorCode, message: impl Into<String>, seconds: u32) -> Self {
+    /// Builds a rate-limit error carrying a concrete wait.
+    ///
+    /// Takes no `ErrorCode`, because `RATE_LIMITED` is the only code where the
+    /// wait is *knowable* rather than guessed — GitHub tells us when the window
+    /// resets. Accepting an arbitrary code would let a caller attach an invented
+    /// countdown to, say, a permanent analyzer failure, and a UI that counts
+    /// down to a retry that will never succeed is worse than one that offers no
+    /// retry at all.
+    pub fn rate_limited(message: impl Into<String>, retry_after_seconds: u32) -> Self {
         Self {
-            code,
+            code: ErrorCode::RateLimited,
             message: message.into(),
-            retry_after_seconds: Some(seconds),
+            retry_after_seconds: Some(retry_after_seconds),
         }
     }
 }
@@ -99,6 +122,45 @@ impl ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_variants_are_listed() {
+        // `ALL` is what every exhaustiveness gate iterates. If a code were added
+        // to the enum but not here, those gates would keep passing while
+        // covering less than they claim. The match is exhaustive, so adding a
+        // variant fails to compile until it is listed.
+        for code in ErrorCode::ALL {
+            match code {
+                ErrorCode::InvalidRepositoryUrl
+                | ErrorCode::RepositoryNotFound
+                | ErrorCode::RepositoryInaccessible
+                | ErrorCode::RepositoryArchived
+                | ErrorCode::RepositoryTooLarge
+                | ErrorCode::RateLimited
+                | ErrorCode::WorkerFailedRetriable
+                | ErrorCode::AnalyzerFailedPermanent => {}
+            }
+        }
+
+        let distinct: std::collections::BTreeSet<_> = ErrorCode::ALL
+            .iter()
+            .map(|c| serde_json::to_string(c).unwrap())
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            ErrorCode::ALL.len(),
+            "ALL contains a duplicate"
+        );
+    }
+
+    #[test]
+    fn only_rate_limiting_can_carry_a_wait() {
+        // The constructor makes this structural rather than conventional: there
+        // is no way to attach a countdown to any other code.
+        let error = ApiError::rate_limited("slow down", 900);
+        assert_eq!(error.code, ErrorCode::RateLimited);
+        assert_eq!(error.retry_after_seconds, Some(900));
+    }
 
     #[test]
     fn codes_serialize_as_screaming_snake_case() {

@@ -18,6 +18,8 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use repolens_core::ContentDigest;
+
 use super::analysis::RepositoryIdentity;
 
 /// What the analyzer concluded about one checked property.
@@ -136,8 +138,14 @@ pub struct Evidence {
     pub truncated: bool,
     /// Digest of the **full** source content, not the excerpt — which is what
     /// makes the evidence checkable against the commit.
+    ///
+    /// Typed rather than a bare string so the format is owned in one place. The
+    /// ingestion boundary produces it and this contract publishes it; two
+    /// independent spellings would not surface until integration, and would
+    /// surface as evidence that silently fails to match the commit it pins.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub digest: Option<String>,
+    #[schema(value_type = Option<String>, pattern = "^sha256:[0-9a-f]{64}$")]
+    pub digest: Option<ContentDigest>,
     /// Which lines the excerpt came from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_range: Option<LineRange>,
@@ -226,6 +234,55 @@ pub struct CompositionExclusion {
     pub bytes: u64,
 }
 
+/// How a counted file was classified by role.
+///
+/// Structural evidence only. This is **not** a test-quality score: a repository
+/// with little test code may be thoroughly tested elsewhere, and a repository
+/// with a great deal of it may test the wrong things.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CodeRole {
+    /// Ordinary implementation code.
+    Production,
+    /// Tests, fixtures, and test helpers.
+    Test,
+    /// Machine-produced and committed — a generated client, a schema snapshot.
+    /// Separated because counting it as hand-written work overstates effort and
+    /// understates how much of the repository is derived.
+    Generated,
+    /// Examples, benchmarks, and developer tooling.
+    Tooling,
+}
+
+/// Line counts for one role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RoleLineCount {
+    /// Which role.
+    pub role: CodeRole,
+    /// Files attributed to it.
+    pub files: u64,
+    /// Lines of code in it.
+    pub code_lines: u64,
+}
+
+/// One of the largest files by line count.
+///
+/// Size alone is not a defect. It is a **review-priority signal**: a large file
+/// that also concentrates several responsibilities is where a reader's
+/// attention is best spent first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LargestSourceFile {
+    /// Repository-relative path.
+    pub path: String,
+    /// Language the counter attributed it to.
+    pub language: String,
+    /// Lines of code, excluding comments and blanks.
+    pub code_lines: u64,
+    /// Role, so a large generated file is not mistaken for a large hand-written
+    /// one — which is the most common way this list misleads.
+    pub role: CodeRole,
+}
+
 /// Repository composition and line counts.
 ///
 /// Measures composition, **not** productivity or quality. The report says so
@@ -255,6 +312,16 @@ pub struct LineCountSummary {
     pub areas: Vec<AreaLineCount>,
     /// What was left out, and why.
     pub exclusions: Vec<CompositionExclusion>,
+    /// Breakdown by role, server-ordered.
+    ///
+    /// Present so the report can show what proportion of the repository is
+    /// production code without implying a judgement about it.
+    pub roles: Vec<RoleLineCount>,
+    /// Largest files by line count, server-ordered, descending.
+    ///
+    /// Bounded by the server: a repository with 40,000 files must not send
+    /// 40,000 rows to a browser to render the top ten.
+    pub largest_files: Vec<LargestSourceFile>,
     /// Files the policy could not classify. Reported rather than silently
     /// folded into a bucket.
     pub unclassified_files: u64,

@@ -148,6 +148,15 @@ export interface components {
             code_lines: number;
         };
         /**
+         * @description How a counted file was classified by role.
+         *
+         *     Structural evidence only. This is **not** a test-quality score: a repository
+         *     with little test code may be thoroughly tested elsewhere, and a repository
+         *     with a great deal of it may test the wrong things.
+         * @enum {string}
+         */
+        CodeRole: "PRODUCTION" | "TEST" | "GENERATED" | "TOOLING";
+        /**
          * @description Why some files were left out of the counts.
          *
          *     Structured rather than prose so the UI can make the ledger expandable. LOC
@@ -196,6 +205,11 @@ export interface components {
             /**
              * @description Digest of the **full** source content, not the excerpt — which is what
              *     makes the evidence checkable against the commit.
+             *
+             *     Typed rather than a bare string so the format is owned in one place. The
+             *     ingestion boundary produces it and this contract publishes it; two
+             *     independent spellings would not surface until integration, and would
+             *     surface as evidence that silently fails to match the commit it pins.
              */
             digest?: string | null;
             /** @description Short excerpt, already truncated to the server's cap. */
@@ -299,6 +313,29 @@ export interface components {
             /** @description Language name as the counter reports it. */
             language: string;
         };
+        /**
+         * @description One of the largest files by line count.
+         *
+         *     Size alone is not a defect. It is a **review-priority signal**: a large file
+         *     that also concentrates several responsibilities is where a reader's
+         *     attention is best spent first.
+         */
+        LargestSourceFile: {
+            /**
+             * Format: int64
+             * @description Lines of code, excluding comments and blanks.
+             */
+            code_lines: number;
+            /** @description Language the counter attributed it to. */
+            language: string;
+            /** @description Repository-relative path. */
+            path: string;
+            /**
+             * @description Role, so a large generated file is not mistaken for a large hand-written
+             *     one — which is the most common way this list misleads.
+             */
+            role: components["schemas"]["CodeRole"];
+        };
         /** @description Something the analyzer could not establish. */
         Limitation: {
             /** @description Stable code, so the UI can group and explain limitations consistently. */
@@ -343,6 +380,20 @@ export interface components {
             exclusions: components["schemas"]["CompositionExclusion"][];
             /** @description Per-language breakdown, server-ordered. */
             languages: components["schemas"]["LanguageLineCount"][];
+            /**
+             * @description Largest files by line count, server-ordered, descending.
+             *
+             *     Bounded by the server: a repository with 40,000 files must not send
+             *     40,000 rows to a browser to render the top ten.
+             */
+            largest_files: components["schemas"]["LargestSourceFile"][];
+            /**
+             * @description Breakdown by role, server-ordered.
+             *
+             *     Present so the report can show what proportion of the repository is
+             *     production code without implying a judgement about it.
+             */
+            roles: components["schemas"]["RoleLineCount"][];
             /**
              * Format: int64
              * @description Files counted.
@@ -488,6 +539,21 @@ export interface components {
              *     rather than merely denies.
              */
             reason?: string | null;
+        };
+        /** @description Line counts for one role. */
+        RoleLineCount: {
+            /**
+             * Format: int64
+             * @description Lines of code in it.
+             */
+            code_lines: number;
+            /**
+             * Format: int64
+             * @description Files attributed to it.
+             */
+            files: number;
+            /** @description Which role. */
+            role: components["schemas"]["CodeRole"];
         };
         /**
          * @description Impact if the finding is valid. Independent of [`Confidence`].

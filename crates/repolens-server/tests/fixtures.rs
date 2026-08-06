@@ -18,14 +18,15 @@
 use std::fs;
 use std::path::PathBuf;
 
+use repolens_core::ContentDigest;
 use repolens_server::contract::analysis::{
     Analysis, AnalysisState, ExecutionMetadata, RepositoryIdentity, RetryPolicy, TriggerStatus,
 };
 use repolens_server::contract::error::{ApiError, ErrorCode};
 use repolens_server::contract::report::{
-    AreaLineCount, CompositionExclusion, Confidence, Evidence, EvidenceKind, Finding,
-    FindingCategory, FindingState, LanguageLineCount, Limitation, LineCountSummary, LineRange,
-    OverviewStatement, Report, Severity,
+    AreaLineCount, CodeRole, CompositionExclusion, Confidence, Evidence, EvidenceKind, Finding,
+    FindingCategory, FindingState, LanguageLineCount, LargestSourceFile, Limitation,
+    LineCountSummary, LineRange, OverviewStatement, Report, RoleLineCount, Severity,
 };
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -111,9 +112,9 @@ fn evidence_excerpt() -> Evidence {
         excerpt: Some("[workspace]\nmembers = [\"crates/*\"]".to_owned()),
         // Truncated server-side. The frontend is never what stops a large payload.
         truncated: true,
-        digest: Some(
-            "sha256:6b8f9e2c1a4d7f30b5c8e1a2d4f6089b3c5e7a9d1f2408b6c8e0a2d4f6b8c0e2".to_owned(),
-        ),
+        // Built from raw bytes rather than written as a string, so the fixture
+        // cannot contain a digest the contract would reject.
+        digest: Some(ContentDigest::from_sha256([0x6b; 32])),
         line_range: Some(LineRange { start: 1, end: 2 }),
     }
 }
@@ -238,6 +239,39 @@ fn composition() -> LineCountSummary {
             file_count: 126,
             bytes: 4_182_004,
         }],
+        roles: vec![
+            RoleLineCount {
+                role: CodeRole::Production,
+                files: 604,
+                code_lines: 63_400,
+            },
+            RoleLineCount {
+                role: CodeRole::Test,
+                files: 178,
+                code_lines: 11_710,
+            },
+            RoleLineCount {
+                role: CodeRole::Generated,
+                files: 34,
+                code_lines: 3_200,
+            },
+        ],
+        largest_files: vec![
+            LargestSourceFile {
+                path: "src/publication.rs".to_owned(),
+                language: "Rust".to_owned(),
+                code_lines: 2_410,
+                role: CodeRole::Production,
+            },
+            LargestSourceFile {
+                path: "packages/api-client/src/schema.ts".to_owned(),
+                language: "TypeScript".to_owned(),
+                code_lines: 1_980,
+                // Generated: without the role, this would read as the second
+                // largest hand-written file in the repository.
+                role: CodeRole::Generated,
+            },
+        ],
         unclassified_files: 7,
     }
 }
@@ -296,14 +330,12 @@ struct Fixture<'a> {
     report: Option<&'a Report>,
 }
 
-fn fixtures() -> Vec<(&'static str, String)> {
-    let queued = pending(AnalysisState::Queued, TriggerStatus::Succeeded, None);
-    let resolving = pending(AnalysisState::Resolving, TriggerStatus::Succeeded, None);
-
+/// The four failure fixtures, split out to keep `fixtures` within the workspace
+/// function-length lint rather than suppressing it.
+fn failure_fixtures() -> Vec<(&'static str, Analysis)> {
     let retriable = failed(
         AnalysisState::FailedRetriable,
-        ApiError::retry_after(
-            ErrorCode::RateLimited,
+        ApiError::rate_limited(
             "The GitHub rate limit is exhausted. The analysis will resume automatically.",
             900,
         ),
@@ -328,6 +360,41 @@ fn fixtures() -> Vec<(&'static str, String)> {
         },
     );
 
+    let worker_retriable = failed(
+        AnalysisState::FailedRetriable,
+        ApiError::new(
+            ErrorCode::WorkerFailedRetriable,
+            "The worker stopped before finishing. The analysis can be retried.",
+        ),
+        RetryPolicy {
+            allowed: true,
+            reason: None,
+        },
+    );
+
+    let inaccessible = failed(
+        AnalysisState::FailedRetriable,
+        ApiError::new(
+            ErrorCode::RepositoryInaccessible,
+            "The repository could not be read. This is usually temporary.",
+        ),
+        RetryPolicy {
+            allowed: true,
+            reason: None,
+        },
+    );
+
+    vec![
+        ("failed-retriable.json", retriable),
+        ("failed-permanent.json", permanent),
+        ("failed-worker-retriable.json", worker_retriable),
+        ("failed-inaccessible.json", inaccessible),
+    ]
+}
+
+fn fixtures() -> Vec<(&'static str, String)> {
+    let queued = pending(AnalysisState::Queued, TriggerStatus::Succeeded, None);
+    let resolving = pending(AnalysisState::Resolving, TriggerStatus::Succeeded, None);
     let completed = completed_analysis();
     let full_report = report(Some(composition()), vec![]);
     let no_composition_report = report(
@@ -366,20 +433,6 @@ fn fixtures() -> Vec<(&'static str, String)> {
             }),
         ),
         (
-            "failed-retriable.json",
-            render(&Fixture {
-                analysis: &retriable,
-                report: None,
-            }),
-        ),
-        (
-            "failed-permanent.json",
-            render(&Fixture {
-                analysis: &permanent,
-                report: None,
-            }),
-        ),
-        (
             "loc-unavailable.json",
             render(&Fixture {
                 analysis: &completed,
@@ -387,6 +440,20 @@ fn fixtures() -> Vec<(&'static str, String)> {
             }),
         ),
     ]
+    .into_iter()
+    .chain(
+        failure_fixtures()
+            .into_iter()
+            .map(|(name, analysis)| {
+                let body = render(&Fixture {
+                    analysis: &analysis,
+                    report: None,
+                });
+                (name, body)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .collect()
 }
 
 /// Minimal erasure so `fixtures()` can render heterogeneous values uniformly
@@ -449,17 +516,37 @@ fn finding_order_is_stable_across_serializations() {
 }
 
 #[test]
-fn every_error_code_appears_in_a_fixture_or_is_deliberately_absent() {
-    // Guards against an error code being added to the enum with no fixture and
-    // therefore no frontend rendering — the silent path to an unhandled state.
-    let rendered: String = fixtures().into_iter().map(|(_, body)| body).collect();
+fn every_error_code_is_either_in_a_fixture_or_explicitly_exempt() {
+    // The previous version of this test named two codes and called itself a
+    // closed-set gate. Adding a ninth code left it green while proving nothing.
+    // It now iterates every variant, so a new code must be either rendered in a
+    // fixture or listed here as a deliberate omission.
+    // Rejected at submission, before an analysis exists, so no analysis fixture
+    // can carry them. They are still rendered — the unknown-variant gate in the
+    // client package covers every code, including these. Anything reachable
+    // *during* an analysis must appear below.
+    const EXEMPT: [ErrorCode; 4] = [
+        ErrorCode::InvalidRepositoryUrl,
+        ErrorCode::RepositoryNotFound,
+        ErrorCode::RepositoryArchived,
+        ErrorCode::RepositoryTooLarge,
+    ];
 
-    for code in [ErrorCode::RateLimited, ErrorCode::AnalyzerFailedPermanent] {
-        let expected = serde_json::to_string(&code).unwrap();
-        let bare = expected.trim_matches('"');
-        assert!(
-            rendered.contains(bare),
-            "{bare} has no fixture, so no frontend rendering is proven"
-        );
+    let rendered: String = fixtures().into_iter().map(|(_, body)| body).collect();
+    let mut missing = Vec::new();
+    for code in ErrorCode::ALL {
+        if EXEMPT.contains(&code) {
+            continue;
+        }
+        let name = serde_json::to_string(&code).unwrap();
+        let bare = name.trim_matches('"').to_owned();
+        if !rendered.contains(&bare) {
+            missing.push(bare);
+        }
     }
+
+    assert!(
+        missing.is_empty(),
+        "these error codes have no fixture, so no frontend rendering is proven: {missing:?}"
+    );
 }

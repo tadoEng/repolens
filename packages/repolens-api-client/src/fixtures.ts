@@ -77,7 +77,7 @@ export const COMPLETED_REPORT_FIXTURE = {
 						path: "Cargo.toml",
 						excerpt: "[workspace]\nmembers = [\"crates/*\"]",
 						truncated: true,
-						digest: "sha256:6b8f9e2c1a4d7f30b5c8e1a2d4f6089b3c5e7a9d1f2408b6c8e0a2d4f6b8c0e2",
+						digest: "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
 						line_range: {
 							start: 1,
 							end: 2
@@ -174,9 +174,68 @@ export const COMPLETED_REPORT_FIXTURE = {
 					bytes: 4182004
 				}
 			],
+			roles: [
+				{
+					role: "PRODUCTION",
+					files: 604,
+					code_lines: 63400
+				},
+				{
+					role: "TEST",
+					files: 178,
+					code_lines: 11710
+				},
+				{
+					role: "GENERATED",
+					files: 34,
+					code_lines: 3200
+				}
+			],
+			largest_files: [
+				{
+					path: "src/publication.rs",
+					language: "Rust",
+					code_lines: 2410,
+					role: "PRODUCTION"
+				},
+				{
+					path: "packages/api-client/src/schema.ts",
+					language: "TypeScript",
+					code_lines: 1980,
+					role: "GENERATED"
+				}
+			],
 			unclassified_files: 7
 		},
 		limitations: []
+	}
+} satisfies AnalysisFixture;
+
+/** Fixture `failed-inaccessible.json`. */
+export const FAILED_INACCESSIBLE_FIXTURE = {
+	analysis: {
+		id: "0193a5c0-0000-7000-8000-000000000001",
+		repository: {
+			owner: "rust-lang",
+			name: "crates.io"
+		},
+		commit_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+		state: "FAILED_RETRIABLE",
+		execution: {
+			trigger_status: "SUCCEEDED",
+			execution_id: "exec-0193a5c0",
+			triggered_at: "2026-08-06T09:00:00Z"
+		},
+		retry: {
+			allowed: true
+		},
+		error: {
+			code: "REPOSITORY_INACCESSIBLE",
+			message: "The repository could not be read. This is usually temporary."
+		},
+		created_at: "2026-08-06T09:00:00Z",
+		updated_at: "2026-08-06T09:00:04Z",
+		report_available: false
 	}
 } satisfies AnalysisFixture;
 
@@ -231,6 +290,34 @@ export const FAILED_RETRIABLE_FIXTURE = {
 			code: "RATE_LIMITED",
 			message: "The GitHub rate limit is exhausted. The analysis will resume automatically.",
 			retry_after_seconds: 900
+		},
+		created_at: "2026-08-06T09:00:00Z",
+		updated_at: "2026-08-06T09:00:04Z",
+		report_available: false
+	}
+} satisfies AnalysisFixture;
+
+/** Fixture `failed-worker-retriable.json`. */
+export const FAILED_WORKER_RETRIABLE_FIXTURE = {
+	analysis: {
+		id: "0193a5c0-0000-7000-8000-000000000001",
+		repository: {
+			owner: "rust-lang",
+			name: "crates.io"
+		},
+		commit_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+		state: "FAILED_RETRIABLE",
+		execution: {
+			trigger_status: "SUCCEEDED",
+			execution_id: "exec-0193a5c0",
+			triggered_at: "2026-08-06T09:00:00Z"
+		},
+		retry: {
+			allowed: true
+		},
+		error: {
+			code: "WORKER_FAILED_RETRIABLE",
+			message: "The worker stopped before finishing. The analysis can be retried."
 		},
 		created_at: "2026-08-06T09:00:00Z",
 		updated_at: "2026-08-06T09:00:04Z",
@@ -298,7 +385,7 @@ export const LOC_UNAVAILABLE_FIXTURE = {
 						path: "Cargo.toml",
 						excerpt: "[workspace]\nmembers = [\"crates/*\"]",
 						truncated: true,
-						digest: "sha256:6b8f9e2c1a4d7f30b5c8e1a2d4f6089b3c5e7a9d1f2408b6c8e0a2d4f6b8c0e2",
+						digest: "sha256:6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b",
 						line_range: {
 							start: 1,
 							end: 2
@@ -416,8 +503,10 @@ export const RESOLVING_FIXTURE = {
 /** Names of the available fixtures, for exhaustive scenario handling. */
 export type AnalysisFixtureName =
 	| "completed-report"
+	| "failed-inaccessible"
 	| "failed-permanent"
 	| "failed-retriable"
+	| "failed-worker-retriable"
 	| "loc-unavailable"
 	| "queued"
 	| "resolving";
@@ -436,8 +525,10 @@ export type AnalysisFixtureName =
  */
 export const ANALYSIS_FIXTURES: Readonly<Record<AnalysisFixtureName, AnalysisFixture>> = {
 	"completed-report": COMPLETED_REPORT_FIXTURE,
+	"failed-inaccessible": FAILED_INACCESSIBLE_FIXTURE,
 	"failed-permanent": FAILED_PERMANENT_FIXTURE,
 	"failed-retriable": FAILED_RETRIABLE_FIXTURE,
+	"failed-worker-retriable": FAILED_WORKER_RETRIABLE_FIXTURE,
 	"loc-unavailable": LOC_UNAVAILABLE_FIXTURE,
 	"queued": QUEUED_FIXTURE,
 	"resolving": RESOLVING_FIXTURE
@@ -451,8 +542,10 @@ export const ANALYSIS_FIXTURES: Readonly<Record<AnalysisFixtureName, AnalysisFix
  */
 export const ANALYSIS_FIXTURE_NAMES = [
 	"completed-report",
+	"failed-inaccessible",
 	"failed-permanent",
 	"failed-retriable",
+	"failed-worker-retriable",
 	"loc-unavailable",
 	"queued",
 	"resolving"

@@ -193,6 +193,16 @@
           }
         }
       },
+      "CodeRole": {
+        "type": "string",
+        "description": "How a counted file was classified by role.\n\nStructural evidence only. This is **not** a test-quality score: a repository\nwith little test code may be thoroughly tested elsewhere, and a repository\nwith a great deal of it may test the wrong things.",
+        "enum": [
+          "PRODUCTION",
+          "TEST",
+          "GENERATED",
+          "TOOLING"
+        ]
+      },
       "CompositionExclusion": {
         "type": "object",
         "description": "Why some files were left out of the counts.\n\nStructured rather than prose so the UI can make the ledger expandable. LOC\nmisleads exactly when nobody can see what was excluded.",
@@ -266,7 +276,8 @@
               "string",
               "null"
             ],
-            "description": "Digest of the **full** source content, not the excerpt — which is what\nmakes the evidence checkable against the commit."
+            "description": "Digest of the **full** source content, not the excerpt — which is what\nmakes the evidence checkable against the commit.\n\nTyped rather than a bare string so the format is owned in one place. The\ningestion boundary produces it and this contract publishes it; two\nindependent spellings would not surface until integration, and would\nsurface as evidence that silently fails to match the commit it pins.",
+            "pattern": "^sha256:[0-9a-f]{64}$"
           },
           "excerpt": {
             "type": [
@@ -486,6 +497,36 @@
           }
         }
       },
+      "LargestSourceFile": {
+        "type": "object",
+        "description": "One of the largest files by line count.\n\nSize alone is not a defect. It is a **review-priority signal**: a large file\nthat also concentrates several responsibilities is where a reader's\nattention is best spent first.",
+        "required": [
+          "path",
+          "language",
+          "code_lines",
+          "role"
+        ],
+        "properties": {
+          "code_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lines of code, excluding comments and blanks.",
+            "minimum": 0
+          },
+          "language": {
+            "type": "string",
+            "description": "Language the counter attributed it to."
+          },
+          "path": {
+            "type": "string",
+            "description": "Repository-relative path."
+          },
+          "role": {
+            "$ref": "#/components/schemas/CodeRole",
+            "description": "Role, so a large generated file is not mistaken for a large hand-written\none — which is the most common way this list misleads."
+          }
+        }
+      },
       "Limitation": {
         "type": "object",
         "description": "Something the analyzer could not establish.",
@@ -519,6 +560,8 @@
           "languages",
           "areas",
           "exclusions",
+          "roles",
+          "largest_files",
           "unclassified_files"
         ],
         "properties": {
@@ -572,6 +615,20 @@
               "$ref": "#/components/schemas/LanguageLineCount"
             },
             "description": "Per-language breakdown, server-ordered."
+          },
+          "largest_files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LargestSourceFile"
+            },
+            "description": "Largest files by line count, server-ordered, descending.\n\nBounded by the server: a repository with 40,000 files must not send\n40,000 rows to a browser to render the top ten."
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoleLineCount"
+            },
+            "description": "Breakdown by role, server-ordered.\n\nPresent so the report can show what proportion of the repository is\nproduction code without implying a judgement about it."
           },
           "total_files": {
             "type": "integer",
@@ -779,6 +836,33 @@
               "null"
             ],
             "description": "Why not, when `allowed` is false. Displayed verbatim, so it explains\nrather than merely denies."
+          }
+        }
+      },
+      "RoleLineCount": {
+        "type": "object",
+        "description": "Line counts for one role.",
+        "required": [
+          "role",
+          "files",
+          "code_lines"
+        ],
+        "properties": {
+          "code_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lines of code in it.",
+            "minimum": 0
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Files attributed to it.",
+            "minimum": 0
+          },
+          "role": {
+            "$ref": "#/components/schemas/CodeRole",
+            "description": "Which role."
           }
         }
       },
