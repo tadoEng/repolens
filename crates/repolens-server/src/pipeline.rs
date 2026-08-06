@@ -47,16 +47,14 @@ pub async fn run<S>(pool: &PgPool, source: &S, id: Uuid, coordinate: &Repository
 where
     S: GitHubRepositorySource,
 {
-    // Set as soon as GitHub answers, and carried out here so that a *failure*
-    // is also recorded under the canonical coordinate. Without it, an archived
-    // or too-large repository that had been renamed would reach a terminal
-    // state still naming the address the submitter typed.
-    let mut canonical: Option<RepositoryCoordinate> = None;
+    // Filled in as resolution establishes each part, and carried out here so a
+    // *failure* is recorded against everything already known.
+    let mut resolved = Resolved::default();
 
-    if let Err(error) = execute(pool, source, id, coordinate, &mut canonical).await {
+    if let Err(error) = execute(pool, source, id, coordinate, &mut resolved).await {
         // The store failing here is the one case that cannot be recorded, since
         // recording is what failed. Logged by category, never with the URL.
-        if let Err(store_error) = store::fail(pool, id, &error, canonical.as_ref()).await {
+        if let Err(store_error) = store::fail(pool, id, &error, &resolved).await {
             tracing::error!(
                 analysis = %id,
                 error = %store_error,
@@ -66,9 +64,26 @@ where
     }
 }
 
+/// What resolution established before the outcome, whatever the outcome was.
+///
+/// Both fields reach the database through best-effort writes during the run —
+/// `adopt_coordinate` and `advance` each log and continue when they fail — so
+/// neither is guaranteed to be on the row when a terminal state is written.
+/// Carrying them here lets the terminal write set them atomically alongside the
+/// state, which is the only way an analysis cannot finish claiming less than
+/// was known about it. A failure after the commit was resolved must not be
+/// recorded with `commit_sha: null`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    /// Canonical coordinate, once GitHub has answered.
+    pub coordinate: Option<RepositoryCoordinate>,
+    /// Exact commit, once a reference has resolved to one.
+    pub commit_sha: Option<String>,
+}
+
 /// The pipeline proper. Returns the failure to record, if any.
 ///
-/// `canonical` is an out-parameter rather than a return value because it must
+/// `resolved` is an out-parameter rather than a return value because it must
 /// survive the error path: the caller needs it precisely when this function
 /// returns `Err`.
 async fn execute<S>(
@@ -76,7 +91,7 @@ async fn execute<S>(
     source: &S,
     id: Uuid,
     submitted: &RepositoryCoordinate,
-    canonical: &mut Option<RepositoryCoordinate>,
+    resolved: &mut Resolved,
 ) -> Result<(), ApiError>
 where
     S: GitHubRepositorySource,
@@ -102,7 +117,7 @@ where
     // still resolves under its old address — GitHub redirects — so the
     // submission succeeds while naming something that no longer exists.
     let coordinate = repository.coordinate.clone();
-    *canonical = Some(coordinate.clone());
+    resolved.coordinate = Some(coordinate.clone());
     if coordinate != *submitted {
         tracing::info!(
             analysis = %id,
@@ -128,10 +143,38 @@ where
         ));
     }
 
+    // Enforced here rather than at the GitHub boundary, and after the canonical
+    // coordinate has been adopted.
+    //
+    // `resolve_repository` used to refuse an oversized repository before it had
+    // parsed `full_name`, so this rejection reached the pipeline with no way to
+    // learn the canonical coordinate and a renamed repository terminated under
+    // the submitted address. Whether to spend the budget is a decision recorded
+    // against a specific repository, so it is made where that repository is
+    // known. Nothing has been downloaded at this point either way.
+    if repository.size_kilobytes > repolens_github::limits::MAX_REPOSITORY_KILOBYTES {
+        tracing::info!(
+            analysis = %id,
+            observed = repository.size_kilobytes,
+            limit = repolens_github::limits::MAX_REPOSITORY_KILOBYTES,
+            "the repository exceeds the ingestion ceiling"
+        );
+        return Err(ApiError::new(
+            ErrorCode::RepositoryTooLarge,
+            "This repository is larger than the limits this analysis is allowed to spend. The \
+             limits are ours, not a judgement about the repository.",
+        ));
+    }
+
     let commit = source
         .resolve_commit(coordinate, &repository.default_branch)
         .await
         .map_err(translate)?;
+
+    // Recorded before the transition is attempted. `advance` logs and continues
+    // when its write fails, so this is what guarantees a later failure still
+    // terminates with the commit it actually analyzed.
+    resolved.commit_sha = Some(commit.sha.as_str().to_owned());
 
     advance(
         pool,
@@ -587,6 +630,7 @@ mod tests {
     struct RecordingSource {
         canonical: RepositoryCoordinate,
         archived: bool,
+        size_kilobytes: u64,
         seen: std::sync::Mutex<Vec<RepositoryCoordinate>>,
     }
 
@@ -602,7 +646,7 @@ mod tests {
                 coordinate: self.canonical.clone(),
                 default_branch: "main".to_owned(),
                 archived: self.archived,
-                size_kilobytes: 1,
+                size_kilobytes: self.size_kilobytes,
             })
         }
 
@@ -666,14 +710,15 @@ mod tests {
         let source = RecordingSource {
             canonical: canonical.clone(),
             archived: false,
+            size_kilobytes: 1,
             seen: std::sync::Mutex::new(Vec::new()),
         };
 
-        let mut reported = None;
+        let mut reported = Resolved::default();
         let _ = execute(&pool, &source, Uuid::nil(), &submitted, &mut reported).await;
 
         assert_eq!(
-            reported.as_ref(),
+            reported.coordinate.as_ref(),
             Some(&canonical),
             "the canonical coordinate must reach the caller, which is what lets a \
              terminal failure be recorded under it"
@@ -721,10 +766,11 @@ mod tests {
         let source = RecordingSource {
             canonical: canonical.clone(),
             archived: true,
+            size_kilobytes: 1,
             seen: std::sync::Mutex::new(Vec::new()),
         };
 
-        let mut reported = None;
+        let mut reported = Resolved::default();
         let outcome = execute(
             &unreachable_pool(),
             &source,
@@ -741,11 +787,91 @@ mod tests {
             ErrorCode::RepositoryArchived
         );
         assert_eq!(
-            reported.as_ref(),
+            reported.coordinate.as_ref(),
             Some(&canonical),
             "the rejection must still be recorded against the coordinate GitHub \
              identified, not the one that was submitted"
         );
+        assert!(
+            reported.commit_sha.is_none(),
+            "an archived repository is rejected before any commit is resolved"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_repository_still_reports_its_canonical_coordinate() {
+        // The size ceiling used to be enforced inside `resolve_repository`,
+        // above the point where `full_name` was parsed, so this rejection
+        // reached the pipeline with no canonical coordinate at all and a
+        // renamed repository terminated under the submitted address.
+        let submitted = RepositoryCoordinate::new("old-owner", "old-name");
+        let canonical = RepositoryCoordinate::new("new-owner", "new-name");
+        let source = RecordingSource {
+            canonical: canonical.clone(),
+            archived: false,
+            size_kilobytes: repolens_github::limits::MAX_REPOSITORY_KILOBYTES + 1,
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let mut resolved = Resolved::default();
+        let outcome = execute(
+            &unreachable_pool(),
+            &source,
+            Uuid::nil(),
+            &submitted,
+            &mut resolved,
+        )
+        .await;
+
+        assert_eq!(
+            outcome.expect_err("the ceiling is enforced").code(),
+            ErrorCode::RepositoryTooLarge
+        );
+        assert_eq!(
+            resolved.coordinate.as_ref(),
+            Some(&canonical),
+            "a rejection is still a result about a specific repository and must \
+             name the one GitHub identified"
+        );
+        assert!(
+            resolved.commit_sha.is_none(),
+            "nothing was resolved to a commit, so claiming one would be a fabrication"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_resolution_still_knows_the_commit() {
+        // `advance` writes the commit best-effort and logs on failure, so the
+        // terminal write is the only durable carrier. Here every store call
+        // fails, which is exactly the case that used to terminate with
+        // `commit_sha: null` for a commit that had been resolved.
+        let coordinate = RepositoryCoordinate::new("owner", "name");
+        let source = RecordingSource {
+            canonical: coordinate.clone(),
+            archived: false,
+            size_kilobytes: 1,
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+
+        let mut resolved = Resolved::default();
+        let error = execute(
+            &unreachable_pool(),
+            &source,
+            Uuid::nil(),
+            &coordinate,
+            &mut resolved,
+        )
+        .await
+        .expect_err("the report cannot be stored");
+
+        assert_eq!(error.code(), ErrorCode::WorkerFailedRetriable);
+        assert_eq!(
+            resolved.commit_sha.as_deref(),
+            Some("a".repeat(40).as_str()),
+            "the commit was resolved and analyzed; a terminal state that forgot \
+             it would report less than was known"
+        );
+        assert_eq!(resolved.coordinate.as_ref(), Some(&coordinate));
     }
 
     #[tokio::test]
@@ -760,10 +886,11 @@ mod tests {
         let source = RecordingSource {
             canonical: coordinate.clone(),
             archived: false,
+            size_kilobytes: 1,
             seen: std::sync::Mutex::new(Vec::new()),
         };
 
-        let mut reported = None;
+        let mut reported = Resolved::default();
         let error = execute(
             &unreachable_pool(),
             &source,

@@ -40,6 +40,14 @@ pub enum StoreError {
     /// No analysis with that id.
     #[error("analysis not found")]
     NotFound,
+    /// The analysis exists but has produced no report yet.
+    ///
+    /// Distinct from [`NotFound`](Self::NotFound) because the caller must
+    /// answer them differently: one says the identifier is wrong, the other
+    /// says to keep waiting. Collapsing them tells a client to give up on work
+    /// that is still running.
+    #[error("no report yet for this analysis")]
+    ReportNotReady,
     /// The query failed. The underlying error is not rendered — it can carry
     /// connection parameters, and this type crosses into a handler that logs.
     #[error("database query failed")]
@@ -179,7 +187,7 @@ pub async fn fail(
     pool: &PgPool,
     id: Uuid,
     error: &ApiError,
-    canonical: Option<&RepositoryCoordinate>,
+    resolved: &crate::pipeline::Resolved,
 ) -> Result<(), StoreError> {
     let retriable = error.code().is_retriable();
     let state = if retriable {
@@ -188,11 +196,16 @@ pub async fn fail(
         AnalysisState::FailedPermanent
     };
 
-    // Owner and name are written here, with the terminal state, rather than
-    // relying on the best-effort update made when the redirect was discovered.
-    // `COALESCE` leaves them untouched when resolution never got far enough to
-    // learn the canonical coordinate — a submission that failed before GitHub
-    // answered has nothing better than what the submitter typed.
+    // Everything resolution established is written here, in the same statement
+    // as the terminal state, rather than relying on the best-effort updates
+    // made during the run. `adopt_coordinate` and `advance` both log and
+    // continue when they fail, so a lost write would otherwise leave a
+    // terminated analysis claiming less than was known about it — most visibly
+    // a `commit_sha` of null for a commit that was resolved and analyzed.
+    //
+    // `COALESCE` leaves each column untouched when resolution never got that
+    // far. A submission that failed before GitHub answered has nothing better
+    // than what the submitter typed, and `owner`/`name` are NOT NULL.
     sqlx::query(
         "UPDATE analyses
             SET state = $2,
@@ -203,6 +216,7 @@ pub async fn fail(
                 retry_reason = $7,
                 owner = COALESCE($8, owner),
                 name = COALESCE($9, name),
+                commit_sha = COALESCE($10, commit_sha),
                 updated_at = now()
           WHERE id = $1",
     )
@@ -225,8 +239,19 @@ pub async fn fail(
     } else {
         "This failure is deterministic: the same commit and ruleset will fail again."
     })
-    .bind(canonical.map(|coordinate| coordinate.owner.as_str()))
-    .bind(canonical.map(|coordinate| coordinate.name.as_str()))
+    .bind(
+        resolved
+            .coordinate
+            .as_ref()
+            .map(|coordinate| coordinate.owner.as_str()),
+    )
+    .bind(
+        resolved
+            .coordinate
+            .as_ref()
+            .map(|coordinate| coordinate.name.as_str()),
+    )
+    .bind(resolved.commit_sha.as_deref())
     .execute(pool)
     .await?;
     Ok(())
@@ -351,12 +376,29 @@ pub async fn load_analysis(pool: &PgPool, id: Uuid) -> Result<Analysis, StoreErr
 ///
 /// Returns [`StoreError::NotFound`] when no report exists for that analysis.
 pub async fn load_report(pool: &PgPool, id: Uuid) -> Result<Report, StoreError> {
-    let row = sqlx::query("SELECT document FROM reports WHERE analysis_id = $1")
-        .bind(id)
-        .fetch_one(pool)
-        .await?;
+    // Driven from `analyses` with an outer join rather than straight from
+    // `reports`, so the absent case can be told apart in one query.
+    //
+    // Selecting from `reports` alone returns nothing both when the analysis
+    // does not exist and when it exists but has not finished — two different
+    // facts that the caller has to answer differently. Reporting the second as
+    // "no such analysis" is false, and it tells a client to stop polling
+    // something that is still running.
+    let row = sqlx::query(
+        "SELECT r.document
+           FROM analyses a
+           LEFT JOIN reports r ON r.analysis_id = a.id
+          WHERE a.id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
 
-    let document: serde_json::Value = row.get("document");
+    let document: Option<serde_json::Value> = row.get("document");
+    let Some(document) = document else {
+        return Err(StoreError::ReportNotReady);
+    };
+
     serde_json::from_value(document)
         .map_err(|error| StoreError::Query(sqlx::Error::Decode(Box::new(error))))
 }
@@ -395,6 +437,7 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::WorkerFailedRetriable => "WORKER_FAILED_RETRIABLE",
         ErrorCode::AnalyzerFailedPermanent => "ANALYZER_FAILED_PERMANENT",
         ErrorCode::AnalysisNotFound => "ANALYSIS_NOT_FOUND",
+        ErrorCode::ReportNotAvailable => "REPORT_NOT_AVAILABLE",
         ErrorCode::MalformedRequest => "MALFORMED_REQUEST",
         ErrorCode::RequestTooLarge => "REQUEST_TOO_LARGE",
         ErrorCode::RequestTimedOut => "REQUEST_TIMED_OUT",

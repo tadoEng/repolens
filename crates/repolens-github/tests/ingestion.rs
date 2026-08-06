@@ -1217,12 +1217,21 @@ async fn a_private_repository_is_indistinguishable_from_an_absent_one() {
 }
 
 #[tokio::test]
-async fn a_repository_too_large_to_analyze_is_refused_before_any_download() {
+async fn an_oversized_repository_reports_its_size_and_its_canonical_name() {
+    // Resolution reports; the caller rejects. Refusing here would mean
+    // answering before `full_name` had been parsed, so a renamed repository
+    // over the ceiling would be recorded under the address the submitter typed
+    // — and the report would cite a repository nobody can navigate to.
+    //
+    // Nothing has been downloaded either way: this is one metadata request, so
+    // deferring the refusal by one step costs no bandwidth.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/repos/tadoEng/repolens"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "full_name": "tadoEng/repolens",
+            // Renamed: the request asked for tadoEng/repolens, GitHub answers
+            // with the name it now has.
+            "full_name": "tadoEng/repolens-renamed",
             "default_branch": "main",
             "archived": false,
             "size": limits::MAX_REPOSITORY_KILOBYTES + 1,
@@ -1231,19 +1240,22 @@ async fn a_repository_too_large_to_analyze_is_refused_before_any_download() {
         .mount(&server)
         .await;
 
-    let error = client(&server)
+    let resolved = client(&server)
         .resolve_repository(&coordinate())
         .await
-        .expect_err("the ceiling is enforced");
+        .expect("an oversized repository still resolves; judging it is the caller's job");
 
-    assert!(matches!(
-        error,
-        GitHubSourceError::LimitExceeded {
-            limit_name: "repository kilobytes",
-            observed,
-            ..
-        } if observed == limits::MAX_REPOSITORY_KILOBYTES + 1
-    ));
+    assert_eq!(
+        resolved.size_kilobytes,
+        limits::MAX_REPOSITORY_KILOBYTES + 1,
+        "the caller cannot enforce a ceiling it is not told the value for"
+    );
+    assert_eq!(
+        resolved.coordinate,
+        repolens_core::RepositoryCoordinate::new("tadoEng", "repolens-renamed"),
+        "the canonical coordinate must survive, or the rejection cannot name \
+         the repository it is about"
+    );
 }
 
 #[tokio::test]

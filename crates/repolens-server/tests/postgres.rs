@@ -24,6 +24,7 @@ use repolens_server::contract::analysis::AnalysisState;
 use repolens_server::contract::analysis::RepositoryIdentity;
 use repolens_server::contract::error::{ApiError, ErrorCode};
 use repolens_server::contract::report::{Confidence, OverviewStatement, Report};
+use repolens_server::pipeline::Resolved;
 use repolens_server::store;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
@@ -158,7 +159,10 @@ async fn a_terminal_failure_persists_the_canonical_coordinate() {
         &pool,
         id,
         &ApiError::new(ErrorCode::RepositoryArchived, "archived"),
-        Some(&canonical),
+        &Resolved {
+            coordinate: Some(canonical.clone()),
+            commit_sha: None,
+        },
     )
     .await
     .expect("the failure is recorded");
@@ -169,6 +173,134 @@ async fn a_terminal_failure_persists_the_canonical_coordinate() {
         .await
         .expect("the analysis reads back");
     assert_eq!(analysis.state, AnalysisState::FailedPermanent);
+
+    cleanup(&pool, id).await;
+}
+
+#[tokio::test]
+async fn a_failure_after_commit_resolution_persists_the_commit() {
+    let pool = pool().await;
+    let submitted = RepositoryCoordinate::new("old-owner", "resolved-old-name");
+    let canonical = RepositoryCoordinate::new("new-owner", "resolved-new-name");
+    let commit = "c".repeat(40);
+
+    let id = queued(&pool, &submitted).await;
+
+    // `advance` never ran — this is the case where its best-effort write was
+    // lost. The terminal statement is then the only thing that can carry the
+    // commit, and without it the analysis finishes claiming it never resolved
+    // one, for a commit it had already fetched a tree for.
+    store::fail(
+        &pool,
+        id,
+        &ApiError::new(
+            ErrorCode::WorkerFailedRetriable,
+            "the report was not stored",
+        ),
+        &Resolved {
+            coordinate: Some(canonical.clone()),
+            commit_sha: Some(commit.clone()),
+        },
+    )
+    .await
+    .expect("the failure is recorded");
+
+    assert_eq!(stored_coordinate(&pool, id).await, canonical);
+
+    let analysis = store::load_analysis(&pool, id)
+        .await
+        .expect("the analysis reads back");
+    assert_eq!(
+        analysis.commit_sha.as_deref(),
+        Some(commit.as_str()),
+        "a failure after resolution must not report commit_sha: null"
+    );
+    assert_eq!(analysis.state, AnalysisState::FailedRetriable);
+
+    cleanup(&pool, id).await;
+}
+
+#[tokio::test]
+async fn an_oversized_renamed_repository_terminates_under_its_canonical_name() {
+    let pool = pool().await;
+    let submitted = RepositoryCoordinate::new("old-owner", "huge-old-name");
+    let canonical = RepositoryCoordinate::new("new-owner", "huge-new-name");
+
+    let id = queued(&pool, &submitted).await;
+
+    // The size ceiling is applied after `full_name` is parsed, so this
+    // rejection carries the canonical coordinate and no commit: nothing was
+    // resolved to one.
+    store::fail(
+        &pool,
+        id,
+        &ApiError::new(ErrorCode::RepositoryTooLarge, "over the ceiling"),
+        &Resolved {
+            coordinate: Some(canonical.clone()),
+            commit_sha: None,
+        },
+    )
+    .await
+    .expect("the failure is recorded");
+
+    assert_eq!(stored_coordinate(&pool, id).await, canonical);
+
+    let analysis = store::load_analysis(&pool, id)
+        .await
+        .expect("the analysis reads back");
+    assert_eq!(analysis.state, AnalysisState::FailedPermanent);
+    assert!(
+        analysis.commit_sha.is_none(),
+        "the repository was rejected from its metadata; claiming a commit would \
+         be a fabrication"
+    );
+
+    cleanup(&pool, id).await;
+}
+
+#[tokio::test]
+async fn an_unfinished_analysis_is_not_reported_as_a_missing_one() {
+    // The conflation the review named: one code answered both "no such
+    // analysis" and "it exists but has no report", and the second is false.
+    // The remedies are opposite — correct the identifier, or keep polling.
+    use axum::body::Body;
+    use axum::http::Request;
+    use repolens_github::{GitHubClientConfig, GitHubRestClient};
+    use repolens_server::api;
+    use repolens_server::state::AppState;
+    use tower::ServiceExt as _;
+
+    let pool = pool().await;
+    let id = queued(&pool, &RepositoryCoordinate::new("owner", "still-running")).await;
+
+    let url = std::env::var("DATABASE_URL").expect("checked by `pool`");
+    let github = GitHubRestClient::new(GitHubClientConfig::new()).expect("constructible");
+    let state = AppState::with_pool(
+        AppState::connect_lazy(&url).expect("the pool is configured"),
+        github,
+    );
+    let (app, _openapi) = api::build(state, None);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/analyses/{id}/report"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("router responds");
+
+    assert_eq!(response.status(), 404);
+    let bytes = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .expect("body is readable");
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("the envelope");
+    assert_eq!(
+        parsed["code"], "REPORT_NOT_AVAILABLE",
+        "the analysis exists and is queued; calling it missing tells the client \
+         to give up on work that has not started"
+    );
 
     cleanup(&pool, id).await;
 }
@@ -188,7 +320,7 @@ async fn a_failure_before_resolution_keeps_what_was_submitted() {
         &pool,
         id,
         &ApiError::new(ErrorCode::RepositoryNotFound, "no such repository"),
-        None,
+        &Resolved::default(),
     )
     .await
     .expect("the failure is recorded");
