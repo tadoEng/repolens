@@ -43,7 +43,7 @@ fn document_path() -> PathBuf {
 /// as a diff rather than as one line, and so it matches what an editor would
 /// leave behind.
 fn generate() -> String {
-    let (_router, openapi) = api::build(AppState::without_database(unauthenticated_github()));
+    let (_router, openapi) = api::build(AppState::without_database(unauthenticated_github()), None);
     let mut json = serde_json::to_string_pretty(&openapi).expect("the document always serializes");
     json.push('\n');
     json

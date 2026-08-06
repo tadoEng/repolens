@@ -51,7 +51,10 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let (app, _openapi) = api::build(state);
+    // Configuration is read here, at the composition root, and handed to the
+    // router. `api::build` deliberately reads no environment of its own.
+    let cors_allowed_origin = config::cors_allowed_origin();
+    let (app, _openapi) = api::build(state, cors_allowed_origin.as_deref());
 
     let listener = TcpListener::bind(address)
         .await

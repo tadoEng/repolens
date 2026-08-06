@@ -10,14 +10,14 @@
 //! to close, and the frontend correctly offers no control for it.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use repolens_core::RepositoryCoordinate;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::api::failure::{Failure, TypedJson, TypedPath};
 use crate::contract::analysis::Analysis;
 use crate::contract::error::{ApiError, ErrorCode};
 use crate::contract::report::Report;
@@ -34,45 +34,6 @@ pub struct CreateAnalysisRequest {
     pub repository_url: String,
 }
 
-/// An error on its way out of a handler.
-///
-/// Carries the status alongside the body so the mapping from "what went wrong"
-/// to "what HTTP says" lives in one place rather than at every call site.
-struct Failure(StatusCode, ApiError);
-
-impl IntoResponse for Failure {
-    fn into_response(self) -> Response {
-        (self.0, Json(self.1)).into_response()
-    }
-}
-
-impl Failure {
-    fn bad_request(code: ErrorCode, message: &str) -> Self {
-        Self(StatusCode::BAD_REQUEST, ApiError::new(code, message))
-    }
-
-    fn not_found(message: &str) -> Self {
-        Self(
-            StatusCode::NOT_FOUND,
-            ApiError::new(ErrorCode::RepositoryNotFound, message),
-        )
-    }
-
-    /// The database is unreachable or misconfigured.
-    ///
-    /// `503` rather than `500`: the service is fine, its dependency is not, and
-    /// the distinction tells a caller whether retrying is worth anything.
-    fn unavailable() -> Self {
-        Self(
-            StatusCode::SERVICE_UNAVAILABLE,
-            ApiError::new(
-                ErrorCode::WorkerFailedRetriable,
-                "The analysis store is unavailable. This is usually temporary.",
-            ),
-        )
-    }
-}
-
 #[utoipa::path(
     post,
     path = "/api/v1/analyses",
@@ -81,12 +42,18 @@ impl Failure {
     responses(
         (status = 202, description = "Accepted; the analysis is queued", body = Analysis),
         (status = 400, description = "The URL is not a public GitHub repository", body = ApiError),
+        (status = 413, description = "The request body is over the limit", body = ApiError),
+        (status = 415, description = "Content-Type is not application/json", body = ApiError),
+        (status = 422, description = "The body is JSON but not this request", body = ApiError),
         (status = 503, description = "The analysis store is unavailable", body = ApiError)
     )
 )]
 async fn create(
     State(state): State<AppState>,
-    Json(request): Json<CreateAnalysisRequest>,
+    // `TypedJson`, not `Json`: a plain `Json` rejection is answered by `axum`
+    // in its own format, so a malformed body would bypass the error envelope
+    // this API promises. See `super::failure`.
+    TypedJson(request): TypedJson<CreateAnalysisRequest>,
 ) -> Result<(StatusCode, Json<Analysis>), Failure> {
     let coordinate = parse_repository_url(&request.repository_url).ok_or_else(|| {
         Failure::bad_request(
@@ -139,13 +106,14 @@ async fn create(
     params(("analysis_id" = Uuid, Path, description = "Analysis identifier")),
     responses(
         (status = 200, description = "Current state of the analysis", body = Analysis),
+        (status = 400, description = "The identifier is not a UUID", body = ApiError),
         (status = 404, description = "No such analysis", body = ApiError),
         (status = 503, description = "The analysis store is unavailable", body = ApiError)
     )
 )]
 async fn read(
     State(state): State<AppState>,
-    Path(analysis_id): Path<Uuid>,
+    TypedPath(analysis_id): TypedPath<Uuid>,
 ) -> Result<Json<Analysis>, Failure> {
     let pool = state.pool().ok_or_else(Failure::unavailable)?;
 
@@ -168,13 +136,14 @@ async fn read(
     params(("analysis_id" = Uuid, Path, description = "Analysis identifier")),
     responses(
         (status = 200, description = "The completed report", body = Report),
+        (status = 400, description = "The identifier is not a UUID", body = ApiError),
         (status = 404, description = "No report for that analysis", body = ApiError),
         (status = 503, description = "The analysis store is unavailable", body = ApiError)
     )
 )]
 async fn read_report(
     State(state): State<AppState>,
-    Path(analysis_id): Path<Uuid>,
+    TypedPath(analysis_id): TypedPath<Uuid>,
 ) -> Result<Json<Report>, Failure> {
     let pool = state.pool().ok_or_else(Failure::unavailable)?;
 

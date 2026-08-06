@@ -22,8 +22,8 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 pub mod analyses;
+mod failure;
 
-use crate::config;
 use crate::contract;
 use crate::state::{AppState, BUILD_SHA};
 
@@ -351,7 +351,20 @@ async fn run_database_probe(pool: &sqlx::PgPool) -> Result<Option<i64>, ProbeFai
 ///
 /// Returning both from one call is the point: they cannot drift apart, because
 /// there is no way to obtain one without the other.
-pub fn build(state: AppState) -> (Router, utoipa::openapi::OpenApi) {
+///
+/// `cors_allowed_origin` is a parameter rather than a call to [`crate::config`],
+/// which is what makes the CORS policy assertable by driving the real router.
+/// While it was read from the environment in here, the only way to test the
+/// policy was to mutate the process environment — forbidden by this
+/// workspace's `unsafe_code` lint, since edition 2024 made `set_var` unsafe —
+/// so nothing tested it, and the layer shipped allowing `GET` alone. That made
+/// the one write this API has unreachable from a browser while every
+/// server-side test passed. Reading configuration is the composition root's
+/// job; see `bin/server.rs`.
+pub fn build(
+    state: AppState,
+    cors_allowed_origin: Option<&str>,
+) -> (Router, utoipa::openapi::OpenApi) {
     let (router, openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(liveness))
         .routes(routes!(system_probe))
@@ -364,13 +377,20 @@ pub fn build(state: AppState) -> (Router, utoipa::openapi::OpenApi) {
     // origin is configured — never a wildcard, which would have to be revisited
     // the moment an endpoint needs credentials, and which is a security
     // decision made by omission rather than by choice.
-    let router = if let Some(origin) = config::cors_allowed_origin() {
+    let router = if let Some(origin) = cors_allowed_origin {
         if let Ok(value) = origin.parse::<HeaderValue>() {
             tracing::info!(%origin, "CORS enabled for one exact origin");
             router.layer(
                 CorsLayer::new()
                     .allow_origin(value)
-                    .allow_methods([Method::GET])
+                    // POST is listed explicitly because `tower-http` answers the
+                    // preflight with exactly this set and nothing else. Creating
+                    // an analysis is a cross-origin JSON POST from the statically
+                    // hosted frontend, so omitting it here fails the preflight
+                    // and the browser never sends the request — the whole
+                    // vertical slice is unreachable from a browser while every
+                    // server-side test still passes.
+                    .allow_methods([Method::GET, Method::POST])
                     .allow_headers([header::CONTENT_TYPE]),
             )
         } else {
@@ -388,13 +408,23 @@ pub fn build(state: AppState) -> (Router, utoipa::openapi::OpenApi) {
         router
     };
 
+    // Order is inner-to-outer: body limit, timeout, panic capture, tracing. It
+    // is asserted by driving the real router in `tests/api.rs`, never by
+    // reading this builder.
+    //
+    // `envelope_timeouts` sits directly outside the timeout layer and nowhere
+    // else. A timeout response is built by that layer without passing through
+    // any extractor, so it is the one failure that has to be rewritten on the
+    // way out rather than intercepted where it is produced; mounting the
+    // rewrite here keeps its blast radius to exactly that layer.
     let router = router
         .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
         ))
-        .layer(CatchPanicLayer::new())
+        .layer(axum::middleware::map_response(failure::envelope_timeouts))
+        .layer(CatchPanicLayer::custom(failure::PanicEnvelope))
         .layer(TraceLayer::new_for_http());
 
     (router, openapi)

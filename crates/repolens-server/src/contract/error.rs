@@ -41,6 +41,32 @@ pub enum ErrorCode {
     /// The analyzer failed deterministically. Retrying the same commit with the
     /// same ruleset will fail identically, so the UI must not offer retry.
     AnalyzerFailedPermanent,
+    /// The request itself could not be interpreted: a body that is not valid
+    /// JSON, a missing or wrong `Content-Type`, or a path parameter that is not
+    /// the type the route declares.
+    ///
+    /// Distinct from [`InvalidRepositoryUrl`](Self::InvalidRepositoryUrl),
+    /// which means a well-formed request carrying a value we understood and
+    /// rejected. This one means we never got as far as the value, so the UI
+    /// must not echo it back as a correctable repository URL.
+    MalformedRequest,
+    /// The request body exceeded the configured ceiling.
+    ///
+    /// Not [`RepositoryTooLarge`](Self::RepositoryTooLarge), which is a
+    /// statement about the repository being analyzed. This is a statement about
+    /// the HTTP request, and no repository has been looked at yet.
+    RequestTooLarge,
+    /// The request occupied a server slot for longer than it is allowed to.
+    ///
+    /// Retriable: it says the deployment was slow, not that the input was bad.
+    RequestTimedOut,
+    /// An unhandled fault in this service.
+    ///
+    /// The message is deliberately fixed and uninformative to the caller: a
+    /// panic payload can carry internal paths, query fragments, or retrieved
+    /// repository content, none of which may cross into a browser. The detail
+    /// goes to the log instead.
+    InternalError,
 }
 
 impl ErrorCode {
@@ -49,7 +75,7 @@ impl ErrorCode {
     /// Hand-maintained but *not* hand-trusted: `all_variants_are_listed` fails
     /// if this drifts from the enum. Without it, a test that iterates "all
     /// codes" would quietly iterate only the ones somebody remembered.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 12] = [
         Self::InvalidRepositoryUrl,
         Self::RepositoryNotFound,
         Self::RepositoryInaccessible,
@@ -58,6 +84,10 @@ impl ErrorCode {
         Self::RateLimited,
         Self::WorkerFailedRetriable,
         Self::AnalyzerFailedPermanent,
+        Self::MalformedRequest,
+        Self::RequestTooLarge,
+        Self::RequestTimedOut,
+        Self::InternalError,
     ];
 
     /// Whether another attempt at the *same* input could plausibly succeed.
@@ -70,7 +100,11 @@ impl ErrorCode {
     pub const fn is_retriable(self) -> bool {
         matches!(
             self,
-            Self::RepositoryInaccessible | Self::RateLimited | Self::WorkerFailedRetriable
+            Self::RepositoryInaccessible
+                | Self::RateLimited
+                | Self::WorkerFailedRetriable
+                // The deployment was slow, not the request wrong.
+                | Self::RequestTimedOut
         )
     }
 }
@@ -198,7 +232,11 @@ mod tests {
                 | ErrorCode::RepositoryTooLarge
                 | ErrorCode::RateLimited
                 | ErrorCode::WorkerFailedRetriable
-                | ErrorCode::AnalyzerFailedPermanent => {}
+                | ErrorCode::AnalyzerFailedPermanent
+                | ErrorCode::MalformedRequest
+                | ErrorCode::RequestTooLarge
+                | ErrorCode::RequestTimedOut
+                | ErrorCode::InternalError => {}
             }
         }
 

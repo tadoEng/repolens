@@ -528,11 +528,22 @@ fn every_error_code_is_either_in_a_fixture_or_explicitly_exempt() {
     // can carry them. They are still rendered — the unknown-variant gate in the
     // client package covers every code, including these. Anything reachable
     // *during* an analysis must appear below.
-    const EXEMPT: [ErrorCode; 4] = [
+    //
+    // The second group is exempt for a stronger reason: those four are produced
+    // by the HTTP layer — a body that is not JSON, a body over the limit, a
+    // request that ran out of time, a panic — and are never written to an
+    // analysis at all. `pipeline` cannot construct one, so no analysis can ever
+    // reach a terminal state carrying them, and a fixture asserting otherwise
+    // would describe a state the system cannot produce.
+    const EXEMPT: [ErrorCode; 8] = [
         ErrorCode::InvalidRepositoryUrl,
         ErrorCode::RepositoryNotFound,
         ErrorCode::RepositoryArchived,
         ErrorCode::RepositoryTooLarge,
+        ErrorCode::MalformedRequest,
+        ErrorCode::RequestTooLarge,
+        ErrorCode::RequestTimedOut,
+        ErrorCode::InternalError,
     ];
 
     let rendered: String = fixtures().into_iter().map(|(_, body)| body).collect();

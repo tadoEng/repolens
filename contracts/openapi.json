@@ -47,6 +47,36 @@
               }
             }
           },
+          "413": {
+            "description": "The request body is over the limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is JSON but not this request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The analysis store is unavailable",
             "content": {
@@ -85,6 +115,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Analysis"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The identifier is not a UUID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -137,6 +177,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Report"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The identifier is not a UUID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -427,7 +477,11 @@
           "REPOSITORY_TOO_LARGE",
           "RATE_LIMITED",
           "WORKER_FAILED_RETRIABLE",
-          "ANALYZER_FAILED_PERMANENT"
+          "ANALYZER_FAILED_PERMANENT",
+          "MALFORMED_REQUEST",
+          "REQUEST_TOO_LARGE",
+          "REQUEST_TIMED_OUT",
+          "INTERNAL_ERROR"
         ]
       },
       "Evidence": {

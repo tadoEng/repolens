@@ -259,7 +259,7 @@ export interface components {
          *     when a future backend adds one it has never seen.
          * @enum {string}
          */
-        ErrorCode: "INVALID_REPOSITORY_URL" | "REPOSITORY_NOT_FOUND" | "REPOSITORY_INACCESSIBLE" | "REPOSITORY_ARCHIVED" | "REPOSITORY_TOO_LARGE" | "RATE_LIMITED" | "WORKER_FAILED_RETRIABLE" | "ANALYZER_FAILED_PERMANENT";
+        ErrorCode: "INVALID_REPOSITORY_URL" | "REPOSITORY_NOT_FOUND" | "REPOSITORY_INACCESSIBLE" | "REPOSITORY_ARCHIVED" | "REPOSITORY_TOO_LARGE" | "RATE_LIMITED" | "WORKER_FAILED_RETRIABLE" | "ANALYZER_FAILED_PERMANENT" | "MALFORMED_REQUEST" | "REQUEST_TOO_LARGE" | "REQUEST_TIMED_OUT" | "INTERNAL_ERROR";
         /**
          * @description One checkable fact supporting a finding.
          *
@@ -709,6 +709,33 @@ export interface operations {
                     "application/json": components["schemas"]["ApiError"];
                 };
             };
+            /** @description The request body is over the limit */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Content-Type is not application/json */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description The body is JSON but not this request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
             /** @description The analysis store is unavailable */
             503: {
                 headers: {
@@ -739,6 +766,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Analysis"];
+                };
+            };
+            /** @description The identifier is not a UUID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             /** @description No such analysis */
@@ -780,6 +816,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Report"];
+                };
+            };
+            /** @description The identifier is not a UUID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             /** @description No report for that analysis */
