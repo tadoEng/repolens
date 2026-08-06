@@ -478,6 +478,48 @@ pub struct Report {
     pub limitations: Vec<Limitation>,
 }
 
+/// Fields that record *this execution* rather than what was analyzed.
+///
+/// Named once, here, so that the determinism claim and the test that enforces
+/// it cannot drift apart by editing one and not the other.
+const EXECUTION_METADATA_FIELDS: [&str; 2] = ["analysis_id", "completed_at"];
+
+impl Report {
+    /// The part of this report that two runs over the same inputs must agree
+    /// on, byte for byte.
+    ///
+    /// Determinism is the property this product rests on, but it does not hold
+    /// for the *whole* wire report and never could: every run receives a fresh
+    /// `analysis_id`, and `completed_at` is read from the clock. Claiming
+    /// byte-identical reports would therefore be false as stated, which is
+    /// exactly the kind of overstatement the evidence contract exists to
+    /// prevent — so the claim is bounded by executable code rather than by
+    /// prose that the next reader has to trust.
+    ///
+    /// What remains is a function of the reproducibility key — repository,
+    /// commit SHA, tree SHA, analyzer version, ruleset version — and must not
+    /// vary between runs.
+    ///
+    /// Built by removing fields from the serialized report rather than by
+    /// listing the ones to keep: a field added to [`Report`] then enters this
+    /// payload automatically and is held to determinism by default. The
+    /// opposite default would let a new nondeterministic field pass unnoticed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `serde_json` error if the report cannot be
+    /// serialized.
+    pub fn analytical_payload(&self) -> Result<serde_json::Value, serde_json::Error> {
+        let mut value = serde_json::to_value(self)?;
+        if let Some(object) = value.as_object_mut() {
+            for field in EXECUTION_METADATA_FIELDS {
+                object.remove(field);
+            }
+        }
+        Ok(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,5 +623,100 @@ mod tests {
         let json = serde_json::to_value(&report).unwrap();
         assert!(json.get("composition").is_some());
         assert!(json["composition"].is_null());
+    }
+
+    /// A report with every analytical field fixed, so only the execution
+    /// metadata is left free to vary.
+    fn report_with_execution(analysis_id: Uuid, completed_at: OffsetDateTime) -> Report {
+        Report {
+            analysis_id,
+            repository: RepositoryIdentity {
+                owner: "rust-lang".into(),
+                name: "crates.io".into(),
+            },
+            commit_sha: "0".repeat(40),
+            tree_sha: "1".repeat(40),
+            analyzer_version: "0.1.0".into(),
+            ruleset_version: "1".into(),
+            completed_at,
+            overview: vec![],
+            findings: vec![],
+            composition: None,
+            limitations: vec![],
+        }
+    }
+
+    #[test]
+    fn execution_metadata_is_what_stops_whole_reports_from_being_identical() {
+        // Establishes the premise of the next test rather than asserting a
+        // behaviour worth having: if these two ever serialized identically, the
+        // payload below would be proving nothing.
+        let first = report_with_execution(Uuid::nil(), OffsetDateTime::UNIX_EPOCH);
+        let second = report_with_execution(
+            Uuid::from_u128(1),
+            OffsetDateTime::from_unix_timestamp(1_785_873_497).unwrap(),
+        );
+
+        assert_ne!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn two_runs_over_the_same_inputs_agree_on_the_analytical_payload() {
+        // The determinism claim, stated exactly as far as it holds. The whole
+        // wire report cannot be byte-identical across runs — a fresh
+        // `analysis_id` and a clock read guarantee it differs — so what is
+        // promised is that everything derived from the reproducibility key
+        // agrees.
+        let first = report_with_execution(Uuid::nil(), OffsetDateTime::UNIX_EPOCH);
+        let second = report_with_execution(
+            Uuid::from_u128(1),
+            OffsetDateTime::from_unix_timestamp(1_785_873_497).unwrap(),
+        );
+
+        assert_eq!(
+            first.analytical_payload().unwrap(),
+            second.analytical_payload().unwrap(),
+            "two runs differing only in execution metadata must agree"
+        );
+    }
+
+    #[test]
+    fn the_payload_drops_execution_metadata_and_keeps_everything_else() {
+        let payload = report_with_execution(Uuid::nil(), OffsetDateTime::UNIX_EPOCH)
+            .analytical_payload()
+            .unwrap();
+        let object = payload.as_object().expect("a report is a JSON object");
+
+        for field in EXECUTION_METADATA_FIELDS {
+            assert!(!object.contains_key(field), "{field} must not be compared");
+        }
+        // The reproducibility key itself must survive. A payload that dropped
+        // these would compare equal for two genuinely different analyses, which
+        // is a worse failure than comparing unequal for the same one.
+        for field in [
+            "repository",
+            "commit_sha",
+            "tree_sha",
+            "analyzer_version",
+            "ruleset_version",
+        ] {
+            assert!(object.contains_key(field), "{field} must be compared");
+        }
+    }
+
+    #[test]
+    fn a_changed_analytical_field_changes_the_payload() {
+        // The direction that catches a payload which silently drops too much.
+        let baseline = report_with_execution(Uuid::nil(), OffsetDateTime::UNIX_EPOCH);
+        let mut different = report_with_execution(Uuid::nil(), OffsetDateTime::UNIX_EPOCH);
+        different.ruleset_version = "2".into();
+
+        assert_ne!(
+            baseline.analytical_payload().unwrap(),
+            different.analytical_payload().unwrap()
+        );
     }
 }
