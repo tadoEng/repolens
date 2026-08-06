@@ -45,7 +45,9 @@ pub struct CreateAnalysisRequest {
         (status = 413, description = "The request body is over the limit", body = ApiError),
         (status = 415, description = "Content-Type is not application/json", body = ApiError),
         (status = 422, description = "The body is JSON but not this request", body = ApiError),
-        (status = 503, description = "The analysis store is unavailable", body = ApiError)
+        (status = 503, description = "The analysis store is unavailable", body = ApiError),
+        (status = 408, description = "The request exceeded the server time budget", body = ApiError),
+        (status = 500, description = "An unhandled fault in this service", body = ApiError)
     )
 )]
 async fn create(
@@ -108,7 +110,9 @@ async fn create(
         (status = 200, description = "Current state of the analysis", body = Analysis),
         (status = 400, description = "The identifier is not a UUID", body = ApiError),
         (status = 404, description = "No such analysis", body = ApiError),
-        (status = 503, description = "The analysis store is unavailable", body = ApiError)
+        (status = 503, description = "The analysis store is unavailable", body = ApiError),
+        (status = 408, description = "The request exceeded the server time budget", body = ApiError),
+        (status = 500, description = "An unhandled fault in this service", body = ApiError)
     )
 )]
 async fn read(
@@ -121,7 +125,9 @@ async fn read(
         .await
         .map(Json)
         .map_err(|error| match error {
-            store::StoreError::NotFound => Failure::not_found("No analysis with that identifier."),
+            store::StoreError::NotFound => {
+                Failure::analysis_not_found("No analysis with that identifier.")
+            }
             other @ store::StoreError::Query(_) => {
                 tracing::error!(error = %other, "could not read an analysis");
                 Failure::unavailable()
@@ -138,7 +144,9 @@ async fn read(
         (status = 200, description = "The completed report", body = Report),
         (status = 400, description = "The identifier is not a UUID", body = ApiError),
         (status = 404, description = "No report for that analysis", body = ApiError),
-        (status = 503, description = "The analysis store is unavailable", body = ApiError)
+        (status = 503, description = "The analysis store is unavailable", body = ApiError),
+        (status = 408, description = "The request exceeded the server time budget", body = ApiError),
+        (status = 500, description = "An unhandled fault in this service", body = ApiError)
     )
 )]
 async fn read_report(
@@ -155,7 +163,7 @@ async fn read_report(
             // frontend already knows which it is from `report_available` on the
             // analysis, and a second source of that truth could disagree.
             store::StoreError::NotFound => {
-                Failure::not_found("No report is available for that analysis.")
+                Failure::analysis_not_found("No report is available for that analysis.")
             }
             other @ store::StoreError::Query(_) => {
                 tracing::error!(error = %other, "could not read a report");

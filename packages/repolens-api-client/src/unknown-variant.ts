@@ -122,9 +122,10 @@ export const ERROR_CODE_LABELS: Readonly<Record<ErrorCode, string>> = {
 	RATE_LIMITED: 'Rate limited',
 	WORKER_FAILED_RETRIABLE: 'Worker failed (retriable)',
 	ANALYZER_FAILED_PERMANENT: 'Analyzer failed (permanent)',
-	// The four below are produced by the HTTP layer rather than by an analysis,
+	// The five below are produced by the HTTP layer rather than by an analysis,
 	// so they are never a stored analysis state — they arrive only as the
 	// response to a request that could not be served.
+	ANALYSIS_NOT_FOUND: 'Analysis not found',
 	MALFORMED_REQUEST: 'Malformed request',
 	REQUEST_TOO_LARGE: 'Request too large',
 	REQUEST_TIMED_OUT: 'Request timed out',

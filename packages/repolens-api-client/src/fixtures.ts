@@ -268,6 +268,93 @@ export const FAILED_PERMANENT_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
+/** Fixture `failed-repository-archived.json`. */
+export const FAILED_REPOSITORY_ARCHIVED_FIXTURE = {
+	analysis: {
+		id: "0193a5c0-0000-7000-8000-000000000001",
+		repository: {
+			owner: "rust-lang",
+			name: "crates.io"
+		},
+		commit_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+		state: "FAILED_PERMANENT",
+		execution: {
+			trigger_status: "SUCCEEDED",
+			execution_id: "exec-0193a5c0",
+			triggered_at: "2026-08-06T09:00:00Z"
+		},
+		retry: {
+			allowed: false,
+			reason: "This failure is deterministic: the same commit and ruleset will fail again."
+		},
+		error: {
+			code: "REPOSITORY_ARCHIVED",
+			message: "This repository is archived. It can still be read, but it is not under active development, which is worth knowing before drawing conclusions from it."
+		},
+		created_at: "2026-08-06T09:00:00Z",
+		updated_at: "2026-08-06T09:00:04Z",
+		report_available: false
+	}
+} satisfies AnalysisFixture;
+
+/** Fixture `failed-repository-not-found.json`. */
+export const FAILED_REPOSITORY_NOT_FOUND_FIXTURE = {
+	analysis: {
+		id: "0193a5c0-0000-7000-8000-000000000001",
+		repository: {
+			owner: "rust-lang",
+			name: "crates.io"
+		},
+		commit_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+		state: "FAILED_PERMANENT",
+		execution: {
+			trigger_status: "SUCCEEDED",
+			execution_id: "exec-0193a5c0",
+			triggered_at: "2026-08-06T09:00:00Z"
+		},
+		retry: {
+			allowed: false,
+			reason: "This failure is deterministic: the same commit and ruleset will fail again."
+		},
+		error: {
+			code: "REPOSITORY_NOT_FOUND",
+			message: "No public repository was found at that address. Check the owner and name, and note that private repositories are not supported."
+		},
+		created_at: "2026-08-06T09:00:00Z",
+		updated_at: "2026-08-06T09:00:04Z",
+		report_available: false
+	}
+} satisfies AnalysisFixture;
+
+/** Fixture `failed-repository-too-large.json`. */
+export const FAILED_REPOSITORY_TOO_LARGE_FIXTURE = {
+	analysis: {
+		id: "0193a5c0-0000-7000-8000-000000000001",
+		repository: {
+			owner: "rust-lang",
+			name: "crates.io"
+		},
+		commit_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+		state: "FAILED_PERMANENT",
+		execution: {
+			trigger_status: "SUCCEEDED",
+			execution_id: "exec-0193a5c0",
+			triggered_at: "2026-08-06T09:00:00Z"
+		},
+		retry: {
+			allowed: false,
+			reason: "This failure is deterministic: the same commit and ruleset will fail again."
+		},
+		error: {
+			code: "REPOSITORY_TOO_LARGE",
+			message: "This repository is larger than the limits this analysis is allowed to spend. The limits are ours, not a judgement about the repository."
+		},
+		created_at: "2026-08-06T09:00:00Z",
+		updated_at: "2026-08-06T09:00:04Z",
+		report_available: false
+	}
+} satisfies AnalysisFixture;
+
 /** Fixture `failed-retriable.json`. */
 export const FAILED_RETRIABLE_FIXTURE = {
 	analysis: {
@@ -505,6 +592,9 @@ export type AnalysisFixtureName =
 	| "completed-report"
 	| "failed-inaccessible"
 	| "failed-permanent"
+	| "failed-repository-archived"
+	| "failed-repository-not-found"
+	| "failed-repository-too-large"
 	| "failed-retriable"
 	| "failed-worker-retriable"
 	| "loc-unavailable"
@@ -527,6 +617,9 @@ export const ANALYSIS_FIXTURES: Readonly<Record<AnalysisFixtureName, AnalysisFix
 	"completed-report": COMPLETED_REPORT_FIXTURE,
 	"failed-inaccessible": FAILED_INACCESSIBLE_FIXTURE,
 	"failed-permanent": FAILED_PERMANENT_FIXTURE,
+	"failed-repository-archived": FAILED_REPOSITORY_ARCHIVED_FIXTURE,
+	"failed-repository-not-found": FAILED_REPOSITORY_NOT_FOUND_FIXTURE,
+	"failed-repository-too-large": FAILED_REPOSITORY_TOO_LARGE_FIXTURE,
 	"failed-retriable": FAILED_RETRIABLE_FIXTURE,
 	"failed-worker-retriable": FAILED_WORKER_RETRIABLE_FIXTURE,
 	"loc-unavailable": LOC_UNAVAILABLE_FIXTURE,
@@ -544,6 +637,9 @@ export const ANALYSIS_FIXTURE_NAMES = [
 	"completed-report",
 	"failed-inaccessible",
 	"failed-permanent",
+	"failed-repository-archived",
+	"failed-repository-not-found",
+	"failed-repository-too-large",
 	"failed-retriable",
 	"failed-worker-retriable",
 	"loc-unavailable",

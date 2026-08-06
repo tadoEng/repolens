@@ -393,6 +393,66 @@ fn failure_fixtures() -> Vec<(&'static str, Analysis)> {
         ("failed-worker-retriable.json", worker_retriable),
         ("failed-inaccessible.json", inaccessible),
     ]
+    .into_iter()
+    .chain(repository_failure_fixtures())
+    .collect()
+}
+
+/// Failures decided about the *repository* rather than about the analysis.
+///
+/// Split from `failure_fixtures` for the same reason that one was split from
+/// `fixtures`: the workspace function-length lint, not taste.
+fn repository_failure_fixtures() -> Vec<(&'static str, Analysis)> {
+    /// Every one of these is permanent, and the reason is the same each time.
+    fn permanent() -> RetryPolicy {
+        RetryPolicy {
+            allowed: false,
+            reason: Some(
+                "This failure is deterministic: the same commit and ruleset will fail again."
+                    .to_owned(),
+            ),
+        }
+    }
+
+    // The three below are reached during an analysis and written to the row by
+    // `store::fail`, so each is a terminal state a user can land on. All are
+    // permanent: waiting will not create a repository, un-archive one, or
+    // shrink one past an ingestion bound.
+    let not_found = failed(
+        AnalysisState::FailedPermanent,
+        ApiError::new(
+            ErrorCode::RepositoryNotFound,
+            "No public repository was found at that address. Check the owner and name, and note \
+             that private repositories are not supported.",
+        ),
+        permanent(),
+    );
+
+    let archived = failed(
+        AnalysisState::FailedPermanent,
+        ApiError::new(
+            ErrorCode::RepositoryArchived,
+            "This repository is archived. It can still be read, but it is not under active \
+             development, which is worth knowing before drawing conclusions from it.",
+        ),
+        permanent(),
+    );
+
+    let too_large = failed(
+        AnalysisState::FailedPermanent,
+        ApiError::new(
+            ErrorCode::RepositoryTooLarge,
+            "This repository is larger than the limits this analysis is allowed to spend. The \
+             limits are ours, not a judgement about the repository.",
+        ),
+        permanent(),
+    );
+
+    vec![
+        ("failed-repository-not-found.json", not_found),
+        ("failed-repository-archived.json", archived),
+        ("failed-repository-too-large.json", too_large),
+    ]
 }
 
 fn fixtures() -> Vec<(&'static str, String)> {
@@ -524,22 +584,26 @@ fn every_error_code_is_either_in_a_fixture_or_explicitly_exempt() {
     // closed-set gate. Adding a ninth code left it green while proving nothing.
     // It now iterates every variant, so a new code must be either rendered in a
     // fixture or listed here as a deliberate omission.
-    // Rejected at submission, before an analysis exists, so no analysis fixture
-    // can carry them. They are still rendered — the unknown-variant gate in the
-    // client package covers every code, including these. Anything reachable
-    // *during* an analysis must appear below.
+    // Exempt only where the code can never be *persisted on an analysis*.
     //
-    // The second group is exempt for a stronger reason: those four are produced
-    // by the HTTP layer — a body that is not JSON, a body over the limit, a
-    // request that ran out of time, a panic — and are never written to an
-    // analysis at all. `pipeline` cannot construct one, so no analysis can ever
-    // reach a terminal state carrying them, and a fixture asserting otherwise
-    // would describe a state the system cannot produce.
-    const EXEMPT: [ErrorCode; 8] = [
+    // `INVALID_REPOSITORY_URL` is decided before the row is inserted, so no
+    // analysis can carry it. The other five are produced by the HTTP layer — a
+    // body that is not JSON, a body over the limit, a request that ran out of
+    // time, an unknown analysis id, a panic — and `pipeline` cannot construct
+    // any of them, so no analysis can reach a terminal state carrying one. A
+    // fixture asserting otherwise would describe a state the system cannot
+    // produce. All of them are still rendered: the unknown-variant gate in the
+    // client package covers every code.
+    //
+    // `REPOSITORY_NOT_FOUND`, `REPOSITORY_ARCHIVED` and `REPOSITORY_TOO_LARGE`
+    // were previously in this list and should never have been. Each is reached
+    // *during* an analysis — the first two from resolution, the third from an
+    // exceeded ingestion bound — and each is written to the row by
+    // `store::fail`. Exempting them meant three terminal states a user can
+    // actually hit had no proof that the frontend renders them.
+    const EXEMPT: [ErrorCode; 6] = [
         ErrorCode::InvalidRepositoryUrl,
-        ErrorCode::RepositoryNotFound,
-        ErrorCode::RepositoryArchived,
-        ErrorCode::RepositoryTooLarge,
+        ErrorCode::AnalysisNotFound,
         ErrorCode::MalformedRequest,
         ErrorCode::RequestTooLarge,
         ErrorCode::RequestTimedOut,

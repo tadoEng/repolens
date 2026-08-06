@@ -25,6 +25,7 @@ pub mod analyses;
 mod failure;
 
 use crate::contract;
+use crate::contract::error::ApiError;
 use crate::state::{AppState, BUILD_SHA};
 
 /// Ceiling on request bodies. Every current and planned endpoint takes either
@@ -96,7 +97,11 @@ pub struct LivenessResponse {
     get,
     path = "/healthz",
     tag = "system",
-    responses((status = 200, description = "The process is serving requests", body = LivenessResponse))
+    responses(
+        (status = 200, description = "The process is serving requests", body = LivenessResponse),
+        (status = 408, description = "The request exceeded the server time budget", body = ApiError),
+        (status = 500, description = "An unhandled fault in this service", body = ApiError)
+    )
 )]
 async fn liveness() -> Json<LivenessResponse> {
     Json(LivenessResponse {
@@ -230,11 +235,11 @@ impl ProbeFailure {
     get,
     path = "/api/v1/system/probe",
     tag = "system",
-    responses((
-        status = 200,
-        description = "Reachability of the API and its database",
-        body = SystemProbeResponse
-    ))
+    responses(
+        (status = 200, description = "Reachability of the API and its database", body = SystemProbeResponse),
+        (status = 408, description = "The request exceeded the server time budget", body = ApiError),
+        (status = 500, description = "An unhandled fault in this service", body = ApiError)
+    )
 )]
 async fn system_probe(State(state): State<AppState>) -> Json<SystemProbeResponse> {
     let (database, schema_version) = match state.pool() {
@@ -372,6 +377,32 @@ pub fn build(
         .with_state(state)
         .split_for_parts();
 
+    (
+        apply_layers(router, cors_allowed_origin, REQUEST_TIMEOUT),
+        openapi,
+    )
+}
+
+/// Wraps a router in the production layer stack.
+///
+/// Separated from route construction, and public, for one reason: the failures
+/// this stack produces cannot be reached through any route that ships. A
+/// timeout needs a handler that outlasts the budget and a panic needs a handler
+/// that panics, and adding either to the real router to make it testable would
+/// put a fault injector in the deployed binary. Tests apply this to their own
+/// throwaway routes instead, so what they exercise is the stack itself rather
+/// than a reimplementation of it — which is what the previous tests did by
+/// calling the conversion functions directly, proving the functions worked
+/// while proving nothing about whether they were mounted.
+///
+/// `request_timeout` is a parameter for the same reason: asserting the timeout
+/// behaviour against the shipped 30 seconds would mean a 30-second test.
+/// [`build`] passes the production budget; nothing else should.
+pub fn apply_layers(
+    router: Router,
+    cors_allowed_origin: Option<&str>,
+    request_timeout: Duration,
+) -> Router {
     // A statically hosted frontend calling this API is cross-origin, so the
     // browser blocks every request without this. Applied only when an exact
     // origin is configured — never a wildcard, which would have to be revisited
@@ -409,25 +440,22 @@ pub fn build(
     };
 
     // Order is inner-to-outer: body limit, timeout, panic capture, tracing. It
-    // is asserted by driving the real router in `tests/api.rs`, never by
-    // reading this builder.
+    // is asserted by driving a real router, never by reading this builder.
     //
     // `envelope_timeouts` sits directly outside the timeout layer and nowhere
     // else. A timeout response is built by that layer without passing through
     // any extractor, so it is the one failure that has to be rewritten on the
     // way out rather than intercepted where it is produced; mounting the
     // rewrite here keeps its blast radius to exactly that layer.
-    let router = router
+    router
         .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            REQUEST_TIMEOUT,
+            request_timeout,
         ))
         .layer(axum::middleware::map_response(failure::envelope_timeouts))
         .layer(CatchPanicLayer::custom(failure::PanicEnvelope))
-        .layer(TraceLayer::new_for_http());
-
-    (router, openapi)
+        .layer(TraceLayer::new_for_http())
 }
 
 #[cfg(test)]

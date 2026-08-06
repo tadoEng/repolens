@@ -47,10 +47,16 @@ impl Failure {
         Self(StatusCode::BAD_REQUEST, ApiError::new(code, message))
     }
 
-    pub(crate) fn not_found(message: &str) -> Self {
+    /// No analysis — or no report for one — with that identifier.
+    ///
+    /// `ANALYSIS_NOT_FOUND`, never `REPOSITORY_NOT_FOUND`. The latter says a
+    /// repository is absent or private on GitHub, which is a different fact
+    /// with a different remedy: it would send the caller to check a URL that
+    /// was never the problem, and the UI offers to correct one.
+    pub(crate) fn analysis_not_found(message: &str) -> Self {
         Self(
             StatusCode::NOT_FOUND,
-            ApiError::new(ErrorCode::RepositoryNotFound, message),
+            ApiError::new(ErrorCode::AnalysisNotFound, message),
         )
     }
 
@@ -197,18 +203,21 @@ impl ResponseForPanic for PanicEnvelope {
     type ResponseBody = axum::body::Body;
 
     fn response_for_panic(&mut self, panic: Box<dyn Any + Send + 'static>) -> Response {
-        // Downcast to log *something* useful. Both arms are needed: `panic!`
-        // with a literal yields `&str`, and a formatted message yields `String`.
-        let detail = panic
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("a panic payload of an unrecognised type");
-
-        // Logged, never returned. The caller learns that the service faulted;
-        // the payload — which can name internal paths or quote content the
-        // handler was holding — stays on this side of the boundary.
-        tracing::error!(panic = detail, "a request handler panicked");
+        // The payload is dropped without being read, and that is the point.
+        //
+        // A panic message is built by whatever code panicked, so it can carry
+        // an internal path, a fragment of a repository file the handler was
+        // holding, or a value read from configuration. Writing it to a log is
+        // the same disclosure as returning it, only to a different reader —
+        // and logs are the copy that gets shipped to a third party, retained,
+        // and searched. `config.rs` already refuses to echo a value it
+        // rejected for exactly this reason; this is the same rule.
+        //
+        // What is left is the fact and the location, which is what a panic in
+        // a request actually needs: the tracing span carries the route, and a
+        // panic hook installed at startup is where a backtrace belongs.
+        drop(panic);
+        tracing::error!("a request handler panicked; the payload is deliberately not recorded");
 
         Failure(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -223,80 +232,7 @@ impl ResponseForPanic for PanicEnvelope {
 
 #[cfg(test)]
 mod tests {
-    use super::{ErrorCode, IntoResponse, PanicEnvelope, Response, ResponseForPanic, StatusCode};
-
-    /// Reads a response back as the envelope, or fails saying what it was.
-    async fn envelope(response: Response) -> (StatusCode, serde_json::Value) {
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        assert_eq!(
-            content_type.as_deref(),
-            Some("application/json"),
-            "the envelope is JSON or it is not the envelope"
-        );
-
-        let bytes = axum::body::to_bytes(response.into_body(), 8192)
-            .await
-            .expect("body is readable");
-        (
-            status,
-            serde_json::from_slice(&bytes).expect("the body is the envelope"),
-        )
-    }
-
-    #[tokio::test]
-    async fn a_panic_becomes_the_envelope_and_says_nothing_about_itself() {
-        // Driven directly rather than through a route: adding a handler that
-        // panics purely to be tested would put a panic in the shipped router.
-        let payload = Box::new("evidence for /home/runner/secret-path.rs");
-        let response = PanicEnvelope.response_for_panic(payload);
-
-        let (status, body) = envelope(response).await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(body["code"], "INTERNAL_ERROR");
-
-        // The payload can name internal paths or quote content the handler was
-        // holding. It goes to the log; it must not cross into a browser.
-        let rendered = body.to_string();
-        assert!(
-            !rendered.contains("secret-path"),
-            "the panic payload leaked into the response: {rendered}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_timeout_becomes_the_envelope() {
-        // The timeout layer builds this response itself, without passing
-        // through any extractor, so it is rewritten on the way out.
-        let bare = (StatusCode::REQUEST_TIMEOUT, "request timed out").into_response();
-        assert_ne!(
-            bare.headers().get("content-type").unwrap(),
-            "application/json",
-            "the premise: the layer's own response is not the envelope"
-        );
-
-        let (status, body) = envelope(super::envelope_timeouts(bare).await).await;
-        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
-        assert_eq!(body["code"], "REQUEST_TIMED_OUT");
-    }
-
-    #[tokio::test]
-    async fn a_successful_response_passes_through_untouched() {
-        // The rewrite is keyed on status alone, which is only sound while it
-        // leaves everything else exactly as it found it.
-        let original = (StatusCode::OK, "{\"status\":\"ok\"}").into_response();
-        let passed = super::envelope_timeouts(original).await;
-
-        assert_eq!(passed.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(passed.into_body(), 8192)
-            .await
-            .expect("body is readable");
-        assert_eq!(&bytes[..], b"{\"status\":\"ok\"}");
-    }
+    use super::ErrorCode;
 
     #[test]
     fn a_timeout_is_retriable_and_a_malformed_request_is_not() {

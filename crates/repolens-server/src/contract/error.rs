@@ -41,6 +41,14 @@ pub enum ErrorCode {
     /// The analyzer failed deterministically. Retrying the same commit with the
     /// same ruleset will fail identically, so the UI must not offer retry.
     AnalyzerFailedPermanent,
+    /// No analysis exists with that identifier, or it has no report yet.
+    ///
+    /// Deliberately not [`RepositoryNotFound`](Self::RepositoryNotFound), which
+    /// is a claim about a *repository* — that it is absent or private on
+    /// GitHub. Answering it for an unknown analysis id tells the caller to go
+    /// and check a repository that was never the problem, and the UI would
+    /// offer to correct a URL that is already right.
+    AnalysisNotFound,
     /// The request itself could not be interpreted: a body that is not valid
     /// JSON, a missing or wrong `Content-Type`, or a path parameter that is not
     /// the type the route declares.
@@ -75,7 +83,7 @@ impl ErrorCode {
     /// Hand-maintained but *not* hand-trusted: `all_variants_are_listed` fails
     /// if this drifts from the enum. Without it, a test that iterates "all
     /// codes" would quietly iterate only the ones somebody remembered.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::InvalidRepositoryUrl,
         Self::RepositoryNotFound,
         Self::RepositoryInaccessible,
@@ -84,6 +92,7 @@ impl ErrorCode {
         Self::RateLimited,
         Self::WorkerFailedRetriable,
         Self::AnalyzerFailedPermanent,
+        Self::AnalysisNotFound,
         Self::MalformedRequest,
         Self::RequestTooLarge,
         Self::RequestTimedOut,
@@ -233,6 +242,7 @@ mod tests {
                 | ErrorCode::RateLimited
                 | ErrorCode::WorkerFailedRetriable
                 | ErrorCode::AnalyzerFailedPermanent
+                | ErrorCode::AnalysisNotFound
                 | ErrorCode::MalformedRequest
                 | ErrorCode::RequestTooLarge
                 | ErrorCode::RequestTimedOut

@@ -47,6 +47,16 @@
               }
             }
           },
+          "408": {
+            "description": "The request exceeded the server time budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "413": {
             "description": "The request body is over the limit",
             "content": {
@@ -69,6 +79,16 @@
           },
           "422": {
             "description": "The body is JSON but not this request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unhandled fault in this service",
             "content": {
               "application/json": {
                 "schema": {
@@ -139,6 +159,26 @@
               }
             }
           },
+          "408": {
+            "description": "The request exceeded the server time budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unhandled fault in this service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The analysis store is unavailable",
             "content": {
@@ -201,6 +241,26 @@
               }
             }
           },
+          "408": {
+            "description": "The request exceeded the server time budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unhandled fault in this service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The analysis store is unavailable",
             "content": {
@@ -230,6 +290,26 @@
                 }
               }
             }
+          },
+          "408": {
+            "description": "The request exceeded the server time budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unhandled fault in this service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -247,6 +327,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/LivenessResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The request exceeded the server time budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unhandled fault in this service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -478,6 +578,7 @@
           "RATE_LIMITED",
           "WORKER_FAILED_RETRIABLE",
           "ANALYZER_FAILED_PERMANENT",
+          "ANALYSIS_NOT_FOUND",
           "MALFORMED_REQUEST",
           "REQUEST_TOO_LARGE",
           "REQUEST_TIMED_OUT",
