@@ -25,8 +25,8 @@ use repolens_server::contract::analysis::{
 use repolens_server::contract::error::{ApiError, ErrorCode};
 use repolens_server::contract::report::{
     AreaLineCount, CodeRole, CompositionExclusion, Confidence, Evidence, EvidenceKind, Finding,
-    FindingCategory, FindingState, LanguageLineCount, LargestSourceFile, Limitation,
-    LineCountSummary, LineRange, OverviewStatement, Report, RoleLineCount, Severity,
+    FindingCategory, FindingState, LanguageLineCount, LargestSourceFile, LargestSourceFiles,
+    Limitation, LineCountSummary, LineRange, OverviewStatement, Report, RoleLineCount, Severity,
 };
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -256,7 +256,9 @@ fn composition() -> LineCountSummary {
                 code_lines: 3_200,
             },
         ],
-        largest_files: vec![
+        // Through the validated constructor, so the fixture cannot carry a list
+        // the contract would reject.
+        largest_files: LargestSourceFiles::new(vec![
             LargestSourceFile {
                 path: "src/publication.rs".to_owned(),
                 language: "Rust".to_owned(),
@@ -271,7 +273,8 @@ fn composition() -> LineCountSummary {
                 // largest hand-written file in the repository.
                 role: CodeRole::Generated,
             },
-        ],
+        ])
+        .expect("fixture respects the bound"),
         unclassified_files: 7,
     }
 }

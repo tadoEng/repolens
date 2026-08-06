@@ -621,7 +621,7 @@
             "items": {
               "$ref": "#/components/schemas/LargestSourceFile"
             },
-            "description": "Largest files by line count, server-ordered, descending.\n\nBounded at [`MAX_LARGEST_FILES`], published as `maxItems` and enforced on\ndeserialization. A repository with 40,000 files must not send 40,000 rows\nto a browser to render a top-ten list, and a bound that is only described\nis a bound the first careless producer ignores.",
+            "description": "Largest files by line count, server-ordered, descending.\n\nBounded in both directions by [`LargestSourceFiles`]: a producer cannot\nconstruct an over-long list, and an over-long one cannot be parsed.",
             "maxItems": 10
           },
           "roles": {

@@ -391,10 +391,8 @@ export interface components {
             /**
              * @description Largest files by line count, server-ordered, descending.
              *
-             *     Bounded at [`MAX_LARGEST_FILES`], published as `maxItems` and enforced on
-             *     deserialization. A repository with 40,000 files must not send 40,000 rows
-             *     to a browser to render a top-ten list, and a bound that is only described
-             *     is a bound the first careless producer ignores.
+             *     Bounded in both directions by [`LargestSourceFiles`]: a producer cannot
+             *     construct an over-long list, and an over-long one cannot be parsed.
              */
             largest_files: components["schemas"]["LargestSourceFile"][];
             /**

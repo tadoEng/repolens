@@ -247,6 +247,27 @@ fn every_enum_value_is_screaming_snake_case() {
 }
 
 #[test]
+fn published_max_items_matches_the_enforced_bound() {
+    // Two independent literals describing one limit: `MAX_LARGEST_FILES` in the
+    // newtype, and `max_items` in the field attribute utoipa reads. utoipa
+    // accepts the attribute only on fields, not on newtype structs, so they
+    // cannot be written once — which makes them exactly the kind of pair that
+    // drifts, publishing a bound the server does not enforce or enforcing one it
+    // never published.
+    let document: serde_json::Value = serde_json::from_str(&generate()).expect("valid JSON");
+    let published = document["components"]["schemas"]["LineCountSummary"]["properties"]
+        ["largest_files"]["maxItems"]
+        .as_u64()
+        .expect("largest_files publishes maxItems");
+
+    assert_eq!(
+        usize::try_from(published).expect("fits"),
+        repolens_server::contract::report::MAX_LARGEST_FILES,
+        "the published maxItems and the enforced bound disagree"
+    );
+}
+
+#[test]
 fn error_code_all_matches_the_generated_enum() {
     // `ErrorCode::ALL` is what every exhaustiveness gate iterates, and an
     // exhaustive `match` cannot prove it is *complete*: a new variant can be

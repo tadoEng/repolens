@@ -234,31 +234,20 @@ pub struct CompositionExclusion {
     pub bytes: u64,
 }
 
-/// Ceiling on [`LineCountSummary::largest_files`].
+/// Ceiling on [`LargestSourceFiles`].
 ///
 /// Ten is a review aid, not a dataset: the section exists to point a reader at
 /// where to look first, and a list long enough to scroll stops doing that.
 pub const MAX_LARGEST_FILES: usize = 10;
 
-/// Rejects an over-long `largest_files` array rather than silently truncating.
-///
-/// Truncating would make the server and the client disagree about what the
-/// report says while both appeared to succeed. A producer that exceeds the bound
-/// has a bug, and the contract should say so.
-fn deserialize_largest_files<'de, D>(deserializer: D) -> Result<Vec<LargestSourceFile>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error as _;
-
-    let files = Vec::<LargestSourceFile>::deserialize(deserializer)?;
-    if files.len() > MAX_LARGEST_FILES {
-        return Err(D::Error::custom(format!(
-            "largest_files carries {} entries, more than the {MAX_LARGEST_FILES} the contract permits",
-            files.len()
-        )));
-    }
-    Ok(files)
+/// Too many rows were offered for the bounded list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "largest_files carries {offered} entries, more than the {MAX_LARGEST_FILES} the contract permits"
+)]
+pub struct TooManyLargestFiles {
+    /// How many were offered.
+    pub offered: usize,
 }
 
 /// How a counted file was classified by role.
@@ -310,6 +299,81 @@ pub struct LargestSourceFile {
     pub role: CodeRole,
 }
 
+/// A bounded list of the largest source files.
+///
+/// A newtype rather than a plain `Vec` because the bound has to hold in the
+/// direction that actually matters. RepoLens *produces* this DTO far more often
+/// than it consumes one, and a `Vec` field with a `maxItems` annotation lets
+/// server code build forty thousand rows and serialize a response that violates
+/// its own published contract — while every deserialization test still passes.
+///
+/// The inner value is private, so the only ways in are validated.
+/// The published `maxItems` lives on the field in [`LineCountSummary`], because
+/// utoipa accepts that attribute on fields rather than on newtype structs. The
+/// two values are tied by `published_max_items_matches_the_enforced_bound`, so
+/// they cannot drift into disagreeing about the same limit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<LargestSourceFile>")]
+pub struct LargestSourceFiles(Vec<LargestSourceFile>);
+
+impl LargestSourceFiles {
+    /// Accepts a list that already respects the bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TooManyLargestFiles`] when the list is too long. Rejecting
+    /// rather than silently truncating: a producer that exceeds the bound has a
+    /// bug, and quietly shortening its output would make the server and the
+    /// client disagree about what the report says while both appeared to
+    /// succeed.
+    pub fn new(files: Vec<LargestSourceFile>) -> Result<Self, TooManyLargestFiles> {
+        if files.len() > MAX_LARGEST_FILES {
+            return Err(TooManyLargestFiles {
+                offered: files.len(),
+            });
+        }
+        Ok(Self(files))
+    }
+
+    /// Takes the first [`MAX_LARGEST_FILES`] entries of an already-sorted list.
+    ///
+    /// The supported path for an analyzer that has ranked every file and wants
+    /// the head of that ranking. Truncation is explicit here — the caller asked
+    /// for it — which is what distinguishes it from the silent shortening
+    /// [`new`](Self::new) refuses to do.
+    #[must_use]
+    pub fn truncated_from(mut files: Vec<LargestSourceFile>) -> Self {
+        files.truncate(MAX_LARGEST_FILES);
+        Self(files)
+    }
+
+    /// Borrows the rows.
+    #[must_use]
+    pub fn as_slice(&self) -> &[LargestSourceFile] {
+        &self.0
+    }
+
+    /// Whether the list is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// How many rows there are.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl TryFrom<Vec<LargestSourceFile>> for LargestSourceFiles {
+    type Error = TooManyLargestFiles;
+
+    fn try_from(files: Vec<LargestSourceFile>) -> Result<Self, Self::Error> {
+        Self::new(files)
+    }
+}
+
 /// Repository composition and line counts.
 ///
 /// Measures composition, **not** productivity or quality. The report says so
@@ -346,13 +410,10 @@ pub struct LineCountSummary {
     pub roles: Vec<RoleLineCount>,
     /// Largest files by line count, server-ordered, descending.
     ///
-    /// Bounded at [`MAX_LARGEST_FILES`], published as `maxItems` and enforced on
-    /// deserialization. A repository with 40,000 files must not send 40,000 rows
-    /// to a browser to render a top-ten list, and a bound that is only described
-    /// is a bound the first careless producer ignores.
-    #[schema(max_items = 10)]
-    #[serde(deserialize_with = "deserialize_largest_files")]
-    pub largest_files: Vec<LargestSourceFile>,
+    /// Bounded in both directions by [`LargestSourceFiles`]: a producer cannot
+    /// construct an over-long list, and an over-long one cannot be parsed.
+    #[schema(value_type = Vec<LargestSourceFile>, max_items = 10)]
+    pub largest_files: LargestSourceFiles,
     /// Files the policy could not classify. Reported rather than silently
     /// folded into a bucket.
     pub unclassified_files: u64,
@@ -441,6 +502,38 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_string(&state).unwrap(), expected);
         }
+    }
+
+    fn sample_row() -> LargestSourceFile {
+        LargestSourceFile {
+            path: "a.rs".to_owned(),
+            language: "Rust".to_owned(),
+            code_lines: 1,
+            role: CodeRole::Production,
+        }
+    }
+
+    #[test]
+    fn a_producer_cannot_construct_an_overlong_list() {
+        // The direction that actually matters: RepoLens builds this DTO far more
+        // often than it parses one. A plain Vec with a maxItems annotation would
+        // let server code emit forty thousand rows while every deserialization
+        // test still passed.
+        let too_many = vec![sample_row(); MAX_LARGEST_FILES + 1];
+        assert!(LargestSourceFiles::new(too_many).is_err());
+
+        let exact = vec![sample_row(); MAX_LARGEST_FILES];
+        assert!(LargestSourceFiles::new(exact).is_ok());
+    }
+
+    #[test]
+    fn truncation_is_available_but_must_be_asked_for() {
+        // An analyzer that ranked every file wants the head of that ranking.
+        // Explicit truncation is fine; silent truncation inside `new` would make
+        // server and client disagree while both appeared to succeed.
+        let ranked = vec![sample_row(); 40_000];
+        let bounded = LargestSourceFiles::truncated_from(ranked);
+        assert_eq!(bounded.len(), MAX_LARGEST_FILES);
     }
 
     #[test]
