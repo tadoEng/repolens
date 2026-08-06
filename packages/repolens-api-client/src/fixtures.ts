@@ -276,7 +276,7 @@ export const FAILED_REPOSITORY_ARCHIVED_FIXTURE = {
 			owner: "rust-lang",
 			name: "crates.io"
 		},
-		commit_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+		commit_sha: null,
 		state: "FAILED_PERMANENT",
 		execution: {
 			trigger_status: "SUCCEEDED",
@@ -305,7 +305,7 @@ export const FAILED_REPOSITORY_NOT_FOUND_FIXTURE = {
 			owner: "rust-lang",
 			name: "crates.io"
 		},
-		commit_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+		commit_sha: null,
 		state: "FAILED_PERMANENT",
 		execution: {
 			trigger_status: "SUCCEEDED",
@@ -334,7 +334,7 @@ export const FAILED_REPOSITORY_TOO_LARGE_FIXTURE = {
 			owner: "rust-lang",
 			name: "crates.io"
 		},
-		commit_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+		commit_sha: null,
 		state: "FAILED_PERMANENT",
 		execution: {
 			trigger_status: "SUCCEEDED",

@@ -60,6 +60,18 @@ impl Failure {
         )
     }
 
+    /// The analysis exists; its report does not yet.
+    ///
+    /// Still `404` — the resource genuinely is not there — but under its own
+    /// code, because the remedy is opposite to the one above: keep polling
+    /// rather than correct the identifier.
+    pub(crate) fn report_not_available(message: &str) -> Self {
+        Self(
+            StatusCode::NOT_FOUND,
+            ApiError::new(ErrorCode::ReportNotAvailable, message),
+        )
+    }
+
     /// The database is unreachable or misconfigured.
     ///
     /// `503` rather than `500`: the service is fine, its dependency is not, and

@@ -126,6 +126,7 @@ export const ERROR_CODE_LABELS: Readonly<Record<ErrorCode, string>> = {
 	// so they are never a stored analysis state — they arrive only as the
 	// response to a request that could not be served.
 	ANALYSIS_NOT_FOUND: 'Analysis not found',
+	REPORT_NOT_AVAILABLE: 'Report not available',
 	MALFORMED_REQUEST: 'Malformed request',
 	REQUEST_TOO_LARGE: 'Request too large',
 	REQUEST_TIMED_OUT: 'Request timed out',

@@ -128,7 +128,11 @@ async fn read(
             store::StoreError::NotFound => {
                 Failure::analysis_not_found("No analysis with that identifier.")
             }
-            other @ store::StoreError::Query(_) => {
+            // Unreachable from this query, which reads the analysis rather than
+            // its report. Matched explicitly rather than with a wildcard so a
+            // future variant fails to compile here instead of silently
+            // becoming a 503.
+            other @ (store::StoreError::Query(_) | store::StoreError::ReportNotReady) => {
                 tracing::error!(error = %other, "could not read an analysis");
                 Failure::unavailable()
             }
@@ -159,12 +163,17 @@ async fn read_report(
         .await
         .map(Json)
         .map_err(|error| match error {
-            // One message for "no such analysis" and "not finished yet". The
-            // frontend already knows which it is from `report_available` on the
-            // analysis, and a second source of that truth could disagree.
+            // Two facts, two codes. "There is no such analysis" tells a client
+            // its identifier is wrong; "the report is not ready" tells it to
+            // keep polling. One code for both was false in the second case and
+            // told a caller to give up on work that was still running.
             store::StoreError::NotFound => {
-                Failure::analysis_not_found("No report is available for that analysis.")
+                Failure::analysis_not_found("No analysis with that identifier.")
             }
+            store::StoreError::ReportNotReady => Failure::report_not_available(
+                "That analysis has not produced a report. It may still be running, or it may \
+                 have failed — the analysis itself says which.",
+            ),
             other @ store::StoreError::Query(_) => {
                 tracing::error!(error = %other, "could not read a report");
                 Failure::unavailable()

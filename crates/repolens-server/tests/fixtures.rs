@@ -84,11 +84,25 @@ fn pending(state: AnalysisState, trigger: TriggerStatus, commit: Option<&str>) -
 }
 
 /// An analysis that failed, carrying the server's retry decision.
-fn failed(state: AnalysisState, error: ApiError, retry: RetryPolicy) -> Analysis {
+///
+/// `commit` is a parameter rather than a constant because **not every failure
+/// has one**. A repository that is absent, archived, or over the metadata size
+/// ceiling is rejected during resolution, before `resolve_commit` is ever
+/// called, so those fixtures must carry `null`. Hardcoding a SHA for all of
+/// them made the executable contract describe states the pipeline cannot
+/// produce — the fixtures proved serialization and nothing about behaviour, and
+/// `null` is precisely the honest representation the contract already defines
+/// for "resolution has not produced a commit".
+fn failed(
+    state: AnalysisState,
+    error: ApiError,
+    retry: RetryPolicy,
+    commit: Option<&str>,
+) -> Analysis {
     Analysis {
         id: ANALYSIS_ID,
         repository: repository(),
-        commit_sha: Some(COMMIT_SHA.to_owned()),
+        commit_sha: commit.map(ToOwned::to_owned),
         state,
         execution: ExecutionMetadata {
             trigger_status: TriggerStatus::Succeeded,
@@ -346,6 +360,8 @@ fn failure_fixtures() -> Vec<(&'static str, Analysis)> {
             allowed: true,
             reason: None,
         },
+        // The rate limit is most often hit fetching the tree, after resolution.
+        Some(COMMIT_SHA),
     );
 
     let permanent = failed(
@@ -361,6 +377,8 @@ fn failure_fixtures() -> Vec<(&'static str, Analysis)> {
                     .to_owned(),
             ),
         },
+        // The analyzer runs on a resolved commit by definition.
+        Some(COMMIT_SHA),
     );
 
     let worker_retriable = failed(
@@ -373,6 +391,8 @@ fn failure_fixtures() -> Vec<(&'static str, Analysis)> {
             allowed: true,
             reason: None,
         },
+        // The worker stops after the report was built, so a commit exists.
+        Some(COMMIT_SHA),
     );
 
     let inaccessible = failed(
@@ -385,6 +405,9 @@ fn failure_fixtures() -> Vec<(&'static str, Analysis)> {
             allowed: true,
             reason: None,
         },
+        // Reachable both before and after resolution; the fixture shows the
+        // case where a commit had already been established.
+        Some(COMMIT_SHA),
     );
 
     vec![
@@ -426,6 +449,9 @@ fn repository_failure_fixtures() -> Vec<(&'static str, Analysis)> {
              that private repositories are not supported.",
         ),
         permanent(),
+        // Rejected during resolution: `resolve_commit` is never reached, so
+        // there is no commit and `null` is the honest value.
+        None,
     );
 
     let archived = failed(
@@ -436,6 +462,9 @@ fn repository_failure_fixtures() -> Vec<(&'static str, Analysis)> {
              development, which is worth knowing before drawing conclusions from it.",
         ),
         permanent(),
+        // Rejected during resolution: `resolve_commit` is never reached, so
+        // there is no commit and `null` is the honest value.
+        None,
     );
 
     let too_large = failed(
@@ -446,6 +475,9 @@ fn repository_failure_fixtures() -> Vec<(&'static str, Analysis)> {
              limits are ours, not a judgement about the repository.",
         ),
         permanent(),
+        // Rejected during resolution: `resolve_commit` is never reached, so
+        // there is no commit and `null` is the honest value.
+        None,
     );
 
     vec![
@@ -589,8 +621,8 @@ fn every_error_code_is_either_in_a_fixture_or_explicitly_exempt() {
     // `INVALID_REPOSITORY_URL` is decided before the row is inserted, so no
     // analysis can carry it. The other five are produced by the HTTP layer — a
     // body that is not JSON, a body over the limit, a request that ran out of
-    // time, an unknown analysis id, a panic — and `pipeline` cannot construct
-    // any of them, so no analysis can reach a terminal state carrying one. A
+    // time, an unknown analysis id, a report that is not ready, a panic — and
+    // `pipeline` cannot construct any of them, so no analysis can reach a terminal state carrying one. A
     // fixture asserting otherwise would describe a state the system cannot
     // produce. All of them are still rendered: the unknown-variant gate in the
     // client package covers every code.
@@ -601,9 +633,10 @@ fn every_error_code_is_either_in_a_fixture_or_explicitly_exempt() {
     // exceeded ingestion bound — and each is written to the row by
     // `store::fail`. Exempting them meant three terminal states a user can
     // actually hit had no proof that the frontend renders them.
-    const EXEMPT: [ErrorCode; 6] = [
+    const EXEMPT: [ErrorCode; 7] = [
         ErrorCode::InvalidRepositoryUrl,
         ErrorCode::AnalysisNotFound,
+        ErrorCode::ReportNotAvailable,
         ErrorCode::MalformedRequest,
         ErrorCode::RequestTooLarge,
         ErrorCode::RequestTimedOut,

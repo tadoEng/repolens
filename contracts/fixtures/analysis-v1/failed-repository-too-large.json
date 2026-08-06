@@ -5,7 +5,7 @@
       "owner": "rust-lang",
       "name": "crates.io"
     },
-    "commit_sha": "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+    "commit_sha": null,
     "state": "FAILED_PERMANENT",
     "execution": {
       "trigger_status": "SUCCEEDED",
