@@ -1,0 +1,39 @@
+{
+  "$comment": [
+    "Inventory of RepoLens agent-instruction files. Stable ownership metadata only:",
+    "no hashes, issue status, branch names, model versions, timestamps, or attestations.",
+    "Enforced by scripts/check-agent-contracts.mjs.",
+    "",
+    "'local_only_commands' lists required verification commands from the root file's",
+    "'## Verification' block that no CI job runs. Everything else in that block must",
+    "appear verbatim in a workflow's run: step. Scoped files use '## Commands' for",
+    "narrowing conveniences, which are not required checks and are not traced here."
+  ],
+  "contracts": [
+    { "path": "AGENTS.md", "scope": ".", "kind": "root" },
+    {
+      "path": "crates/repolens-core/AGENTS.md",
+      "scope": "crates/repolens-core",
+      "kind": "scoped"
+    },
+    {
+      "path": "crates/repolens-github/AGENTS.md",
+      "scope": "crates/repolens-github",
+      "kind": "scoped"
+    },
+    {
+      "path": "crates/repolens-server/AGENTS.md",
+      "scope": "crates/repolens-server",
+      "kind": "scoped"
+    },
+    { "path": "contracts/AGENTS.md", "scope": "contracts", "kind": "scoped" },
+    { "path": "packages/AGENTS.md", "scope": "packages", "kind": "scoped" },
+    { "path": "web/AGENTS.md", "scope": "web", "kind": "scoped" }
+  ],
+  "local_only_commands": [
+    {
+      "command": "cargo doc --workspace --no-deps",
+      "reason": "no CI job runs rustdoc, so broken intra-doc links are caught only by whoever runs it"
+    }
+  ]
+}
