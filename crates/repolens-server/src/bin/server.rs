@@ -56,6 +56,28 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Authentication. Absent configuration leaves creation closed rather than
+    // open — `api::authenticated` refuses every create with 503 when no
+    // verifier is present, which is the safe direction for a variable somebody
+    // can forget.
+    let state = if let Some(project) = config::firebase_project_id() {
+        match repolens_server::auth::FirebaseVerifier::new(&project) {
+            Ok(verifier) => {
+                tracing::info!(%project, "analysis creation requires a Firebase ID token");
+                state.with_verifier(std::sync::Arc::new(verifier))
+            }
+            Err(error) => {
+                tracing::error!(%error, "could not build the token verifier; creation stays closed");
+                state
+            }
+        }
+    } else {
+        tracing::warn!(
+            "FIREBASE_PROJECT_ID is not set, so analysis creation is closed. Reads remain              anonymous."
+        );
+        state
+    };
+
     // Configuration is read here, at the composition root, and handed to the
     // router. `api::build` deliberately reads no environment of its own.
     let cors_allowed_origin = config::cors_allowed_origin();

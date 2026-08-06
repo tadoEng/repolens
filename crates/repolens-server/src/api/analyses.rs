@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::api::authenticated::Caller;
 use crate::api::failure::{Failure, TypedJson, TypedPath};
 use crate::contract::analysis::Analysis;
 use crate::contract::error::{ApiError, ErrorCode};
@@ -42,6 +43,7 @@ pub struct CreateAnalysisRequest {
     responses(
         (status = 202, description = "Accepted; the analysis is queued", body = Analysis),
         (status = 400, description = "The URL is not a public GitHub repository", body = ApiError),
+        (status = 401, description = "No valid Firebase ID token was presented", body = ApiError),
         (status = 413, description = "The request body is over the limit", body = ApiError),
         (status = 415, description = "Content-Type is not application/json", body = ApiError),
         (status = 422, description = "The body is JSON but not this request", body = ApiError),
@@ -52,6 +54,11 @@ pub struct CreateAnalysisRequest {
 )]
 async fn create(
     State(state): State<AppState>,
+    // The gate. A handler that takes `Caller` cannot be reached without a
+    // verified Firebase ID token, and that fact is visible here rather than in
+    // a layer that names paths. Creating an analysis spends GitHub budget and
+    // database rows on someone's behalf; reading one stays anonymous.
+    _caller: Caller,
     // `TypedJson`, not `Json`: a plain `Json` rejection is answered by `axum`
     // in its own format, so a malformed body would bypass the error envelope
     // this API promises. See `super::failure`.

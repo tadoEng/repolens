@@ -56,6 +56,26 @@ pub enum ErrorCode {
     /// analysis" here is false, and it tells a client to stop polling something
     /// that may be seconds from finishing.
     ReportNotAvailable,
+    /// Creating an analysis requires a signed-in caller and none was proven.
+    ///
+    /// Covers an absent, malformed, invalid and expired credential alike. The
+    /// distinction is kept in the log, not in the response: telling an
+    /// unauthenticated caller *which* check failed helps someone probing far
+    /// more than it helps someone with a valid token.
+    ///
+    /// Not retriable as-is — the same request repeated unchanged fails
+    /// identically. The remedy is to sign in and present a fresh token.
+    Unauthenticated,
+    /// Sign-in could not be checked, so the request was refused rather than
+    /// admitted.
+    ///
+    /// Ours, not the caller's: Google's public signing keys were unreachable.
+    /// Distinct from [`Unauthenticated`](Self::Unauthenticated) because a
+    /// client that treated this as a rejected credential would sign a
+    /// perfectly valid user out over a brief outage of a dependency. Also
+    /// covers the deployment simply not having authentication configured, in
+    /// which case creation is closed rather than open.
+    AuthenticationUnavailable,
     /// The request itself could not be interpreted: a body that is not valid
     /// JSON, a missing or wrong `Content-Type`, or a path parameter that is not
     /// the type the route declares.
@@ -94,7 +114,7 @@ impl ErrorCode {
     /// Hand-maintained but *not* hand-trusted: `all_variants_are_listed` fails
     /// if this drifts from the enum. Without it, a test that iterates "all
     /// codes" would quietly iterate only the ones somebody remembered.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 16] = [
         Self::InvalidRepositoryUrl,
         Self::RepositoryNotFound,
         Self::RepositoryInaccessible,
@@ -105,6 +125,8 @@ impl ErrorCode {
         Self::AnalyzerFailedPermanent,
         Self::AnalysisNotFound,
         Self::ReportNotAvailable,
+        Self::Unauthenticated,
+        Self::AuthenticationUnavailable,
         Self::MalformedRequest,
         Self::RequestTooLarge,
         Self::RequestTimedOut,
@@ -126,6 +148,8 @@ impl ErrorCode {
                 | Self::WorkerFailedRetriable
                 // The deployment was slow, not the request wrong.
                 | Self::RequestTimedOut
+                // A dependency of ours was unreachable, not a bad credential.
+                | Self::AuthenticationUnavailable
         )
     }
 }
@@ -256,6 +280,8 @@ mod tests {
                 | ErrorCode::AnalyzerFailedPermanent
                 | ErrorCode::AnalysisNotFound
                 | ErrorCode::ReportNotAvailable
+                | ErrorCode::Unauthenticated
+                | ErrorCode::AuthenticationUnavailable
                 | ErrorCode::MalformedRequest
                 | ErrorCode::RequestTooLarge
                 | ErrorCode::RequestTimedOut

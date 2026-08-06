@@ -203,6 +203,22 @@ pub fn github_token() -> Option<SecretString> {
     Some(SecretString::from(raw))
 }
 
+/// Firebase project whose ID tokens this deployment accepts, if configured.
+///
+/// The **public** project id, not a secret: verifying an ID token needs only
+/// this and Google's published signing keys. There is deliberately no service
+/// account — the Admin SDK's private key would be a high-value credential to
+/// hold and rotate, and it buys nothing this API does.
+///
+/// Absent **closes** analysis creation rather than opening it. A deployment
+/// that forgot this variable must not serve an anonymous, public,
+/// work-creating endpoint; see `api::authenticated`.
+pub fn firebase_project_id() -> Option<String> {
+    let raw = env::var("FIREBASE_PROJECT_ID").ok()?;
+    let raw = raw.trim();
+    (!raw.is_empty()).then(|| raw.to_owned())
+}
+
 fn required(name: &'static str) -> Result<String, ConfigError> {
     match env::var(name) {
         Ok(value) if !value.trim().is_empty() => {

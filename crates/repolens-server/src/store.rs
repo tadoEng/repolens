@@ -438,6 +438,8 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::AnalyzerFailedPermanent => "ANALYZER_FAILED_PERMANENT",
         ErrorCode::AnalysisNotFound => "ANALYSIS_NOT_FOUND",
         ErrorCode::ReportNotAvailable => "REPORT_NOT_AVAILABLE",
+        ErrorCode::Unauthenticated => "UNAUTHENTICATED",
+        ErrorCode::AuthenticationUnavailable => "AUTHENTICATION_UNAVAILABLE",
         ErrorCode::MalformedRequest => "MALFORMED_REQUEST",
         ErrorCode::RequestTooLarge => "REQUEST_TOO_LARGE",
         ErrorCode::RequestTimedOut => "REQUEST_TIMED_OUT",

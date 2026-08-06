@@ -22,6 +22,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 pub mod analyses;
+mod authenticated;
 mod failure;
 
 use crate::contract;

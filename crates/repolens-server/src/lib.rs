@@ -15,6 +15,7 @@
 //!   `thiserror` errors.
 
 pub mod api;
+pub mod auth;
 pub mod config;
 pub mod contract;
 pub mod pipeline;
