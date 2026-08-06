@@ -8,11 +8,16 @@
  * width while the numbers still render. It would pass every local check and fail only
  * behind the CSP.
  *
- * CSSOM is not subject to `style-src`. `node.style.setProperty(...)` is therefore the one
- * way to hand a per-row value to CSS here, and doing it explicitly — rather than trusting
- * that a framework directive happens to compile to CSSOM — is what keeps that true after
- * the next Svelte upgrade. `e2e/report.spec.ts` fails on any `securitypolicyviolation`,
- * which is the standing guard.
+ * **The claim here is narrow, deliberately.** "CSP does not govern CSSOM" would be too
+ * strong — the policy does gate some CSSOM parsing entry points. What is actually
+ * established is smaller and sufficient: `node.style.setProperty(...)` sets a custom
+ * property under our production policy in the browsers we test, and the attribute form does
+ * not. That is measured rather than reasoned: `e2e/report.spec.ts` reads the rendered
+ * pseudo-element's width and fails on any unexpected `securitypolicyviolation`.
+ *
+ * Doing it explicitly — rather than trusting that a framework directive happens to compile
+ * to `setProperty` — is what keeps the measured behaviour the shipped behaviour after the
+ * next Svelte upgrade.
  */
 
 import type { Attachment } from 'svelte/attachments';

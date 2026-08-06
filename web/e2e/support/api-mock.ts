@@ -103,6 +103,11 @@ export function recordApiRequests(page: Page): () => ApiRequest[] {
  * because an inline `style` attribute is governed by `style-src-attr` — which falls back to
  * our `style-src 'self'` and blocks it. That failure is invisible locally and silent in
  * production: every bar would render at zero width while the numbers still looked right.
+ *
+ * The assertion is about *this* policy in *these* browsers, not a general claim that CSP
+ * leaves CSSOM alone — it does gate some CSSOM parsing entry points. What the suite
+ * establishes is the narrower fact the implementation depends on, and it establishes it by
+ * measuring the rendered bar rather than by reasoning about the spec.
  */
 export function recordCspViolations(page: Page): Promise<void> {
 	// `addInitScript` runs before any page script, so nothing can violate the policy before
