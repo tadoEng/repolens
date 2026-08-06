@@ -14,6 +14,8 @@ dist/
 
 # Test artefacts
 test-results/
+web/.vitest-attachments/
+web/src/tests/__screenshots__/
 playwright-report/
 blob-report/
 web/test-results/
