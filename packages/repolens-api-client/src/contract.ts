@@ -32,11 +32,15 @@ export type RetryPolicy = Schemas['RetryPolicy'];
 export type SystemProbeResponse = Schemas['SystemProbeResponse'];
 
 export type AnalysisState = Schemas['AnalysisState'];
+/** How a counted file was classified by role. Structural evidence, not a quality score. */
+export type CodeRole = Schemas['CodeRole'];
 export type Confidence = Schemas['Confidence'];
 export type ErrorCode = Schemas['ErrorCode'];
 export type EvidenceKind = Schemas['EvidenceKind'];
 export type FindingCategory = Schemas['FindingCategory'];
 export type FindingState = Schemas['FindingState'];
+export type LargestSourceFile = Schemas['LargestSourceFile'];
+export type RoleLineCount = Schemas['RoleLineCount'];
 export type ProbeStatus = Schemas['ProbeStatus'];
 export type Severity = Schemas['Severity'];
 export type TriggerStatus = Schemas['TriggerStatus'];
