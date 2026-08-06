@@ -7,14 +7,68 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# No `reqwest` yet — the HTTP implementation lands at issue #4 (plan §4.3).
-# This crate currently defines the boundary the rest of the workspace codes
-# against, so that the concrete client can be added without moving anything.
+# Forbidden by design: axum, sqlx, repolens-server. This crate retrieves
+# evidence and knows nothing about how it is served or stored. See
+# docs/ARCHITECTURE.md.
 [dependencies]
 repolens-core = { workspace = true }
+
+# `reqwest` rather than an SDK: the controls that matter at this boundary — the
+# version header on every request, rate-limit header parsing, an explicit
+# redirect policy, response-size caps, bounded streaming — are exactly what an
+# SDK abstracts away.
+#
+# Declared here rather than inherited, because the workspace entry requests the
+# feature `rustls-tls`, which 0.12 had and 0.13 renamed to `rustls`. Cargo unions
+# features and cannot subtract one, so inheriting is not merely wrong here, it is
+# unfixable from this manifest. Revert to `{ workspace = true }` once the
+# workspace entry names features that 0.13 actually has.
+#
+# `json` is deliberately absent: `Response::json` reads an unbounded body, and
+# every response here is read through the size cap first and parsed from the
+# resulting slice.
+reqwest = { workspace = true }
+# `Url::origin` is the credential-scoping comparison, so the type is used
+# directly rather than through `reqwest`'s re-export.
+url = { workspace = true }
+# `Response::bytes_stream` yields a `Stream`, which needs `StreamExt` to drive.
+futures-util = { workspace = true }
+
+# Content digests for retrieved evidence. The hex spelling is
+# `repolens_core::ContentDigest`'s to own, so that the end producing digests and
+# the end publishing them cannot drift apart.
+sha2 = { workspace = true }
+
+# The analysis token. Never `String`: a plain token can be printed by a derived
+# `Debug` on any struct that transitively holds it.
+secrecy = { workspace = true }
+
 serde = { workspace = true }
+# Parsing from a slice that has already passed the size cap, rather than from a
+# response body of unknown length.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
-time = { workspace = true }
+
+# `fs` and `io-util` beyond the workspace set, because the archive is streamed
+# to a path rather than buffered. Cargo unions features, so this adds to the
+# workspace declaration rather than replacing it.
+tokio = { workspace = true, features = ["fs", "io-util"] }
+
+# `serde-well-known` for RFC 3339 commit timestamps, which GitHub returns as
+# strings and `time` cannot parse without it.
+time = { workspace = true, features = ["serde-well-known"] }
+
+# Tests run against a local mock rather than GitHub: a suite that needs the
+# network is a suite that fails for reasons unrelated to the code, and rate-limit
+# exhaustion cannot be provoked against the real API on purpose.
+[dev-dependencies]
+wiremock = "0.6"
+
+# `net`, for the few lines of raw HTTP that answer with a body of undeclared
+# length. A canned-response mock always knows its own `Content-Length`, and the
+# archive failure that matters most — a cap enforced against a body that is
+# still arriving — only exists when it does not.
+tokio = { workspace = true, features = ["net"] }
 
 [lints]
 workspace = true
