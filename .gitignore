@@ -43,4 +43,7 @@ Thumbs.db
 # Scoped to skills/ so a genuine .claude/settings.json can still be committed.
 .agents/
 .claude/skills/
+# Agent worktrees are separate checkouts of this repository; committing them
+# would embed a repo inside itself.
+.claude/worktrees/
 skills-lock.json
