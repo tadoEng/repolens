@@ -49,10 +49,17 @@ as a description of `master`.
 | `DATABASE_URL`        | yes      | API and ordinary worker transactions, pooled endpoint |
 | `DATABASE_DIRECT_URL` | yes      | migrations and session-dependent administration, direct endpoint |
 | `GH_ANALYSIS_TOKEN`   | no       | raises GitHub's rate-limit ceiling               |
+| `FIREBASE_PROJECT_ID` | no       | verifying ID tokens on analysis creation         |
 
 Both database URLs should carry `sslmode=verify-full`; `config.rs` warns at
 startup when a non-local URL does not. `CORS_ALLOWED_ORIGIN` names one exact
 origin or the layer is not applied at all.
+
+`FIREBASE_PROJECT_ID` is the **public** project id — verification needs only
+that and Google's published keys, so there is no service account to hold or
+rotate. Absent, it **closes** creation: every `POST /api/v1/analyses` answers
+`503 AUTHENTICATION_UNAVAILABLE`, because a forgotten variable must not leave an
+anonymous, public, work-creating endpoint open. Reads stay anonymous either way.
 
 `GH_ANALYSIS_TOKEN` is optional and its absence is not a failure. The client is
 built either way, because only public repositories are analyzed, so the token
@@ -90,13 +97,9 @@ cargo run --bin migrate
 ```
 
 Queries are written with runtime `sqlx::query`, **not** the `query!` macro, so
-there is no `.sqlx/` offline cache and nothing to regenerate. Compile-time
-verification needs either a live database at build time or a committed cache
-that every query change must refresh — friction this query set has not earned,
-and a stale cache fails CI in a way that reads as a broken build rather than a
-missed step. The trade is deliberate and is one of the stack findings #10
-reports on; `cargo sqlx prepare --workspace` is what would generate the cache if
-the query set ever earns it.
+there is no `.sqlx/` offline cache and nothing to regenerate. The trade, and
+what would have to change to earn one, is recorded in
+[`migrations/README.md`](../../migrations/README.md).
 
 Migrations are authored with `sqlx migrate add <name>`, are append-only once
 deployed, and run over the direct endpoint via `cargo run --bin migrate`.

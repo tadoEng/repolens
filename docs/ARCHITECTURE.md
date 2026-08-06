@@ -70,8 +70,9 @@ token verification, the Cloud Run Jobs execution trigger, and
 and the exclusion policy.
 
 That list is the crate's charter, not an inventory of its contents. The API, the
-`analysis-v1` DTOs, and the three binaries exist today; the rest arrives with the
-issue that needs it, and belongs here rather than in a fourth crate when it does.
+`analysis-v1` DTOs, the three binaries, and Firebase ID token verification exist
+today; the rest arrives with the issue that needs it, and belongs here rather
+than in a fourth crate when it does.
 
 ## Forbidden dependency directions
 
@@ -134,6 +135,33 @@ the counted-file manifest, and the normalized result.
 Three binaries, one container image. Cloud Run overrides the entrypoint per
 resource, so the Service and the Job share a single build and a single Artifact
 Registry repository.
+
+**Cloud Run is the platform this split was designed against. Render is where the
+API is deployed, and Cloud Run is not coming back.**
+
+The reason is the thesis itself: Google Cloud requires a billing account with a
+card before anything runs, including inside its free tier. RepoLens exists partly
+to answer whether this stack runs on genuinely free infrastructure, so a card
+requirement disqualifies the platform rather than inconveniencing it. Render's
+free tier needs no card. Every Cloud Run reference below and in the crate
+documentation therefore describes the *design's* original target, not the host;
+[`DEPLOYMENT.md`](DEPLOYMENT.md) records the deployment as it actually is.
+
+Most of the split survives the move unchanged — three roles, one image, an
+entrypoint chosen per resource is a property of the image, not of Cloud Run. Two
+things do not, and both belong to #9 and #7 rather than to this section:
+
+- **A free Render web service spins down when idle** and takes tens of seconds to
+  wake. Cold starts stop being a number to measure and become something a reader
+  of a shared report URL experiences.
+- **`worker` may have nowhere free to run.** Cloud Run Jobs was the mechanism:
+  one execution per analysis, started on demand, billed only while running.
+  Render's equivalents — Background Workers and Cron Jobs — are, as far as this
+  has been checked, paid-only. If that holds, #7 cannot be "a Job claims a
+  lease"; it has to be "the web service claims a lease", which changes the
+  shutdown and lease-renewal story the run-once design was chosen to avoid.
+  **This is unverified and is exactly what #9 is for.** It is written down here
+  because discovering it while implementing #7 would be discovering it too late.
 
 | Binary    | Role                                                                                                                       |
 | --------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -350,6 +378,26 @@ document too.
   allowlist against a deployed origin, and cold-start behaviour stay unproven
   until something is actually deployed. `vite preview` is not Cloudflare and
   cannot stand in for it.
+- **No account model behind the one authenticated route.** Creating an analysis
+  requires a verified Firebase ID token; reading progress and reading a report
+  stay anonymous, because the unguessable analysis id *is* the capability, and
+  that is what lets a report be shared by URL with someone who has never signed
+  in. What does not exist is everything that usually follows sign-in: no
+  accounts table, no per-user history, no owner column on an analysis, and no
+  profile beyond the `sub` claim the verifier reads — a field nothing consumes
+  is a field that leaks into a log.
+
+  There is deliberately no service-account credential either. Verifying an ID
+  token needs Google's public signing keys and the public project id, so the
+  Admin SDK's private key would be a high-value secret to hold and rotate in
+  exchange for operations RepoLens never performs. What follows from that is the
+  configuration rule: absent `FIREBASE_PROJECT_ID`, creation is **closed**, not
+  open. A deployment that forgot the variable must not serve an anonymous,
+  public, work-creating endpoint, and the inverted default makes a read-only
+  public deployment a supported configuration rather than a failure. Refusing to
+  start would be the other safe choice, but it would also block local frontend
+  work against a server with no Firebase project, and the reads are what that
+  work needs.
 - **No CORS by default.** A layer is applied only when `CORS_ALLOWED_ORIGIN`
   names one exact origin, and the origin is passed into `api::build` rather than
   read inside it — reading configuration in the router builder is what made the

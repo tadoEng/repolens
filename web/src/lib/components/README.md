@@ -4,6 +4,7 @@
 components/
 ├── primitives/   Button · StatusChip · SeverityBadge · ConfidenceBadge · CopyableSha
 │                 Disclosure · ExternalCommitLink · ScrollRegion
+├── submit/       AuthGate · SubmitErrorSummary
 ├── analysis/     AnalysisIdentityHeader · ProgressTimeline · FailureNotice · RetryNotice
 └── report/       ReportHeader · ReportNav · ReportSection · OverviewSection
                   CategoryFindings · FindingsIndex · FindingCard · EvidenceExpander
@@ -85,6 +86,20 @@ Each of these exists because the obvious alternative ships a specific defect.
 - **A failure moves focus to its own heading.** The route resolves asynchronously, so without
   it a keyboard user is left on `<body>` while the failure notice renders below the fold.
   Once per analysis, and only when nothing else already holds focus.
+- **`AuthGate` renders four states, and `unknown` is one of them.** Firebase restores a
+  session asynchronously, so "not yet known" is not "signed out": collapsing the two flashes
+  a sign-in button at somebody who is already signed in, on every page load. `unknown` gets a
+  placeholder and no control; the gate reserves a minimum height so the resolved state does
+  not shove the form down the page. `unavailable` is likewise **not an error** — a deployment
+  with no Firebase project is a read-only demo, and only creation is closed.
+- **`SubmitErrorSummary` keeps `rejected` and `unreachable` apart.** A refusal carries a
+  status, a code and the server's own sentence; a transport failure carries none of those and
+  must never be worded as a missing or invalid repository. It renders the server's `message`
+  verbatim rather than paraphrasing — the API is the only party that knows why it refused —
+  and takes its code label from `@repolens/api-client`, never from a table of its own.
+- **`Button` defaults to `type="button"`, and `submit` is opt-in.** The HTML default is
+  `submit`, which makes every unlabelled button inside a `<form>` a submit button. Only the
+  form's one real submit control passes `type="submit"`; nothing acquires it by placement.
 
 ## The Bits UI rule
 
@@ -124,12 +139,22 @@ approve whatever it happened to render, regression included.
 pnpm --filter @repolens/web exec playwright test visual.spec.ts --update-snapshots
 ```
 
+## The submit form
+
+Built now that both blockers have landed: the Firebase gate (#13) and
+`POST /api/v1/analyses` in the generated contract (#6). It is deliberately **not** the
+four-component shape the plan sketched (`RepositorySubmitForm → UrlField · ScopeNote ·
+AuthGate · SubmitErrorSummary`). The route owns the form, the field and the scope note,
+because the field is one `<label>` and one `<input>` and the note is one sentence — wrapping
+either in a component buys indirection and no seam. The two pieces with real state to render
+are components, for the usual reason: `AuthGate` and `SubmitErrorSummary` cover states that
+are awkward to reach through a network and trivial to reach through a prop.
+
+The route, not a component, performs the transport — `components/` never does.
+
 ## Still to build
 
-The submit form (`RepositorySubmitForm → UrlField · ScopeNote · AuthGate ·
-SubmitErrorSummary`) is blocked on the Firebase auth gate (#13) and on the
-analysis-creation request contract, neither of which exists yet.
-
-Retry returns with #6 and #13: a generated, authenticated operation with request, response
-and error schemas, declared idempotency semantics, an MSW handler, and a browser test that
-clicks it and proves focus lands somewhere deterministic afterwards.
+Retry returns with a generated, authenticated operation carrying request, response and error
+schemas, declared idempotency semantics, an MSW handler, and a browser test that clicks it
+and proves focus lands somewhere deterministic afterwards. Creation now has the credential;
+retry still has no operation in the contract.

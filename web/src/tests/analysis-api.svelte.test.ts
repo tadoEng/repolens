@@ -1,9 +1,13 @@
-import { COMPLETED_REPORT_FIXTURE, FAILED_RETRIABLE_FIXTURE } from '@repolens/api-client';
+import {
+	COMPLETED_REPORT_FIXTURE,
+	FAILED_RETRIABLE_FIXTURE,
+	QUEUED_FIXTURE
+} from '@repolens/api-client';
 import { analysisScenario, createMockFetch, type RequestHandler } from '@repolens/msw';
 import { afterEach, expect, test, vi } from 'vitest';
 
 import * as transport from '$lib/api/analysis';
-import { fetchAnalysis, fetchReport } from '$lib/api/analysis';
+import { createAnalysis, fetchAnalysis, fetchReport } from '$lib/api/analysis';
 
 /**
  * The transport seam, against the shared MSW handlers.
@@ -19,10 +23,10 @@ import { fetchAnalysis, fetchReport } from '$lib/api/analysis';
  * that asks for a different URL than the contract's fails here loudly, instead of shipping
  * and reporting "analysis not found".
  *
- * Every read through this module is a `GET`, and that is a boundary rather than a
- * coincidence — the last test asserts the module exposes no mutation, now that the generated
- * `paths` publishes `POST /api/v1/analyses` and calling it would only be a compile error
- * away.
+ * The mutation boundary is asserted at the end. It used to read "this module exposes no
+ * mutation"; `createAnalysis` has since landed with the credential that claim was waiting
+ * for (#13), so it now reads "exactly one, and it is that one" — which still fails the day a
+ * second appears.
  */
 
 const ANALYSIS_ID = COMPLETED_REPORT_FIXTURE.analysis.id;
@@ -210,25 +214,71 @@ test('an id with URL-significant characters is encoded, not interpolated raw', a
 	expect(result.kind).toBe('ok');
 });
 
-test('the module exposes no mutation, and every request it makes is a GET', async () => {
+test('the module exposes exactly one mutation, and it is the authenticated create', async () => {
 	/*
 	 * The blocker this locks down. A hand-written `POST …/retry` shipped here once: absent
 	 * from OpenAPI, absent from the MSW handlers, carrying no Firebase credential, with no
-	 * declared idempotency semantics — and it *starts paid work*. The generated `paths` now
-	 * publishes `POST /api/v1/analyses`, so the compiler no longer stands in the way of
-	 * re-adding one; this test does.
+	 * declared idempotency semantics — and it *starts paid work*.
+	 *
+	 * Creation has since arrived with the three things that one lacked (#6, #13): a generated
+	 * operation in `paths`, a Firebase ID token attached to the request, and an API that
+	 * verifies it server-side and refuses without it. So the claim is no longer "nothing here
+	 * mutates" — that would now be false, and a test asserting it would only be deleted. It
+	 * is "exactly one thing does, and it is that one".
 	 *
 	 * Asserted over the module's own surface rather than by naming the function that was
-	 * deleted, so re-adding it under any name fails here.
+	 * deleted, so a *second* mutation added under any name — a retry, a cancel, a delete —
+	 * fails here rather than passing review as a small edit.
 	 */
 	const exported = Object.keys(transport);
 	expect(exported).not.toContain('retryPath');
-	expect(exported.filter((name) => /retry|create|submit|cancel|delete/i.test(name))).toEqual([]);
+	expect(exported.filter((name) => /retry|create|submit|cancel|delete/i.test(name))).toEqual([
+		'createAnalysis'
+	]);
+});
 
+test('every read this module performs is a GET', async () => {
 	const issued = recordRequests(analysisScenario('completed-report'));
 
 	await fetchAnalysis(ANALYSIS_ID);
 	await fetchReport(ANALYSIS_ID);
 
 	expect(issued.map((request) => request.method)).toEqual(['GET', 'GET']);
+});
+
+test('createAnalysis posts the repository URL to the path the contract publishes', async () => {
+	/*
+	 * The URL and the body both come from the generated client — `api.POST` is typed against
+	 * `paths`, so a path the API does not publish and a body field it does not accept are
+	 * both compile errors. What that does *not* establish is that the operation named here is
+	 * the create one, which is what this asserts, on the wire.
+	 *
+	 * Answered from `QUEUED_FIXTURE` rather than a literal: a created analysis is queued, and
+	 * the fixture is the contract's own statement of what that looks like.
+	 */
+	const issued: Request[] = [];
+	net.state.dispatch = (input, init) => {
+		issued.push(
+			input instanceof Request && init === undefined ? input.clone() : new Request(input, init)
+		);
+		return Promise.resolve(
+			new Response(JSON.stringify(QUEUED_FIXTURE.analysis), {
+				status: 202,
+				headers: { 'content-type': 'application/json' }
+			})
+		);
+	};
+
+	const result = await createAnalysis('https://github.com/rust-lang/crates.io');
+
+	const request = onlyRequest(issued);
+	expect(request.method).toBe('POST');
+	expect(new URL(request.url).pathname).toBe('/api/v1/analyses');
+	expect(await request.json()).toEqual({
+		repository_url: 'https://github.com/rust-lang/crates.io'
+	});
+
+	expect(result.kind).toBe('ok');
+	if (result.kind !== 'ok') return;
+	expect(result.value).toEqual(QUEUED_FIXTURE.analysis);
 });

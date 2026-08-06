@@ -41,6 +41,68 @@ if (!configuredOrigin && isProductionBuild) {
 
 const apiOrigin = configuredOrigin ?? LOCAL_API_ORIGIN;
 
+/*
+ * Firebase browser configuration (#13).
+ *
+ * Every one of these is public by design — the `PUBLIC_` prefix is the whole
+ * statement. A Firebase web API key identifies a project; it authorizes nothing.
+ * What actually gates creation is the ID token this API verifies server-side.
+ *
+ * Defaulted to empty rather than required, unlike `PUBLIC_API_ORIGIN`. A
+ * deployment without a Firebase project is a **read-only demo**: reports are
+ * public, the submit control says sign-in is unavailable, and the API refuses
+ * creation anyway. Making these mandatory would turn that honest configuration
+ * into a build failure.
+ */
+const firebase = {
+	apiKey: process.env.PUBLIC_FIREBASE_API_KEY ?? '',
+	authDomain: process.env.PUBLIC_FIREBASE_AUTH_DOMAIN ?? '',
+	projectId: process.env.PUBLIC_FIREBASE_PROJECT_ID ?? '',
+	appId: process.env.PUBLIC_FIREBASE_APP_ID ?? ''
+};
+
+for (const [key, value] of Object.entries(firebase)) {
+	const name = `PUBLIC_FIREBASE_${key.replace(/[A-Z]/g, (c) => `_${c}`).toUpperCase()}`;
+	// `$env/static/public` inlines whatever is on process.env at build time, so
+	// setting the empty string here is what lets the app import these
+	// unconditionally and decide at runtime whether sign-in is available.
+	process.env[name] = value;
+}
+
+const signInConfigured = Boolean(firebase.apiKey && firebase.authDomain);
+
+if (!signInConfigured) {
+	console.warn(
+		'[repolens] Firebase is not configured; the build will ship without sign-in and the ' +
+			'submit control will say so. Reports remain publicly viewable.'
+	);
+}
+
+/*
+ * What Firebase Auth needs at the network layer, and nothing more.
+ *
+ * Added only when sign-in is configured, so a read-only build keeps the tighter
+ * policy rather than permitting hosts it will never contact.
+ *
+ * `signInWithPopup` opens `https://<authDomain>/__/auth/handler`, which is a
+ * separate browsing context and not governed by this document's CSP — but the
+ * SDK also talks to Identity Toolkit and the secure-token service from *this*
+ * document, and renders a helper iframe from the auth domain. Omitting any of
+ * these produces a sign-in button that does nothing and reports a CSP violation
+ * to the console, which is exactly the class of failure that only appears after
+ * deploy.
+ */
+const authConnectSrc = signInConfigured
+	? [
+			'https://identitytoolkit.googleapis.com',
+			'https://securetoken.googleapis.com',
+			`https://${firebase.authDomain}`
+		]
+	: [];
+const authFrameSrc = signInConfigured
+	? [`https://${firebase.authDomain}`, 'https://accounts.google.com']
+	: [];
+
 if (!configuredOrigin) {
 	console.warn(
 		`[repolens] PUBLIC_API_ORIGIN is not set; using ${LOCAL_API_ORIGIN} for development. ` +
@@ -146,7 +208,8 @@ const config = {
 				'style-src': ['self'],
 				'img-src': ['self', 'data:'],
 				'font-src': ['self'],
-				'connect-src': ['self', apiOrigin],
+				'connect-src': ['self', apiOrigin, ...authConnectSrc],
+				'frame-src': authFrameSrc.length > 0 ? authFrameSrc : ['none'],
 				'base-uri': ['self'],
 				'form-action': ['self'],
 				'object-src': ['none']
