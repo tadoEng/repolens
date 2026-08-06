@@ -1,9 +1,9 @@
 # Fixtures
 
-Empty on purpose.
+Still empty on purpose. **Nothing is authored here.**
 
-Fixture content is owned by **issue #14**, which defines the `analysis-v1` and `report-v1`
-executable contracts and publishes them under `contracts/fixtures/analysis-v1/`:
+Fixture content is owned by **issue #14** and lives in `contracts/fixtures/analysis-v1/`,
+generated from the Rust DTOs:
 
 ```
 contracts/fixtures/analysis-v1/
@@ -12,35 +12,30 @@ contracts/fixtures/analysis-v1/
 └── completed-report.json  └── loc-unavailable.json
 ```
 
-The pipeline those fixtures sit in runs one way, and only one way:
+The pipeline they sit in runs one way, and only one way:
 
 ```
 Rust DTOs → OpenAPI → generated TypeScript → fixture type-check → MSW → Svelte
 ```
 
-So a fixture written here first would be a hand-authored guess at a response shape,
-type-checked against nothing. That is the drift the pipeline exists to eliminate, and it is
-worse than having no fixtures at all — a UI built on an invented fixture passes review, ships,
-and fails against the real API.
+So a fixture written here would be a hand-authored guess at a response shape, type-checked
+against nothing. That is the drift the pipeline exists to eliminate, and it is worse than
+having no fixtures at all — a UI built on an invented fixture passes review, ships, and
+fails against the real API.
 
-## What lands here at #14
+## Where the fixtures actually enter TypeScript
 
-Symlinks or a small loader pointing at `contracts/fixtures/analysis-v1/`, plus any
-frontend-only variants that the API cannot produce (an unknown enum variant, for instance,
-which the statically deployed frontend has to survive).
+`@repolens/api-client` generates `src/fixtures.ts` from the JSON above and exports the
+result as `ANALYSIS_FIXTURES`. `analysis-handlers.ts` imports that. The binding is
+generated rather than written because TypeScript widens string literals in JSON modules —
+`"state": "QUEUED"` would arrive as `string`, retiring the enum check the unknown-variant
+policy depends on — and it is regenerated and compared on every test run, so it cannot
+drift from the JSON.
 
-Each fixture must exercise something the UI cannot render honestly without:
+## What would still justify a file here
 
-- nullable `commit_sha` during `QUEUED` / `RESOLVING` — the header shows "resolving…", not a
-  blank
-- stable machine error codes, `{code, message, retry_after_seconds?}`, `code` an OpenAPI enum
-- explicit `retry: {allowed, reason?}` — never inferred from a state name
-- deterministic finding order, decided by the server
-- bounded evidence excerpts with `truncated` and `digest`
-- report-level `limitations[]`, not only per-finding
-- `analyzer_version` and `ruleset_version`
-- a polling hint (`poll_after_ms`, ideally ETag/304)
-- structured LOC exclusions: `{path_or_rule, reason, matched_rule, file_count, bytes}`
-- nullable `LineCountSummary` — absent composition is `UNABLE_TO_VERIFY`, a designed state,
-  not an error
-- an unknown enum variant, to prove the deployed frontend degrades instead of crashing
+Only a case the API cannot produce and the fixtures therefore cannot contain: an **unknown
+enum variant**, to prove a deployed bundle degrades instead of crashing when the API gains
+a variant months later. That case is currently covered without a fixture, by
+`unknown-variant.test.ts` in `@repolens/api-client`, which feeds the describe functions a
+variant no schema declares.

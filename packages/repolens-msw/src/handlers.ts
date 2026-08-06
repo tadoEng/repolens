@@ -6,43 +6,27 @@
  * mode that lets the frontend be developed against a working API without the backend
  * running.
  *
- * **Only `GET /api/v1/system/probe` is handled, and that is deliberate.**
- *
- * The probe is the one endpoint whose contract has actually landed, so it is the one
- * endpoint that can be mocked without inventing a response shape. The analysis and report
- * endpoints wait for the executable fixtures at issue #14, because an invented mock is
- * worse than no mock: it lets a UI be built, reviewed, and merged against a contract that
- * never existed, and the mismatch only surfaces against the real API.
+ * This module handles `GET /api/v1/system/probe`. The analysis and report endpoints live in
+ * `analysis-handlers.ts`, which serves the executable fixtures from #14 rather than bodies
+ * written out here — an invented mock is worse than no mock, because it lets a UI be built,
+ * reviewed, and merged against a contract that never existed.
  *
  * Every body below is typed as a schema from the *generated* client rather than written
  * out by hand. That is the entire point of this package — when the Rust DTOs change, the
  * regenerated schema breaks these mocks at compile time instead of letting them drift.
  */
 
-import type { components } from '@repolens/api-client';
+import type { SystemProbeResponse } from '@repolens/api-client';
 import { HttpResponse, http, type RequestHandler } from 'msw';
 
-type SystemProbeResponse = components['schemas']['SystemProbeResponse'];
+import { apiUrl, type HandlerOptions } from './api-url';
 
 const SYSTEM_PROBE_PATH = '/api/v1/system/probe';
 
-export interface HandlerOptions {
-	/**
-	 * Origin the handlers intercept, matching `PUBLIC_API_ORIGIN`.
-	 *
-	 * Passed in rather than read from the environment so a test can point handlers at a
-	 * different origin without mutating process state.
-	 */
-	apiOrigin?: string;
-}
+export type { HandlerOptions };
 
-function systemProbeUrl({ apiOrigin }: HandlerOptions): string {
-	// A leading `*` matches any origin. That is the right default: a component test knows
-	// which endpoint it is mocking but has no business knowing which origin the app was
-	// built against, and pinning one here would make the mocks fail for the wrong reason.
-	return apiOrigin
-		? `${apiOrigin.replace(/\/+$/, '')}${SYSTEM_PROBE_PATH}`
-		: `*${SYSTEM_PROBE_PATH}`;
+function systemProbeUrl(options: HandlerOptions): string {
+	return apiUrl(SYSTEM_PROBE_PATH, options);
 }
 
 /** Every dependency answered: the shape a healthy deployment returns. */

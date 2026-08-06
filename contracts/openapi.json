@@ -53,6 +53,626 @@
   },
   "components": {
     "schemas": {
+      "Analysis": {
+        "type": "object",
+        "description": "One analysis run.",
+        "required": [
+          "id",
+          "repository",
+          "commit_sha",
+          "state",
+          "execution",
+          "retry",
+          "created_at",
+          "updated_at",
+          "report_available"
+        ],
+        "properties": {
+          "commit_sha": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The exact commit, once resolved.\n\n**Null during `QUEUED` and `RESOLVING`** — there genuinely is no commit\nyet. Required-but-nullable rather than optional, so a consumer cannot\nforget the case: the field is always present, its value is not."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the analysis was created."
+          },
+          "error": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ApiError",
+                "description": "Why it failed. Present only in a failed state."
+              }
+            ]
+          },
+          "execution": {
+            "$ref": "#/components/schemas/ExecutionMetadata",
+            "description": "Scheduling facts, kept out of `state`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable identifier. `UUIDv7`: time-ordered for index locality, and with 74\nrandom bits it remains unguessable, which is what allows anonymous\nprogress viewing by URL."
+          },
+          "poll_after_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How long the client should wait before polling again.\n\nServer-supplied so the interval can widen as an analysis ages, and so a\nhardcoded frontend value cannot multiply cold starts and cost. Absent in\nterminal states — there is nothing left to poll for.",
+            "minimum": 0
+          },
+          "report_available": {
+            "type": "boolean",
+            "description": "Whether `GET /reports/{id}` will return a report.\n\nExplicit rather than `state == COMPLETED`, because report availability\nand analysis completion are separate facts once reports are retained,\npruned, or regenerated under a newer ruleset."
+          },
+          "repository": {
+            "$ref": "#/components/schemas/RepositoryIdentity",
+            "description": "Owner and name, known from creation."
+          },
+          "retry": {
+            "$ref": "#/components/schemas/RetryPolicy",
+            "description": "Server's decision on whether a retry is currently permitted."
+          },
+          "state": {
+            "$ref": "#/components/schemas/AnalysisState",
+            "description": "Where the analysis has reached."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it last changed state. Distinct from `created_at` so a UI can show\n\"stuck for 20 minutes\" rather than only \"started 20 minutes ago\"."
+          }
+        }
+      },
+      "AnalysisState": {
+        "type": "string",
+        "description": "Where an analysis has reached.\n\nOrdered as the work actually proceeds, so a UI can render a checklist by\nposition without a second table mapping states to steps.\n\nInfrastructure state is deliberately absent — there is no `TRIGGERING` or\n`WAITING_FOR_WORKER`. Whether a Cloud Run Job execution was accepted is a\nproperty of the *execution*, not of the analysis, and mixing them would mean\nevery consumer of this enum had to learn how the work is scheduled. See\n[`ExecutionMetadata`].",
+        "enum": [
+          "QUEUED",
+          "RESOLVING",
+          "COLLECTING",
+          "ANALYZING",
+          "BUILDING_REPORT",
+          "COMPLETED",
+          "FAILED_RETRIABLE",
+          "FAILED_PERMANENT"
+        ]
+      },
+      "ApiError": {
+        "type": "object",
+        "description": "A failure, as the browser receives it.\n\nFields are private and deserialization is validated, so\n`ANALYZER_FAILED_PERMANENT` carrying a 900-second countdown cannot be\nconstructed *or* parsed. A safe constructor alone would not achieve that:\nderived `Deserialize` would still accept the combination off the wire, and a\npublic field would still accept it in Rust.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode",
+            "description": "Stable machine code. Switch on this, never on `message`."
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable explanation. Safe to display, and deliberately free of\ninternal identifiers, hostnames, and credentials — this string crosses\ninto a browser."
+          },
+          "retry_after_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How long to wait before retrying, when that is actually knowable.\n\nAbsent rather than zero when unknown: a UI that renders \"retry in 0s\"\nfrom a missing value is worse than one that renders no countdown at all.",
+            "minimum": 0
+          }
+        }
+      },
+      "AreaLineCount": {
+        "type": "object",
+        "description": "Line counts for one top-level area of the repository.",
+        "required": [
+          "area",
+          "code_lines"
+        ],
+        "properties": {
+          "area": {
+            "type": "string",
+            "description": "Top-level path, e.g. `crates/` or `web/`."
+          },
+          "code_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lines of code in it.",
+            "minimum": 0
+          }
+        }
+      },
+      "CodeRole": {
+        "type": "string",
+        "description": "How a counted file was classified by role.\n\nStructural evidence only. This is **not** a test-quality score: a repository\nwith little test code may be thoroughly tested elsewhere, and a repository\nwith a great deal of it may test the wrong things.",
+        "enum": [
+          "PRODUCTION",
+          "TEST",
+          "GENERATED",
+          "TOOLING"
+        ]
+      },
+      "CompositionExclusion": {
+        "type": "object",
+        "description": "Why some files were left out of the counts.\n\nStructured rather than prose so the UI can make the ledger expandable. LOC\nmisleads exactly when nobody can see what was excluded.",
+        "required": [
+          "path_or_rule",
+          "reason",
+          "matched_rule",
+          "file_count",
+          "bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many bytes it covered.",
+            "minimum": 0
+          },
+          "file_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many files it covered.",
+            "minimum": 0
+          },
+          "matched_rule": {
+            "type": "string",
+            "description": "Which policy rule matched, so the decision is traceable."
+          },
+          "path_or_rule": {
+            "type": "string",
+            "description": "Path or glob that was excluded."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, in words."
+          }
+        }
+      },
+      "Confidence": {
+        "type": "string",
+        "description": "Strength of the evidence. Independent of [`Severity`].",
+        "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH"
+        ]
+      },
+      "ErrorCode": {
+        "type": "string",
+        "description": "Why a request or an analysis failed.\n\n`SCREAMING_SNAKE_CASE` per the settled convention (#14). The set is closed on\npurpose — see [`super::UNKNOWN_VARIANT_POLICY`] for what the frontend does\nwhen a future backend adds one it has never seen.",
+        "enum": [
+          "INVALID_REPOSITORY_URL",
+          "REPOSITORY_NOT_FOUND",
+          "REPOSITORY_INACCESSIBLE",
+          "REPOSITORY_ARCHIVED",
+          "REPOSITORY_TOO_LARGE",
+          "RATE_LIMITED",
+          "WORKER_FAILED_RETRIABLE",
+          "ANALYZER_FAILED_PERMANENT"
+        ]
+      },
+      "Evidence": {
+        "type": "object",
+        "description": "One checkable fact supporting a finding.\n\nEvery excerpt is truncated **server-side**. The frontend must never be the\nthing that prevents a five-megabyte payload: by the time the browser could\ndecide, the bytes have already crossed the network and been parsed.",
+        "required": [
+          "kind",
+          "truncated"
+        ],
+        "properties": {
+          "digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Digest of the **full** source content, not the excerpt — which is what\nmakes the evidence checkable against the commit.\n\nTyped rather than a bare string so the format is owned in one place. The\ningestion boundary produces it and this contract publishes it; two\nindependent spellings would not surface until integration, and would\nsurface as evidence that silently fails to match the commit it pins.",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "excerpt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Short excerpt, already truncated to the server's cap."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EvidenceKind",
+            "description": "What sort of evidence this is."
+          },
+          "line_range": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LineRange",
+                "description": "Which lines the excerpt came from."
+              }
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Repository-relative path, when the evidence has one."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "Whether `excerpt` was cut short. Required so the UI can say \"truncated\"\nrather than implying the file ends there."
+          }
+        }
+      },
+      "EvidenceKind": {
+        "type": "string",
+        "description": "What kind of thing a piece of evidence is.",
+        "enum": [
+          "FILE_PRESENCE",
+          "FILE_EXCERPT",
+          "DEPENDENCY_ENTRY",
+          "WORKFLOW_DEFINITION",
+          "STATISTIC",
+          "REPOSITORY_METADATA"
+        ]
+      },
+      "ExecutionMetadata": {
+        "type": "object",
+        "description": "Scheduling facts about an analysis.",
+        "required": [
+          "trigger_status"
+        ],
+        "properties": {
+          "execution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Runner-assigned execution identifier, for correlating logs."
+          },
+          "trigger_status": {
+            "$ref": "#/components/schemas/TriggerStatus",
+            "description": "Whether the work was successfully handed to a runner."
+          },
+          "triggered_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the trigger was attempted."
+          }
+        }
+      },
+      "Finding": {
+        "type": "object",
+        "description": "One conclusion, with everything needed to check it.",
+        "required": [
+          "id",
+          "rule_id",
+          "ruleset_version",
+          "category",
+          "state",
+          "severity",
+          "confidence",
+          "title",
+          "explanation",
+          "evidence",
+          "limitations"
+        ],
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/FindingCategory",
+            "description": "Section this belongs to."
+          },
+          "confidence": {
+            "$ref": "#/components/schemas/Confidence",
+            "description": "Evidence strength. **Never merged with `severity`.**"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Evidence"
+            },
+            "description": "Facts supporting the conclusion. May be empty for `UNABLE_TO_VERIFY`,\nwhich is precisely the case where there is nothing to show."
+          },
+          "explanation": {
+            "type": "string",
+            "description": "Prose explanation, including why it matters."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable identifier within this report."
+          },
+          "limitations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Limitation"
+            },
+            "description": "What this finding does not establish."
+          },
+          "recommended_action": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Suggested next step. Absent when the honest answer is \"nothing to do\"."
+          },
+          "rule_id": {
+            "type": "string",
+            "description": "Which rule produced this, e.g. `rust.workspace.detected`."
+          },
+          "ruleset_version": {
+            "type": "string",
+            "description": "Ruleset that produced it. Carried per-finding as well as per-report so a\nstored finding stays interpretable after the report is regenerated."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity",
+            "description": "Impact if valid. **Never merged with `confidence`.**"
+          },
+          "state": {
+            "$ref": "#/components/schemas/FindingState",
+            "description": "What the analyzer concluded."
+          },
+          "title": {
+            "type": "string",
+            "description": "One-line summary."
+          }
+        }
+      },
+      "FindingCategory": {
+        "type": "string",
+        "description": "Grouping for the engineering-system section.",
+        "enum": [
+          "TECHNOLOGY",
+          "ARCHITECTURE",
+          "SOURCE_AND_DOCUMENTATION",
+          "BUILD_AND_DEPENDENCIES",
+          "TESTING",
+          "CI_CD",
+          "OPERATIONS",
+          "SECURITY_AND_MAINTENANCE"
+        ]
+      },
+      "FindingState": {
+        "type": "string",
+        "description": "What the analyzer concluded about one checked property.",
+        "enum": [
+          "DETECTED",
+          "DOCUMENTED",
+          "MISSING",
+          "NOT_APPLICABLE",
+          "UNABLE_TO_VERIFY"
+        ]
+      },
+      "LanguageLineCount": {
+        "type": "object",
+        "description": "Line counts for one language.",
+        "required": [
+          "language",
+          "files",
+          "code_lines",
+          "comment_lines",
+          "blank_lines"
+        ],
+        "properties": {
+          "blank_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Blank lines.",
+            "minimum": 0
+          },
+          "code_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lines of code, excluding comments and blanks. The headline number.",
+            "minimum": 0
+          },
+          "comment_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Comment lines.",
+            "minimum": 0
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Files attributed to this language.",
+            "minimum": 0
+          },
+          "language": {
+            "type": "string",
+            "description": "Language name as the counter reports it."
+          }
+        }
+      },
+      "LargestSourceFile": {
+        "type": "object",
+        "description": "One of the largest files by line count.\n\nSize alone is not a defect. It is a **review-priority signal**: a large file\nthat also concentrates several responsibilities is where a reader's\nattention is best spent first.",
+        "required": [
+          "path",
+          "language",
+          "code_lines",
+          "role"
+        ],
+        "properties": {
+          "code_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lines of code, excluding comments and blanks.",
+            "minimum": 0
+          },
+          "language": {
+            "type": "string",
+            "description": "Language the counter attributed it to."
+          },
+          "path": {
+            "type": "string",
+            "description": "Repository-relative path."
+          },
+          "role": {
+            "$ref": "#/components/schemas/CodeRole",
+            "description": "Role, so a large generated file is not mistaken for a large hand-written\none — which is the most common way this list misleads."
+          }
+        }
+      },
+      "Limitation": {
+        "type": "object",
+        "description": "Something the analyzer could not establish.",
+        "required": [
+          "code",
+          "explanation"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable code, so the UI can group and explain limitations consistently."
+          },
+          "explanation": {
+            "type": "string",
+            "description": "What could not be established, and why."
+          }
+        }
+      },
+      "LineCountSummary": {
+        "type": "object",
+        "description": "Repository composition and line counts.\n\nMeasures composition, **not** productivity or quality. The report says so\nvisibly, because this is the easiest section to misread as a score.",
+        "required": [
+          "counter",
+          "counter_version",
+          "exclusion_policy_version",
+          "total_files",
+          "total_lines",
+          "code_lines",
+          "comment_lines",
+          "blank_lines",
+          "languages",
+          "areas",
+          "exclusions",
+          "roles",
+          "largest_files",
+          "unclassified_files"
+        ],
+        "properties": {
+          "areas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AreaLineCount"
+            },
+            "description": "Per-area breakdown, server-ordered."
+          },
+          "blank_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Blank lines.",
+            "minimum": 0
+          },
+          "code_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lines of code.",
+            "minimum": 0
+          },
+          "comment_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Comment lines.",
+            "minimum": 0
+          },
+          "counter": {
+            "type": "string",
+            "description": "Counting tool, e.g. `tokei`."
+          },
+          "counter_version": {
+            "type": "string",
+            "description": "Exact counter version — different versions count differently, so this is\npart of what makes a count reproducible."
+          },
+          "exclusion_policy_version": {
+            "type": "string",
+            "description": "Version of the exclusion policy applied."
+          },
+          "exclusions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompositionExclusion"
+            },
+            "description": "What was left out, and why."
+          },
+          "languages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LanguageLineCount"
+            },
+            "description": "Per-language breakdown, server-ordered."
+          },
+          "largest_files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LargestSourceFile"
+            },
+            "description": "Largest files by line count, server-ordered, descending.\n\nBounded in both directions by [`LargestSourceFiles`]: a producer cannot\nconstruct an over-long list, and an over-long one cannot be parsed.",
+            "maxItems": 10
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoleLineCount"
+            },
+            "description": "Breakdown by role, server-ordered.\n\nPresent so the report can show what proportion of the repository is\nproduction code without implying a judgement about it."
+          },
+          "total_files": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Files counted.",
+            "minimum": 0
+          },
+          "total_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "All physical lines.",
+            "minimum": 0
+          },
+          "unclassified_files": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Files the policy could not classify. Reported rather than silently\nfolded into a bucket.",
+            "minimum": 0
+          }
+        }
+      },
+      "LineRange": {
+        "type": "object",
+        "description": "A line span within a file.",
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Last line, inclusive.",
+            "minimum": 0
+          },
+          "start": {
+            "type": "integer",
+            "format": "int32",
+            "description": "First line, 1-indexed.",
+            "minimum": 0
+          }
+        }
+      },
       "LivenessResponse": {
         "type": "object",
         "description": "Process liveness.\n\nDeliberately *not* the system probe. `GET /api/v1/system/probe`, which also\nreports database reachability, build SHA, and schema version, is owned by\nthe walking-skeleton work (issue #11); answering \"is the database up?\" here\nbefore there is a pool would be a claim this binary cannot support.",
@@ -66,6 +686,32 @@
           }
         }
       },
+      "OverviewStatement": {
+        "type": "object",
+        "description": "An evidence-backed statement for the executive overview.\n\nThe overview carries the entire summarization load, because there is no\nscore to skim. Each statement therefore points at the findings that support\nit rather than asserting on its own authority.",
+        "required": [
+          "statement",
+          "supporting_rule_ids",
+          "confidence"
+        ],
+        "properties": {
+          "confidence": {
+            "$ref": "#/components/schemas/Confidence",
+            "description": "Confidence in the statement as a whole."
+          },
+          "statement": {
+            "type": "string",
+            "description": "The statement itself."
+          },
+          "supporting_rule_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Findings that support it, by `rule_id`."
+          }
+        }
+      },
       "ProbeStatus": {
         "type": "string",
         "description": "Reachability of one dependency.\n\nEnum values are `SCREAMING_SNAKE_CASE` per the settled contract convention\n(issue #14). Unlike object fields — where Rust's own naming already matches\nand no rename is used — enum variants are `PascalCase` in Rust, so a rename\nis unavoidable here. It is applied once, on the enum, rather than per\nvariant.",
@@ -73,6 +719,162 @@
           "OK",
           "DEGRADED",
           "UNAVAILABLE"
+        ]
+      },
+      "Report": {
+        "type": "object",
+        "description": "A complete report for one repository at one commit.",
+        "required": [
+          "analysis_id",
+          "repository",
+          "commit_sha",
+          "tree_sha",
+          "analyzer_version",
+          "ruleset_version",
+          "completed_at",
+          "overview",
+          "findings",
+          "composition",
+          "limitations"
+        ],
+        "properties": {
+          "analysis_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Analysis that produced it."
+          },
+          "analyzer_version": {
+            "type": "string",
+            "description": "Analyzer version that produced this report. First-class, not a footnote."
+          },
+          "commit_sha": {
+            "type": "string",
+            "description": "Exact commit. Non-null here, unlike on the analysis: a report cannot\nexist without a resolved commit."
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the analysis completed."
+          },
+          "composition": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LineCountSummary",
+                "description": "Composition and line counts.\n\n**Null when counting did not happen** — most often because extraction\nexceeded its configured limit. That is a designed `UNABLE_TO_VERIFY`\noutcome with a matching entry in `limitations`, not an error and not a\nzero. Required-but-nullable so a consumer must handle it."
+              }
+            ]
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            },
+            "description": "All findings, in a **server-decided order**.\n\nOrdering is part of the contract. A report that listed findings\ndifferently on each load would contradict the determinism it claims,\nand no client-side sort can restore an order the server never fixed."
+          },
+          "limitations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Limitation"
+            },
+            "description": "What this report as a whole does not establish.\n\nReport-level, not merely per-finding, so \"absence of evidence is not\nevidence of absence\" stays visible in the overview rather than buried\ninside an expanded finding nobody opened."
+          },
+          "overview": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OverviewStatement"
+            },
+            "description": "Evidence-backed summary statements."
+          },
+          "repository": {
+            "$ref": "#/components/schemas/RepositoryIdentity",
+            "description": "Repository analyzed."
+          },
+          "ruleset_version": {
+            "type": "string",
+            "description": "Ruleset version evaluated. First-class, not a footnote."
+          },
+          "tree_sha": {
+            "type": "string",
+            "description": "Root tree the collectors walked. Part of the reproducibility key, since\ntwo commits sharing a tree yield identical evidence."
+          }
+        }
+      },
+      "RepositoryIdentity": {
+        "type": "object",
+        "description": "Repository identity, available from the moment an analysis is created.\n\nPresent before `commit_sha` exists, which is what lets the header render\n`owner/name` immediately instead of a blank space that looks broken.",
+        "required": [
+          "owner",
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Repository name, without the owner prefix."
+          },
+          "owner": {
+            "type": "string",
+            "description": "User or organization."
+          }
+        }
+      },
+      "RetryPolicy": {
+        "type": "object",
+        "description": "Whether the caller may retry, decided by the server.\n\nNever inferred from the state name. `FAILED_RETRIABLE` describes the *kind*\nof failure; whether a retry is permitted also depends on how many attempts\nhave already been spent and whether the work is still claimable — facts only\nthe server holds. A frontend that derived this would offer a button that\ndoes nothing.",
+        "required": [
+          "allowed"
+        ],
+        "properties": {
+          "allowed": {
+            "type": "boolean",
+            "description": "Whether a retry request would be accepted right now."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why not, when `allowed` is false. Displayed verbatim, so it explains\nrather than merely denies."
+          }
+        }
+      },
+      "RoleLineCount": {
+        "type": "object",
+        "description": "Line counts for one role.",
+        "required": [
+          "role",
+          "files",
+          "code_lines"
+        ],
+        "properties": {
+          "code_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lines of code in it.",
+            "minimum": 0
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Files attributed to it.",
+            "minimum": 0
+          },
+          "role": {
+            "$ref": "#/components/schemas/CodeRole",
+            "description": "Which role."
+          }
+        }
+      },
+      "Severity": {
+        "type": "string",
+        "description": "Impact if the finding is valid. Independent of [`Confidence`].",
+        "enum": [
+          "INFO",
+          "LOW",
+          "MEDIUM",
+          "HIGH"
         ]
       },
       "SystemProbeResponse": {
@@ -106,6 +908,15 @@
             "description": "Highest applied migration version.\n\nNull rather than zero when the database could not be reached: \"no\nmigrations have been applied\" and \"we could not find out\" are different\nfacts, and collapsing them into `0` would let a connection failure read\nas an empty database. The frontend must render the null case, which is\nalso the cheapest available exercise of its unknown-value handling.\n\n`required` is explicit because utoipa treats `Option<T>` as optional by\ndefault, which would generate `schema_version?: number | null` in\nTypeScript. The field is always present — its *value* is nullable — and\nthe two are different contracts: an optional field lets a consumer\nforget the null case entirely, which is the case that matters here."
           }
         }
+      },
+      "TriggerStatus": {
+        "type": "string",
+        "description": "Whether the scheduler accepted the work.\n\nSeparate from [`AnalysisState`] because they fail independently: an analysis\ncan be `QUEUED` with the trigger *succeeded* (normal, waiting for a worker)\nor `QUEUED` with the trigger *failed* (stuck, and nothing will ever pick it\nup). Those look identical without this, and the second one is the outage.",
+        "enum": [
+          "PENDING",
+          "SUCCEEDED",
+          "FAILED"
+        ]
       }
     }
   }

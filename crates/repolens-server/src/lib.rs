@@ -16,5 +16,6 @@
 
 pub mod api;
 pub mod config;
+pub mod contract;
 pub mod state;
 pub mod telemetry;
