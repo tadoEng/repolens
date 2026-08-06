@@ -4,6 +4,9 @@
 //! "what can this endpoint touch?" is answered by reading one struct rather
 //! than by tracing imports.
 
+use std::sync::Arc;
+
+use repolens_github::GitHubRestClient;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
@@ -37,19 +40,46 @@ pub struct AppState {
     /// the truthful answer — better than refusing to boot and blocking UI
     /// development, and better than pretending the database is fine.
     pool: Option<PgPool>,
+    /// GitHub access, absent when no token or base is configured.
+    ///
+    /// `Arc` because the client is not `Clone` — it holds a configured
+    /// `reqwest::Client` and a secret — and an analysis is spawned onto a task
+    /// that outlives the request. Optional for the same reason the pool is: the
+    /// server must still start for frontend work, and the probe reports what is
+    /// missing rather than the process refusing to boot.
+    github: Option<Arc<GitHubRestClient>>,
 }
 
 impl AppState {
     /// Builds state with a live pool.
     #[must_use]
     pub fn with_pool(pool: PgPool) -> Self {
-        Self { pool: Some(pool) }
+        Self {
+            pool: Some(pool),
+            github: None,
+        }
+    }
+
+    /// Attaches GitHub access.
+    #[must_use]
+    pub fn with_github(mut self, client: GitHubRestClient) -> Self {
+        self.github = Some(Arc::new(client));
+        self
+    }
+
+    /// Borrows the GitHub client, if one was configured.
+    #[must_use]
+    pub fn github(&self) -> Option<&Arc<GitHubRestClient>> {
+        self.github.as_ref()
     }
 
     /// Builds state with no database configured.
     #[must_use]
     pub fn without_database() -> Self {
-        Self { pool: None }
+        Self {
+            pool: None,
+            github: None,
+        }
     }
 
     /// Borrows the pool, if one was configured.

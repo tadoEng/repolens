@@ -79,7 +79,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 anyhow = "1"
 
-uuid = { version = "1", features = ["v7", "serde"] }
+# v7 for entity ids: time-ordered for index locality, 74 random bits so an id in
+# a URL stays unguessable. v5 for *derived* ids -- a finding's id is a function of
+# its rule, so two analyses of one commit produce byte-identical reports, which a
+# random id would break for no gain.
+uuid = { version = "1", features = ["v5", "v7", "serde"] }
 time = { version = "0.3", features = ["serde"] }
 
 # --- Ingestion stage (issue #4). Added ahead of use so the workspace manifest is

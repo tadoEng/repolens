@@ -21,6 +21,8 @@ use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+pub mod analyses;
+
 use crate::config;
 use crate::contract;
 use crate::state::{AppState, BUILD_SHA};
@@ -50,6 +52,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
         description = "Deterministic, evidence-backed analysis of a public GitHub repository at an exact commit."
     ),
     components(schemas(
+        analyses::CreateAnalysisRequest,
         contract::error::ApiError,
         contract::error::ErrorCode,
         contract::analysis::Analysis,
@@ -352,6 +355,7 @@ pub fn build(state: AppState) -> (Router, utoipa::openapi::OpenApi) {
     let (router, openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(liveness))
         .routes(routes!(system_probe))
+        .merge(analyses::routes())
         .with_state(state)
         .split_for_parts();
 

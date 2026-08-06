@@ -1,0 +1,301 @@
+//! Analysis creation and reading.
+//!
+//! Three routes, no more: create one, watch it, read its report. Everything the
+//! frontend already renders is served by these; nothing here anticipates a
+//! screen that does not exist.
+//!
+//! There is deliberately **no retry endpoint**. Starting work is an
+//! authenticated operation, and authentication is issue #13. A route that
+//! accepted retries from anyone would be the abuse surface the auth gate exists
+//! to close, and the frontend correctly offers no control for it.
+
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use repolens_core::RepositoryCoordinate;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+use uuid::Uuid;
+
+use crate::contract::analysis::Analysis;
+use crate::contract::error::{ApiError, ErrorCode};
+use crate::contract::report::Report;
+use crate::state::AppState;
+use crate::{pipeline, store};
+
+/// What a caller submits to start an analysis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CreateAnalysisRequest {
+    /// A public GitHub repository URL, e.g. `https://github.com/rust-lang/crates.io`.
+    ///
+    /// A URL rather than separate owner and name fields, because a URL is what a
+    /// person has in their clipboard. Parsing it is our job, not theirs.
+    pub repository_url: String,
+}
+
+/// An error on its way out of a handler.
+///
+/// Carries the status alongside the body so the mapping from "what went wrong"
+/// to "what HTTP says" lives in one place rather than at every call site.
+struct Failure(StatusCode, ApiError);
+
+impl IntoResponse for Failure {
+    fn into_response(self) -> Response {
+        (self.0, Json(self.1)).into_response()
+    }
+}
+
+impl Failure {
+    fn bad_request(code: ErrorCode, message: &str) -> Self {
+        Self(StatusCode::BAD_REQUEST, ApiError::new(code, message))
+    }
+
+    fn not_found(message: &str) -> Self {
+        Self(
+            StatusCode::NOT_FOUND,
+            ApiError::new(ErrorCode::RepositoryNotFound, message),
+        )
+    }
+
+    /// The database is unreachable or misconfigured.
+    ///
+    /// `503` rather than `500`: the service is fine, its dependency is not, and
+    /// the distinction tells a caller whether retrying is worth anything.
+    fn unavailable() -> Self {
+        Self(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::new(
+                ErrorCode::WorkerFailedRetriable,
+                "The analysis store is unavailable. This is usually temporary.",
+            ),
+        )
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/analyses",
+    tag = "analyses",
+    request_body = CreateAnalysisRequest,
+    responses(
+        (status = 202, description = "Accepted; the analysis is queued", body = Analysis),
+        (status = 400, description = "The URL is not a public GitHub repository", body = ApiError),
+        (status = 503, description = "The analysis store is unavailable", body = ApiError)
+    )
+)]
+async fn create(
+    State(state): State<AppState>,
+    Json(request): Json<CreateAnalysisRequest>,
+) -> Result<(StatusCode, Json<Analysis>), Failure> {
+    let coordinate = parse_repository_url(&request.repository_url).ok_or_else(|| {
+        Failure::bad_request(
+            ErrorCode::InvalidRepositoryUrl,
+            "That is not a GitHub repository URL. It should look like \
+             https://github.com/owner/repository.",
+        )
+    })?;
+
+    let pool = state.pool().ok_or_else(Failure::unavailable)?;
+
+    let analysis = store::create_analysis(pool, &coordinate)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "could not create an analysis");
+            Failure::unavailable()
+        })?;
+
+    // Inline execution, spawned so the response is not held for the length of an
+    // analysis. Issue #7 replaces this with a durable claim; until then an
+    // analysis does not survive the process, which is recorded in `pipeline`.
+    if let Some(source) = state.github() {
+        let (pool, source, id) = (pool.clone(), std::sync::Arc::clone(source), analysis.id);
+        tokio::spawn(async move { pipeline::run(&pool, &*source, id, &coordinate).await });
+    } else {
+        // No credentials configured. Recorded on the analysis rather than returned,
+        // so the failure appears where a user is already looking instead of in a
+        // response they will not see again.
+        let (pool, id) = (pool.clone(), analysis.id);
+        tokio::spawn(async move {
+            let error = ApiError::new(
+                ErrorCode::RepositoryInaccessible,
+                "This deployment has no GitHub access configured, so no repository can be read.",
+            );
+            let _ = store::fail(&pool, id, &error).await;
+        });
+    }
+
+    // 202, not 201: the analysis exists, but the thing the caller actually wants
+    // does not yet. `Location` is the progress resource they should poll.
+    Ok((StatusCode::ACCEPTED, Json(analysis)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/analyses/{analysis_id}",
+    tag = "analyses",
+    params(("analysis_id" = Uuid, Path, description = "Analysis identifier")),
+    responses(
+        (status = 200, description = "Current state of the analysis", body = Analysis),
+        (status = 404, description = "No such analysis", body = ApiError),
+        (status = 503, description = "The analysis store is unavailable", body = ApiError)
+    )
+)]
+async fn read(
+    State(state): State<AppState>,
+    Path(analysis_id): Path<Uuid>,
+) -> Result<Json<Analysis>, Failure> {
+    let pool = state.pool().ok_or_else(Failure::unavailable)?;
+
+    store::load_analysis(pool, analysis_id)
+        .await
+        .map(Json)
+        .map_err(|error| match error {
+            store::StoreError::NotFound => Failure::not_found("No analysis with that identifier."),
+            other @ store::StoreError::Query(_) => {
+                tracing::error!(error = %other, "could not read an analysis");
+                Failure::unavailable()
+            }
+        })
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/analyses/{analysis_id}/report",
+    tag = "analyses",
+    params(("analysis_id" = Uuid, Path, description = "Analysis identifier")),
+    responses(
+        (status = 200, description = "The completed report", body = Report),
+        (status = 404, description = "No report for that analysis", body = ApiError),
+        (status = 503, description = "The analysis store is unavailable", body = ApiError)
+    )
+)]
+async fn read_report(
+    State(state): State<AppState>,
+    Path(analysis_id): Path<Uuid>,
+) -> Result<Json<Report>, Failure> {
+    let pool = state.pool().ok_or_else(Failure::unavailable)?;
+
+    store::load_report(pool, analysis_id)
+        .await
+        .map(Json)
+        .map_err(|error| match error {
+            // One message for "no such analysis" and "not finished yet". The
+            // frontend already knows which it is from `report_available` on the
+            // analysis, and a second source of that truth could disagree.
+            store::StoreError::NotFound => {
+                Failure::not_found("No report is available for that analysis.")
+            }
+            other @ store::StoreError::Query(_) => {
+                tracing::error!(error = %other, "could not read a report");
+                Failure::unavailable()
+            }
+        })
+}
+
+/// Extracts owner and name from a GitHub repository URL.
+///
+/// Accepts what a person actually pastes: with or without a scheme, with or
+/// without `www.`, with a trailing slash, with `.git`, and with extra path
+/// segments (`/tree/main`, `/blob/…`) that a browser adds when you copy from a
+/// file view.
+///
+/// Rejects anything not on `github.com`. Phase 0 analyses public GitHub
+/// repositories, and silently accepting another host would produce a confusing
+/// failure much later instead of an actionable one now.
+fn parse_repository_url(input: &str) -> Option<RepositoryCoordinate> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Strip the scheme by hand rather than parsing: a bare `github.com/a/b` has
+    // no scheme, and prepending one to parse it is the same work with an extra
+    // dependency in the path.
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let without_www = without_scheme
+        .strip_prefix("www.")
+        .unwrap_or(without_scheme);
+
+    let rest = without_www.strip_prefix("github.com/")?;
+
+    let mut segments = rest.split('/').filter(|segment| !segment.is_empty());
+    let owner = segments.next()?;
+    let name = segments.next()?.trim_end_matches(".git");
+
+    if owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    // A path segment cannot contain these, so their presence means the input was
+    // a query string or fragment rather than a repository.
+    if [owner, name]
+        .iter()
+        .any(|part| part.contains('?') || part.contains('#') || part.contains(' '))
+    {
+        return None;
+    }
+
+    Some(RepositoryCoordinate::new(owner, name))
+}
+
+/// The analysis routes, for mounting on the application router.
+pub fn routes() -> utoipa_axum::router::OpenApiRouter<AppState> {
+    use utoipa_axum::routes;
+
+    utoipa_axum::router::OpenApiRouter::new()
+        .routes(routes!(create))
+        .routes(routes!(read))
+        .routes(routes!(read_report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_what_a_person_actually_pastes() {
+        for input in [
+            "https://github.com/rust-lang/crates.io",
+            "http://github.com/rust-lang/crates.io",
+            "https://www.github.com/rust-lang/crates.io",
+            "github.com/rust-lang/crates.io",
+            "https://github.com/rust-lang/crates.io/",
+            "https://github.com/rust-lang/crates.io.git",
+            // What a browser gives you when copying from a file view.
+            "https://github.com/rust-lang/crates.io/tree/main",
+            "https://github.com/rust-lang/crates.io/blob/main/Cargo.toml",
+            "  https://github.com/rust-lang/crates.io  ",
+        ] {
+            let parsed = parse_repository_url(input);
+            assert_eq!(
+                parsed,
+                Some(RepositoryCoordinate::new("rust-lang", "crates.io")),
+                "should accept {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_anything_that_is_not_a_github_repository() {
+        for input in [
+            "",
+            "   ",
+            "not a url",
+            "https://github.com",
+            "https://github.com/",
+            // An owner with no repository is not analysable.
+            "https://github.com/rust-lang",
+            // Another host: rejected now with an actionable message rather than
+            // failing confusingly during ingestion.
+            "https://gitlab.com/owner/repo",
+            "https://example.com/rust-lang/crates.io",
+            "https://github.com/owner/repo?tab=readme",
+            "https://github.com/owner/repo#readme",
+        ] {
+            assert_eq!(parse_repository_url(input), None, "should reject {input:?}");
+        }
+    }
+}
