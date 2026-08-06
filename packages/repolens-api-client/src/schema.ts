@@ -118,7 +118,15 @@ export interface components {
          * @enum {string}
          */
         AnalysisState: "QUEUED" | "RESOLVING" | "COLLECTING" | "ANALYZING" | "BUILDING_REPORT" | "COMPLETED" | "FAILED_RETRIABLE" | "FAILED_PERMANENT";
-        /** @description A failure, as the browser receives it. */
+        /**
+         * @description A failure, as the browser receives it.
+         *
+         *     Fields are private and deserialization is validated, so
+         *     `ANALYZER_FAILED_PERMANENT` carrying a 900-second countdown cannot be
+         *     constructed *or* parsed. A safe constructor alone would not achieve that:
+         *     derived `Deserialize` would still accept the combination off the wire, and a
+         *     public field would still accept it in Rust.
+         */
         ApiError: {
             /** @description Stable machine code. Switch on this, never on `message`. */
             code: components["schemas"]["ErrorCode"];
@@ -383,8 +391,10 @@ export interface components {
             /**
              * @description Largest files by line count, server-ordered, descending.
              *
-             *     Bounded by the server: a repository with 40,000 files must not send
-             *     40,000 rows to a browser to render the top ten.
+             *     Bounded at [`MAX_LARGEST_FILES`], published as `maxItems` and enforced on
+             *     deserialization. A repository with 40,000 files must not send 40,000 rows
+             *     to a browser to render a top-ten list, and a bound that is only described
+             *     is a bound the first careless producer ignores.
              */
             largest_files: components["schemas"]["LargestSourceFile"][];
             /**

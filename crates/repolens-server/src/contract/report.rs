@@ -234,6 +234,33 @@ pub struct CompositionExclusion {
     pub bytes: u64,
 }
 
+/// Ceiling on [`LineCountSummary::largest_files`].
+///
+/// Ten is a review aid, not a dataset: the section exists to point a reader at
+/// where to look first, and a list long enough to scroll stops doing that.
+pub const MAX_LARGEST_FILES: usize = 10;
+
+/// Rejects an over-long `largest_files` array rather than silently truncating.
+///
+/// Truncating would make the server and the client disagree about what the
+/// report says while both appeared to succeed. A producer that exceeds the bound
+/// has a bug, and the contract should say so.
+fn deserialize_largest_files<'de, D>(deserializer: D) -> Result<Vec<LargestSourceFile>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let files = Vec::<LargestSourceFile>::deserialize(deserializer)?;
+    if files.len() > MAX_LARGEST_FILES {
+        return Err(D::Error::custom(format!(
+            "largest_files carries {} entries, more than the {MAX_LARGEST_FILES} the contract permits",
+            files.len()
+        )));
+    }
+    Ok(files)
+}
+
 /// How a counted file was classified by role.
 ///
 /// Structural evidence only. This is **not** a test-quality score: a repository
@@ -319,8 +346,12 @@ pub struct LineCountSummary {
     pub roles: Vec<RoleLineCount>,
     /// Largest files by line count, server-ordered, descending.
     ///
-    /// Bounded by the server: a repository with 40,000 files must not send
-    /// 40,000 rows to a browser to render the top ten.
+    /// Bounded at [`MAX_LARGEST_FILES`], published as `maxItems` and enforced on
+    /// deserialization. A repository with 40,000 files must not send 40,000 rows
+    /// to a browser to render a top-ten list, and a bound that is only described
+    /// is a bound the first careless producer ignores.
+    #[schema(max_items = 10)]
+    #[serde(deserialize_with = "deserialize_largest_files")]
     pub largest_files: Vec<LargestSourceFile>,
     /// Files the policy could not classify. Reported rather than silently
     /// folded into a bucket.
@@ -410,6 +441,27 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_string(&state).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn an_overlong_largest_files_array_is_rejected() {
+        // The bound is published as maxItems and enforced here, so a producer
+        // cannot quietly exceed it and a consumer cannot quietly accept it.
+        let row = serde_json::json!({
+            "path": "a.rs", "language": "Rust", "code_lines": 1, "role": "PRODUCTION"
+        });
+        let rows: Vec<_> = std::iter::repeat_n(row, MAX_LARGEST_FILES + 1).collect();
+        let summary = serde_json::json!({
+            "counter": "tokei", "counter_version": "14.0.0",
+            "exclusion_policy_version": "1",
+            "total_files": 1, "total_lines": 1, "code_lines": 1,
+            "comment_lines": 0, "blank_lines": 0,
+            "languages": [], "areas": [], "exclusions": [],
+            "roles": [], "largest_files": rows, "unclassified_files": 0
+        });
+
+        let parsed = serde_json::from_value::<LineCountSummary>(summary);
+        assert!(parsed.is_err(), "an over-long list must be rejected");
     }
 
     #[test]

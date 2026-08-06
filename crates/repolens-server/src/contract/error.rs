@@ -76,20 +76,62 @@ impl ErrorCode {
 }
 
 /// A failure, as the browser receives it.
+///
+/// Fields are private and deserialization is validated, so
+/// `ANALYZER_FAILED_PERMANENT` carrying a 900-second countdown cannot be
+/// constructed *or* parsed. A safe constructor alone would not achieve that:
+/// derived `Deserialize` would still accept the combination off the wire, and a
+/// public field would still accept it in Rust.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(try_from = "ApiErrorWire")]
 pub struct ApiError {
     /// Stable machine code. Switch on this, never on `message`.
-    pub code: ErrorCode,
+    code: ErrorCode,
     /// Human-readable explanation. Safe to display, and deliberately free of
     /// internal identifiers, hostnames, and credentials — this string crosses
     /// into a browser.
-    pub message: String,
+    message: String,
     /// How long to wait before retrying, when that is actually knowable.
     ///
     /// Absent rather than zero when unknown: a UI that renders "retry in 0s"
     /// from a missing value is worse than one that renders no countdown at all.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry_after_seconds: Option<u32>,
+    retry_after_seconds: Option<u32>,
+}
+
+/// Wire mirror used only to validate incoming errors.
+///
+/// Private, and never part of the published schema — `ApiError` derives
+/// `ToSchema` itself, so the document describes the validated type.
+#[derive(Deserialize)]
+struct ApiErrorWire {
+    code: ErrorCode,
+    message: String,
+    #[serde(default)]
+    retry_after_seconds: Option<u32>,
+}
+
+/// Why a received error envelope could not be accepted.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ApiErrorInvalid {
+    /// A wait was attached to a code where no wait is knowable.
+    #[error("only RATE_LIMITED may carry retry_after_seconds, got {0:?}")]
+    UnexpectedRetryAfter(ErrorCode),
+}
+
+impl TryFrom<ApiErrorWire> for ApiError {
+    type Error = ApiErrorInvalid;
+
+    fn try_from(wire: ApiErrorWire) -> Result<Self, Self::Error> {
+        if wire.retry_after_seconds.is_some() && wire.code != ErrorCode::RateLimited {
+            return Err(ApiErrorInvalid::UnexpectedRetryAfter(wire.code));
+        }
+        Ok(Self {
+            code: wire.code,
+            message: wire.message,
+            retry_after_seconds: wire.retry_after_seconds,
+        })
+    }
 }
 
 impl ApiError {
@@ -116,6 +158,24 @@ impl ApiError {
             message: message.into(),
             retry_after_seconds: Some(retry_after_seconds),
         }
+    }
+
+    /// The machine code.
+    #[must_use]
+    pub const fn code(&self) -> ErrorCode {
+        self.code
+    }
+
+    /// The displayable message.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The wait, when one is knowable.
+    #[must_use]
+    pub const fn retry_after_seconds(&self) -> Option<u32> {
+        self.retry_after_seconds
     }
 }
 
@@ -155,11 +215,34 @@ mod tests {
 
     #[test]
     fn only_rate_limiting_can_carry_a_wait() {
-        // The constructor makes this structural rather than conventional: there
-        // is no way to attach a countdown to any other code.
         let error = ApiError::rate_limited("slow down", 900);
-        assert_eq!(error.code, ErrorCode::RateLimited);
-        assert_eq!(error.retry_after_seconds, Some(900));
+        assert_eq!(error.code(), ErrorCode::RateLimited);
+        assert_eq!(error.retry_after_seconds(), Some(900));
+    }
+
+    #[test]
+    fn an_invalid_combination_cannot_be_deserialized() {
+        // The constructor alone would not achieve this: derived Deserialize
+        // would still accept the combination straight off the wire, which is
+        // exactly where an error envelope comes from.
+        let hostile =
+            r#"{"code":"ANALYZER_FAILED_PERMANENT","message":"x","retry_after_seconds":900}"#;
+        let parsed = serde_json::from_str::<ApiError>(hostile);
+        assert!(
+            parsed.is_err(),
+            "a permanent failure must not be able to carry a countdown"
+        );
+    }
+
+    #[test]
+    fn a_valid_combination_still_round_trips() {
+        let original = ApiError::rate_limited("slow down", 900);
+        let json = serde_json::to_string(&original).unwrap();
+        assert_eq!(serde_json::from_str::<ApiError>(&json).unwrap(), original);
+
+        let plain = ApiError::new(ErrorCode::RepositoryNotFound, "nope");
+        let json = serde_json::to_string(&plain).unwrap();
+        assert_eq!(serde_json::from_str::<ApiError>(&json).unwrap(), plain);
     }
 
     #[test]

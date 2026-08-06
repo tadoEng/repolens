@@ -148,7 +148,7 @@
       },
       "ApiError": {
         "type": "object",
-        "description": "A failure, as the browser receives it.",
+        "description": "A failure, as the browser receives it.\n\nFields are private and deserialization is validated, so\n`ANALYZER_FAILED_PERMANENT` carrying a 900-second countdown cannot be\nconstructed *or* parsed. A safe constructor alone would not achieve that:\nderived `Deserialize` would still accept the combination off the wire, and a\npublic field would still accept it in Rust.",
         "required": [
           "code",
           "message"
@@ -621,7 +621,8 @@
             "items": {
               "$ref": "#/components/schemas/LargestSourceFile"
             },
-            "description": "Largest files by line count, server-ordered, descending.\n\nBounded by the server: a repository with 40,000 files must not send\n40,000 rows to a browser to render the top ten."
+            "description": "Largest files by line count, server-ordered, descending.\n\nBounded at [`MAX_LARGEST_FILES`], published as `maxItems` and enforced on\ndeserialization. A repository with 40,000 files must not send 40,000 rows\nto a browser to render a top-ten list, and a bound that is only described\nis a bound the first careless producer ignores.",
+            "maxItems": 10
           },
           "roles": {
             "type": "array",
