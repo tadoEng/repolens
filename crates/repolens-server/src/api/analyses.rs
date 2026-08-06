@@ -122,7 +122,13 @@ async fn create(
     tokio::spawn(async move { pipeline::run(&pool, &*source, id, &coordinate).await });
 
     // 202, not 201: the analysis exists, but the thing the caller actually wants
-    // does not yet. `Location` is the progress resource they should poll.
+    // does not yet.
+    //
+    // No `Location` header. The body already carries `id`, and the generated
+    // client reads the body rather than response headers — a header would be a
+    // second copy of the identity that nothing consumes, and one the OpenAPI
+    // document would then have to describe. Callers poll
+    // `/api/v1/analyses/{id}` at `poll_after_ms`.
     Ok((StatusCode::ACCEPTED, Json(analysis)))
 }
 

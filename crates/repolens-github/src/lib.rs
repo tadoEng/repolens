@@ -112,7 +112,18 @@ pub struct TreeEntry {
 /// A recursive tree listing, with GitHub's truncation flag preserved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryTree {
-    /// Root tree SHA this listing describes.
+    /// The SHA this listing was **requested by**, echoed back by GitHub.
+    ///
+    /// Not necessarily a tree SHA. The tree endpoint accepts a commit SHA and
+    /// resolves it to that commit's root tree, but reports the SHA it was given
+    /// rather than the tree it resolved to — so fetching by commit returns the
+    /// commit SHA here, for exactly the same entries.
+    ///
+    /// **Use [`ResolvedCommit::tree_sha`] when the canonical tree SHA is what
+    /// you need.** That value comes from the commit object itself and is the
+    /// tree either way. Taking this field instead writes the commit SHA into
+    /// both halves of the identity, which reads as correct because it is a
+    /// well-formed digest.
     pub sha: String,
     /// Entries returned.
     pub entries: Vec<TreeEntry>,

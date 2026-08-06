@@ -239,7 +239,16 @@ fn build_report(
             name: coordinate.name.clone(),
         },
         commit_sha: commit.sha.as_str().to_owned(),
-        tree_sha: tree.sha.clone(),
+        // From the commit object, deliberately not from `tree.sha`.
+        //
+        // GitHub's tree endpoint echoes back whichever SHA it was asked for. The
+        // listing is fetched by commit SHA, which resolves to the right tree but
+        // reports that commit SHA as `sha` — so `tree.sha` would silently write
+        // `commit_sha` into this field, and the two halves of the identity would
+        // be one value repeated. Verified against `rust-lang/crates.io` at
+        // 7bef82ce: the tree endpoint answers `7bef82ce…` when asked by commit
+        // and `47ce74b3…` when asked by tree, for byte-identical entries.
+        tree_sha: commit.tree_sha.clone(),
         analyzer_version: ANALYZER_VERSION.to_owned(),
         ruleset_version: ruleset::RULESET_VERSION.to_owned(),
         completed_at: OffsetDateTime::now_utc(),
@@ -382,6 +391,53 @@ mod tests {
         let first: Vec<_> = outcomes.iter().map(|o| finding(o).id).collect();
         let second: Vec<_> = outcomes.iter().map(|o| finding(o).id).collect();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn the_tree_sha_comes_from_the_commit_not_from_the_echoed_listing() {
+        // GitHub's tree endpoint echoes back whichever SHA it was asked for. The
+        // listing is fetched by commit SHA, so `tree.sha` holds that commit SHA
+        // for a perfectly correct set of entries — and writing it into the
+        // report made both halves of the identity the same value, which reads as
+        // correct because it is a well-formed digest.
+        //
+        // Reproduced with the shape observed against `rust-lang/crates.io` at
+        // 7bef82ce: the listing echoes the commit SHA, the commit object carries
+        // the real tree, 47ce74b3.
+        const COMMIT: &str = "7bef82cebb702b89ec8d3f13facf67a83bc7d090";
+        const TREE: &str = "47ce74b3cf6de899392fb2caf1fd6406f2fa47f3";
+
+        let commit = repolens_github::ResolvedCommit {
+            sha: repolens_core::CommitSha::parse(COMMIT).expect("a literal digest"),
+            tree_sha: TREE.to_owned(),
+            committed_at: OffsetDateTime::from_unix_timestamp(1_785_873_497)
+                .expect("a literal timestamp"),
+        };
+        let tree = repolens_github::RepositoryTree {
+            // What GitHub actually returns when asked by commit.
+            sha: COMMIT.to_owned(),
+            entries: Vec::new(),
+            truncated: false,
+        };
+
+        let report = build_report(
+            Uuid::nil(),
+            &RepositoryCoordinate::new("rust-lang", "crates.io"),
+            &commit,
+            &tree,
+            &ruleset::evaluate(&[], false),
+        );
+
+        assert_eq!(report.commit_sha, COMMIT);
+        assert_eq!(
+            report.tree_sha, TREE,
+            "the tree SHA must come from the commit object; taking the listing's \
+             echoed SHA repeats the commit SHA and the identity carries no tree"
+        );
+        assert_ne!(
+            report.tree_sha, report.commit_sha,
+            "a commit and its root tree are different objects"
+        );
     }
 
     #[test]
