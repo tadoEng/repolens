@@ -103,7 +103,7 @@ async fn the_preflight_permits_the_credential_the_frontend_sends() {
 
     assert!(
         headers.iter().any(|header| header == "AUTHORIZATION"),
-        "creating an analysis carries a Firebase ID token; without this the          browser never sends the POST. Got {headers:?}"
+        "creating an analysis carries a Firebase ID token; without this the browser never sends the POST. Got {headers:?}"
     );
     assert!(
         headers.iter().any(|header| header == "CONTENT-TYPE"),

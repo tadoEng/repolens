@@ -95,6 +95,14 @@ pub enum SkipReason {
     /// Contained a `NUL` byte within the sniff window, which is how Git itself
     /// decides a file is binary.
     Binary,
+    /// Retrieved, but the bytes are not valid UTF-8.
+    ///
+    /// Deliberately distinct from [`SkipReason::Binary`]: a latin-1 source file
+    /// carries no `NUL`, passes the sniff, and still cannot become the `&str` a
+    /// rule matches on. Distinct from every *other* variant too, because the
+    /// request was spent and the bytes did arrive — saying they were never
+    /// retrieved would be false.
+    Undecodable,
     /// The per-analysis byte budget was already spent when this file came up.
     ///
     /// Deliberately distinct from [`SkipReason::TooLarge`]: this file might be
@@ -109,6 +117,61 @@ pub enum SkipReason {
         /// Number of files the selection holds.
         limit: usize,
     },
+}
+
+impl SkipReason {
+    /// Stable, low-cardinality code for the report.
+    ///
+    /// Separate from the serde representation, which carries the payload: a
+    /// report groups by *why* a file was skipped, and a code that varied with
+    /// the observed size would put every oversized file in its own bucket.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotInTree => "FILE_SKIPPED_NOT_IN_TREE",
+            Self::NotAFile => "FILE_SKIPPED_NOT_A_FILE",
+            Self::TooLarge { .. } => "FILE_SKIPPED_TOO_LARGE",
+            Self::Binary => "FILE_SKIPPED_BINARY",
+            Self::Undecodable => "FILE_SKIPPED_UNDECODABLE",
+            Self::BudgetSpent { .. } => "FILE_SKIPPED_BUDGET_SPENT",
+            Self::SelectionFull { .. } => "FILE_SKIPPED_SELECTION_FULL",
+        }
+    }
+
+    /// What a reader needs to know about this class of skip.
+    #[must_use]
+    pub const fn explanation(&self) -> &'static str {
+        match self {
+            Self::NotInTree => {
+                "A file the ruleset looks for was not present in the tree at this commit."
+            }
+            Self::NotAFile => {
+                "A candidate path is a directory or a submodule rather than a file. A submodule's \
+                 contents belong to another repository and are not this analysis' to read."
+            }
+            Self::TooLarge { .. } => {
+                "A candidate file is larger than the per-file ceiling this analysis reads, so \
+                 nothing was read from it."
+            }
+            Self::Binary => {
+                "A candidate file contains NUL bytes, which is how Git itself decides a file is \
+                 binary. There is no text in it for a rule to match."
+            }
+            Self::Undecodable => {
+                "A candidate file was retrieved but is not valid UTF-8, so there is no text in it \
+                 for a rule to match. The file exists and its bytes arrived; they could not be \
+                 read as source."
+            }
+            Self::BudgetSpent { .. } => {
+                "The per-analysis byte budget was already spent when this file came up. The file \
+                 may be small; the budget is ours, not a property of the repository."
+            }
+            Self::SelectionFull { .. } => {
+                "The bounded file selection was already full when this file came up. Which files \
+                 survive is decided by a fixed ranking, not by chance."
+            }
+        }
+    }
 }
 
 /// One file that was not read, and why.

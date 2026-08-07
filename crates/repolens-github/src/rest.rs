@@ -244,11 +244,8 @@ impl GitHubRestClient {
     /// Takes the tree rather than fetching one, because the caller resolving a
     /// commit already has it, and because the tree is where a file's size is
     /// known *before* a request is spent on it. It is also what maps a path to
-    /// the immutable blob SHA that content is addressed by — which is why this
-    /// is safe to cache and
-    /// [`fetch_selected_blobs`](GitHubRepositorySource::fetch_selected_blobs),
-    /// which must fetch a tree first, is a convenience rather than the primary
-    /// entry point.
+    /// the immutable blob SHA that content is addressed by, which is what makes
+    /// the result safe to cache.
     ///
     /// Requests are issued in `paths` order and the byte budget is spent in that
     /// order, so the caller's ranking — see [`select_paths`](crate::select_paths)
@@ -329,6 +326,22 @@ impl GitHubRestClient {
                 selection.skipped.push(SkippedPath {
                     path: path.clone(),
                     reason: SkipReason::Binary,
+                });
+                continue;
+            }
+
+            // The same question as the sniff above, asked exactly: can a rule
+            // read text out of this?
+            //
+            // A latin-1 source file carries no `NUL`, passes `is_binary`, and
+            // still cannot become a `&str`. Deciding that here rather than
+            // downstream is what keeps every requested path accounted for —
+            // each one ends in `retrieved` or in `skipped`, and a caller that
+            // dropped it later would have a file that is in neither.
+            if std::str::from_utf8(&bytes).is_err() {
+                selection.skipped.push(SkippedPath {
+                    path: path.clone(),
+                    reason: SkipReason::Undecodable,
                 });
                 continue;
             }
@@ -1230,23 +1243,13 @@ impl GitHubRepositorySource for GitHubRestClient {
         self.fetch_tree_inner(coordinate, commit)
     }
 
-    /// Fetches the tree first, then delegates to
-    /// [`collect_blobs`](GitHubRestClient::collect_blobs).
-    ///
-    /// The extra request is the price of a signature that takes paths: a path
-    /// alone does not name an immutable object, and content has to be addressed
-    /// by blob SHA to be cacheable at all. Callers that already hold a tree —
-    /// which is every caller that ran selection — should use `collect_blobs`,
-    /// which also returns the files it skipped and why.
-    async fn fetch_selected_blobs(
+    fn collect_selected_blobs(
         &self,
         coordinate: &RepositoryCoordinate,
-        commit: &CommitSha,
+        tree: &RepositoryTree,
         paths: &[String],
-    ) -> Result<Vec<BlobContent>, GitHubSourceError> {
-        let tree = self.fetch_tree_inner(coordinate, commit).await?;
-        let selection = self.collect_blobs(coordinate, &tree, paths).await?;
-        Ok(selection.retrieved)
+    ) -> impl Future<Output = Result<BlobSelection, GitHubSourceError>> + Send {
+        self.collect_blobs(coordinate, tree, paths)
     }
 
     fn download_archive(

@@ -273,8 +273,12 @@ async fn every_request_carries_the_pinned_api_version() {
         .fetch_tree(&coordinate(), &commit())
         .await
         .expect("the tree is listed");
+    let tree = client
+        .fetch_tree(&coordinate(), &commit())
+        .await
+        .expect("the tree is listed");
     client
-        .fetch_selected_blobs(&coordinate(), &commit(), &["README.md".to_owned()])
+        .collect_selected_blobs(&coordinate(), &tree, &["README.md".to_owned()])
         .await
         .expect("the blob is fetched");
     client
@@ -282,11 +286,69 @@ async fn every_request_carries_the_pinned_api_version() {
         .await
         .expect("the archive downloads");
 
-    // Five calls, six requests: `fetch_selected_blobs` fetches a tree of its own
-    // before it can address content by blob SHA.
+    // Six calls, six requests, one apiece.
+    //
+    // It used to be five calls and six requests: content collection fetched a
+    // tree of its own before it could address a blob by SHA. It now takes the
+    // tree the caller already listed, so the extra request is gone and the
+    // count here is the number of calls made.
     assert_version_header_everywhere(&server, 6).await;
 
     drop(std::fs::remove_file(&archive));
+}
+
+#[tokio::test]
+async fn bytes_that_are_not_utf8_are_recorded_rather_than_returned() {
+    /*
+     * The same question `is_binary` asks, asked exactly.
+     *
+     * A latin-1 source file carries no `NUL`, so the sniff passes it, and it
+     * still cannot become the `&str` a rule matches on. Deciding that here is
+     * what keeps every requested path accounted for: each one ends in
+     * `retrieved` or in `skipped`. A caller that discarded it afterwards would
+     * hold a file that is in neither, and would then have to describe it as
+     * never retrieved — which is false, since the request was spent and the
+     * bytes arrived.
+     */
+    let server = MockServer::start().await;
+
+    // Mounted before `mount_repository`, whose README blob would otherwise
+    // match first and hand back perfectly good UTF-8.
+    //
+    // `0xE9` is `é` in latin-1 and an invalid UTF-8 lead byte. No `NUL`, so
+    // the binary sniff lets it through.
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/repos/tadoEng/repolens/git/blobs/{README_BLOB_SHA}"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"caf\xe9 latin\n".to_vec()))
+        .mount(&server)
+        .await;
+    mount_repository(&server).await;
+
+    let client = client(&server);
+    let tree = client
+        .fetch_tree(&coordinate(), &commit())
+        .await
+        .expect("the tree is listed");
+
+    let selection = client
+        .collect_blobs(&coordinate(), &tree, &["README.md".to_owned()])
+        .await
+        .expect("undecodable bytes are a limitation, not a failure");
+
+    assert!(
+        selection.retrieved.is_empty(),
+        "nothing readable came back, so nothing may be presented as read"
+    );
+    assert_eq!(
+        selection.skipped,
+        vec![repolens_github::SkippedPath {
+            path: "README.md".to_owned(),
+            reason: SkipReason::Undecodable,
+        }],
+        "and it is not `Binary`: there is no NUL here, only bytes that are not text"
+    );
 }
 
 #[tokio::test]
