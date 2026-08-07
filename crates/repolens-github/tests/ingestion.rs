@@ -298,6 +298,60 @@ async fn every_request_carries_the_pinned_api_version() {
 }
 
 #[tokio::test]
+async fn bytes_that_are_not_utf8_are_recorded_rather_than_returned() {
+    /*
+     * The same question `is_binary` asks, asked exactly.
+     *
+     * A latin-1 source file carries no `NUL`, so the sniff passes it, and it
+     * still cannot become the `&str` a rule matches on. Deciding that here is
+     * what keeps every requested path accounted for: each one ends in
+     * `retrieved` or in `skipped`. A caller that discarded it afterwards would
+     * hold a file that is in neither, and would then have to describe it as
+     * never retrieved — which is false, since the request was spent and the
+     * bytes arrived.
+     */
+    let server = MockServer::start().await;
+
+    // Mounted before `mount_repository`, whose README blob would otherwise
+    // match first and hand back perfectly good UTF-8.
+    //
+    // `0xE9` is `é` in latin-1 and an invalid UTF-8 lead byte. No `NUL`, so
+    // the binary sniff lets it through.
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/repos/tadoEng/repolens/git/blobs/{README_BLOB_SHA}"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"caf\xe9 latin\n".to_vec()))
+        .mount(&server)
+        .await;
+    mount_repository(&server).await;
+
+    let client = client(&server);
+    let tree = client
+        .fetch_tree(&coordinate(), &commit())
+        .await
+        .expect("the tree is listed");
+
+    let selection = client
+        .collect_blobs(&coordinate(), &tree, &["README.md".to_owned()])
+        .await
+        .expect("undecodable bytes are a limitation, not a failure");
+
+    assert!(
+        selection.retrieved.is_empty(),
+        "nothing readable came back, so nothing may be presented as read"
+    );
+    assert_eq!(
+        selection.skipped,
+        vec![repolens_github::SkippedPath {
+            path: "README.md".to_owned(),
+            reason: SkipReason::Undecodable,
+        }],
+        "and it is not `Binary`: there is no NUL here, only bytes that are not text"
+    );
+}
+
+#[tokio::test]
 async fn a_truncated_tree_is_data_rather_than_a_failure() {
     // The whole reason ingestion is REST and not GraphQL. If truncation were an
     // error, a repository too large to list would produce no report instead of a

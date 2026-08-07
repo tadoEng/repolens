@@ -306,7 +306,7 @@ fn error_code_all_matches_the_generated_enum() {
 
     assert_eq!(
         listed, generated,
-        "ErrorCode::ALL disagrees with the generated schema. Add the missing          variant to ALL — every exhaustiveness gate iterates it."
+        "ErrorCode::ALL disagrees with the generated schema. Add the missing variant to ALL — every exhaustiveness gate iterates it."
     );
 }
 

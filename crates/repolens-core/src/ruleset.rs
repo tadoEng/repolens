@@ -387,6 +387,7 @@ mod tests {
             commit: Box::leak(Box::new(commit.clone())),
             paths: Box::leak(paths.to_vec().into_boxed_slice()),
             files: Box::leak(files.to_vec().into_boxed_slice()),
+            undecodable: &[],
             tree_truncated,
             contents_collected: true,
         }
@@ -643,6 +644,7 @@ mod tests {
             commit: &commit,
             paths: &listed,
             files: &[],
+            undecodable: &[],
             tree_truncated: false,
             contents_collected: false,
         };
@@ -690,7 +692,7 @@ mod tests {
             &["package.json"],
             &[file(
                 "package.json",
-                "{\n  \"devDependencies\": {\n    \"@sveltejs/kit\": \"^2.0.0\"\n  }\n}\n",
+                "{\n  \"devDependencies\": {\n \"@sveltejs/kit\": \"^2.0.0\"\n  }\n}\n",
             )],
         ));
         let kit = outcome_of(&outcomes, "framework.sveltekit");

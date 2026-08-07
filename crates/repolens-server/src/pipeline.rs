@@ -202,16 +202,15 @@ where
         .collect();
 
     let contents = collect_contents(source, id, coordinate, &tree).await;
-    let (files, skipped, contents_collected) =
-        (contents.files, contents.skipped, contents.collected);
 
     let input = repolens_core::RuleInput {
         repository: coordinate,
         commit: &commit.sha,
         paths: &paths,
-        files: &files,
+        files: &contents.files,
+        undecodable: &contents.undecodable,
         tree_truncated: tree.truncated,
-        contents_collected,
+        contents_collected: contents.collected,
     };
     let outcomes = ruleset::evaluate(&input);
 
@@ -222,8 +221,8 @@ where
         coordinate,
         &commit,
         &tree,
-        contents_collected,
-        &skipped,
+        contents.collected,
+        &contents.skipped,
         &outcomes,
     );
 
@@ -250,12 +249,27 @@ where
 /// rendered as replacement characters can match a pattern by accident, and a
 /// rule that fired on mojibake would cite an excerpt no reader could recognise
 /// — worse than not having read the file, because it looks like evidence.
+/// Paths the ledger records as retrieved-but-unreadable.
+fn undecodable_paths(skipped: &[repolens_github::SkippedPath]) -> Vec<String> {
+    skipped
+        .iter()
+        .filter(|entry| entry.reason == repolens_github::SkipReason::Undecodable)
+        .map(|entry| entry.path.clone())
+        .collect()
+}
+
 /// What one run of content collection produced.
 struct Contents {
     /// Files whose bytes were read and decoded.
     files: Vec<repolens_core::FileContent>,
     /// Every candidate that went unread, and why.
     skipped: Vec<repolens_github::SkippedPath>,
+    /// Paths whose bytes arrived and could not be read as text.
+    ///
+    /// A subset of `skipped`, pulled out because the rules need it as a list of
+    /// paths and reading it back out of the ledger at each use would invite the
+    /// two to drift.
+    undecodable: Vec<String>,
     /// Whether collection ran at all.
     collected: bool,
 }
@@ -298,11 +312,32 @@ where
         .collect_selected_blobs(coordinate, tree, &selection.paths)
         .await
     {
-        Ok(blobs) => Contents {
-            files: decode(&blobs.retrieved),
-            skipped: selection.skipped.into_iter().chain(blobs.skipped).collect(),
-            collected: true,
-        },
+        Ok(blobs) => {
+            // Anything the decoder still rejects is added to the boundary's own
+            // ledger rather than dropped.
+            //
+            // `collect_selected_blobs` refuses non-UTF-8 bytes already, so this
+            // should always be empty; a file arriving here would be a boundary
+            // regression. Handling it in one place means such a regression
+            // costs a limitation nobody expected rather than a file that
+            // silently ceases to exist.
+            let (files, rejected) = decode(&blobs.retrieved);
+            let skipped: Vec<_> = selection
+                .skipped
+                .into_iter()
+                .chain(blobs.skipped)
+                .chain(rejected.iter().map(|path| repolens_github::SkippedPath {
+                    path: path.clone(),
+                    reason: repolens_github::SkipReason::Undecodable,
+                }))
+                .collect();
+            Contents {
+                files,
+                undecodable: undecodable_paths(&skipped),
+                skipped,
+                collected: true,
+            }
+        }
         Err(error) => {
             tracing::warn!(
                 analysis = %id,
@@ -311,6 +346,7 @@ where
             );
             Contents {
                 files: Vec::new(),
+                undecodable: Vec::new(),
                 // The pre-request ledger survives the failure: those files were
                 // ruled out before anything went wrong, and that is still true.
                 skipped: selection.skipped,
@@ -320,18 +356,28 @@ where
     }
 }
 
-fn decode(blobs: &[repolens_github::BlobContent]) -> Vec<repolens_core::FileContent> {
-    blobs
-        .iter()
-        .filter_map(|blob| {
-            // A file that will not decode is dropped rather than repaired.
-            //
-            // It stays in `paths`, so `content_verdict` sees a candidate that
-            // was never read and answers `FILE_NOT_RETRIEVED`. Substituting
-            // replacement characters would hand rules text that can match by
-            // accident, which is a worse failure than an honest gap.
-            let text = String::from_utf8(blob.bytes.clone()).ok()?;
-            Some(repolens_core::FileContent {
+fn decode(
+    blobs: &[repolens_github::BlobContent],
+) -> (Vec<repolens_core::FileContent>, Vec<String>) {
+    let mut files = Vec::with_capacity(blobs.len());
+    let mut rejected = Vec::new();
+
+    for blob in blobs {
+        // A file that will not decode is reported, not repaired and not
+        // dropped.
+        //
+        // Substituting replacement characters would hand rules text that can
+        // match by accident. Dropping it silently was worse: the file vanished
+        // from `files` while staying in `paths`, so the report published
+        // `FILE_NOT_RETRIEVED` for bytes that had in fact been retrieved, and
+        // the file appeared in no ledger at all because ingestion had counted
+        // it as a success.
+        let Ok(text) = String::from_utf8(blob.bytes.clone()) else {
+            rejected.push(blob.path.clone());
+            continue;
+        };
+        files.push({
+            repolens_core::FileContent {
                 path: blob.path.clone(),
                 text,
                 digest: blob.content_digest.clone(),
@@ -347,9 +393,11 @@ fn decode(blobs: &[repolens_github::BlobContent]) -> Vec<repolens_core::FileCont
                 // because a rule reasoning about a truncated file must already
                 // be correct on the day that becomes reachable.
                 truncated: false,
-            })
-        })
-        .collect()
+            }
+        });
+    }
+
+    (files, rejected)
 }
 
 /// Records a transition, logging rather than failing if it cannot.
@@ -629,7 +677,12 @@ fn finding(outcome: &ruleset::RuleOutcome) -> Finding {
                 // a digest would be the fabrication this pipeline exists to
                 // prevent.
                 excerpt: item.excerpt.clone(),
-                truncated: false,
+                // Whether the excerpt is short of its source line, from the
+                // clip that made it. This was hard-coded `false` while
+                // `bounded_excerpt` was clipping at 200 characters, so a long
+                // line reached the UI looking like it genuinely ended there —
+                // the exact implication this field exists to prevent.
+                truncated: item.excerpt_truncated,
                 digest: item.digest.clone(),
                 line_range: item.line_range.map(|(start, end)| LineRange { start, end }),
             })
@@ -705,16 +758,19 @@ fn skip_limitations(skipped: &[repolens_github::SkippedPath]) -> Vec<Limitation>
 fn unverifiable_limitation(reason: repolens_core::Unverifiable) -> Limitation {
     let explanation = match reason {
         repolens_core::Unverifiable::ContentsNotCollected => {
-            "No file contents were retrieved for this analysis, so this check could not be              evaluated against what any file contains."
+            "No file contents were retrieved for this analysis, so this check could not be evaluated against what any file contains."
         }
         repolens_core::Unverifiable::TreeTruncated => {
-            "The repository tree listing was truncated, so a file that would answer this check              may exist without having been seen."
+            "The repository tree listing was truncated, so a file that would answer this check may exist without having been seen."
         }
         repolens_core::Unverifiable::NotRetrieved => {
-            "A file this check depends on was listed in the tree, but its contents were not among              those retrieved. Nothing was read from it, so its absence proves nothing."
+            "A file this check depends on was listed in the tree, but its contents were not among those retrieved. Nothing was read from it, so its absence proves nothing."
+        }
+        repolens_core::Unverifiable::NotDecodable => {
+            "A file this check depends on was retrieved, but its bytes are not valid UTF-8 and could not be read as text. The file is there; what it says could not be established."
         }
         repolens_core::Unverifiable::FileTruncated => {
-            "A file this check reads was cut short by the per-file byte cap. The answer may be in              the part that was not read."
+            "A file this check reads was cut short by the per-file byte cap. The answer may be in the part that was not read."
         }
     };
     Limitation {
@@ -771,17 +827,17 @@ fn describe(rule_id: &str) -> (&'static str, &'static str, FindingCategory) {
         ),
         "framework.axum" => (
             "Built on axum",
-            "The Cargo manifest declares axum, so the HTTP surface is built on it. Read from              the dependency line quoted below rather than inferred from a directory name.",
+            "The Cargo manifest declares axum, so the HTTP surface is built on it. Read from the dependency line quoted below rather than inferred from a directory name.",
             FindingCategory::Technology,
         ),
         "framework.sveltekit" => (
             "Built on SvelteKit",
-            "The npm manifest declares @sveltejs/kit. This states which framework the              frontend uses, not how it is deployed — an adapter choice needs its own rule.",
+            "The npm manifest declares @sveltejs/kit. This states which framework the frontend uses, not how it is deployed — an adapter choice needs its own rule.",
             FindingCategory::Technology,
         ),
         "database.sqlx" => (
             "Database access through SQLx",
-            "The Cargo manifest declares sqlx. Committed migrations say a schema is versioned;              this says what reaches it.",
+            "The Cargo manifest declares sqlx. Committed migrations say a schema is versioned; this says what reaches it.",
             FindingCategory::Technology,
         ),
         _ => (
@@ -811,6 +867,7 @@ mod tests {
             )),
             paths: Box::leak(paths.to_vec().into_boxed_slice()),
             files: &[],
+            undecodable: &[],
             tree_truncated: false,
             contents_collected: false,
         }
@@ -828,6 +885,7 @@ mod tests {
             )),
             paths: Box::leak(paths.to_vec().into_boxed_slice()),
             files: Box::leak(files.to_vec().into_boxed_slice()),
+            undecodable: &[],
             tree_truncated: false,
             contents_collected: true,
         }
@@ -1151,6 +1209,169 @@ mod tests {
         };
 
         assert_eq!(render(&first_order), render(&second_order));
+    }
+
+    /// A run that read `files` and choked on `undecodable`.
+    fn undecodable_input(
+        paths: &[String],
+        files: &[repolens_core::FileContent],
+        undecodable: &[String],
+    ) -> repolens_core::RuleInput<'static> {
+        repolens_core::RuleInput {
+            repository: Box::leak(Box::new(RepositoryCoordinate::new("owner", "name"))),
+            commit: Box::leak(Box::new(
+                repolens_core::CommitSha::parse(&"a".repeat(40)).expect("a literal digest"),
+            )),
+            paths: Box::leak(paths.to_vec().into_boxed_slice()),
+            files: Box::leak(files.to_vec().into_boxed_slice()),
+            undecodable: Box::leak(undecodable.to_vec().into_boxed_slice()),
+            tree_truncated: false,
+            contents_collected: true,
+        }
+    }
+
+    #[test]
+    fn an_undecodable_file_is_not_reported_as_one_that_never_arrived() {
+        /*
+         * The bytes were fetched, a request was spent on them, and only the
+         * decoder rejected them. Publishing `FILE_NOT_RETRIEVED` states
+         * something untrue about that — and the file used to vanish from the
+         * skip ledger entirely, because ingestion had already counted it a
+         * success.
+         */
+        let paths = vec!["Cargo.toml".to_owned()];
+        let outcomes = ruleset::evaluate(&undecodable_input(&paths, &[], &paths));
+        let report = build_report(
+            Uuid::nil(),
+            &RepositoryCoordinate::new("owner", "name"),
+            &a_commit(),
+            &empty_tree(),
+            true,
+            &[skipped(
+                "Cargo.toml",
+                repolens_github::SkipReason::Undecodable,
+            )],
+            &outcomes,
+        );
+
+        let axum = finding_of(&report, "framework.axum");
+        assert_eq!(axum.state, FindingState::UnableToVerify);
+        assert_eq!(
+            axum.limitations
+                .iter()
+                .map(|l| l.code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["FILE_NOT_DECODABLE"],
+            "the reason must not claim the bytes were never retrieved"
+        );
+
+        // And it is in the ledger, which is the half that disappeared.
+        let codes = limitation_codes(&report);
+        assert!(codes.contains(&"FILE_SKIPPED_UNDECODABLE"), "{codes:?}");
+    }
+
+    #[test]
+    fn a_clipped_excerpt_says_so_on_the_wire() {
+        /*
+         * `bounded_excerpt` clips at 200 characters and appends an ellipsis,
+         * and `Evidence.truncated` exists so the UI can say "truncated" rather
+         * than implying the source line ended there. It was hard-coded `false`,
+         * so the one field that carries this told the frontend the opposite.
+         */
+        let long = format!("axum = \"0.8\" # {}", "x".repeat(400));
+        let files = vec![read_file(
+            "Cargo.toml",
+            &format!("[dependencies]\n{long}\n"),
+        )];
+        let outcomes = ruleset::evaluate(&content_input(&["Cargo.toml".to_owned()], &files));
+        let report = report_over(true, &outcomes);
+
+        let evidence = finding_of(&report, "framework.axum")
+            .evidence
+            .first()
+            .expect("the line is cited")
+            .clone();
+        assert!(
+            evidence.truncated,
+            "the excerpt was clipped and must say so"
+        );
+        assert!(
+            evidence.excerpt.expect("an excerpt").ends_with('…'),
+            "and the clip itself is still marked"
+        );
+    }
+
+    #[test]
+    fn an_excerpt_that_fits_is_not_marked_truncated() {
+        // A flag that were always true would be as useless as one always false.
+        let files = vec![read_file("Cargo.toml", CARGO_WITH_AXUM)];
+        let outcomes = ruleset::evaluate(&content_input(&["Cargo.toml".to_owned()], &files));
+        let report = report_over(true, &outcomes);
+
+        let evidence = finding_of(&report, "framework.axum")
+            .evidence
+            .first()
+            .expect("the line is cited")
+            .clone();
+        assert!(!evidence.truncated);
+        assert_eq!(evidence.excerpt.as_deref(), Some("axum = \"0.8\""));
+    }
+
+    #[test]
+    fn every_published_sentence_reads_as_prose() {
+        /*
+         * A guard against a specific, recurring accident: a Rust string written
+         * across several source lines loses its `\` continuation, and the
+         * literal silently acquires the source file's indentation as a run of
+         * spaces in the middle of a sentence. It compiles, no test notices, and
+         * a reader sees "built on it. Read from        the dependency line".
+         *
+         * These strings are the report. Checking them here costs nothing and
+         * catches it the moment it happens rather than in a screenshot.
+         */
+        let mut sentences: Vec<String> = Vec::new();
+        for outcome in ruleset::evaluate(&path_input(&[])) {
+            let (title, explanation, _) = describe(outcome.rule_id);
+            sentences.push(title.to_owned());
+            sentences.push(explanation.to_owned());
+        }
+        for reason in [
+            repolens_core::Unverifiable::ContentsNotCollected,
+            repolens_core::Unverifiable::TreeTruncated,
+            repolens_core::Unverifiable::NotRetrieved,
+            repolens_core::Unverifiable::NotDecodable,
+            repolens_core::Unverifiable::FileTruncated,
+        ] {
+            sentences.push(unverifiable_limitation(reason).explanation);
+        }
+        for reason in [
+            repolens_github::SkipReason::NotInTree,
+            repolens_github::SkipReason::NotAFile,
+            repolens_github::SkipReason::Binary,
+            repolens_github::SkipReason::Undecodable,
+            repolens_github::SkipReason::TooLarge {
+                size_bytes: 1,
+                limit_bytes: 1,
+            },
+            repolens_github::SkipReason::BudgetSpent { limit_bytes: 1 },
+            repolens_github::SkipReason::SelectionFull { limit: 1 },
+        ] {
+            sentences.push(reason.explanation().to_owned());
+        }
+
+        for sentence in sentences {
+            assert!(
+                !sentence.contains("  "),
+                "a published sentence carries a run of spaces, which is a lost \
+                 line continuation rather than typography: {sentence:?}"
+            );
+            assert_eq!(
+                sentence.trim(),
+                sentence,
+                "a published sentence is padded: {sentence:?}"
+            );
+            assert!(!sentence.is_empty(), "a published sentence is empty");
+        }
     }
 
     #[test]

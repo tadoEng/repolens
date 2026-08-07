@@ -61,6 +61,13 @@ pub struct RuleInput<'a> {
     pub paths: &'a [String],
     /// The bounded set of files whose contents were retrieved.
     pub files: &'a [FileContent],
+    /// Paths whose bytes arrived but could not be read as text.
+    ///
+    /// Absent from `files` like a file nobody fetched, and not the same thing
+    /// at all: the request was spent and the bytes are there. Carried so the
+    /// rule can say which of the two happened instead of publishing the more
+    /// flattering one.
+    pub undecodable: &'a [String],
     /// `true` when GitHub could not return the whole tree.
     pub tree_truncated: bool,
     /// `true` when content collection ran for this analysis.
@@ -91,6 +98,11 @@ impl<'a> RuleInput<'a> {
         self.files.iter().any(|file| file.path == path)
     }
 
+    /// Whether this exact path arrived as bytes that would not decode.
+    fn is_undecodable(&self, path: &str) -> bool {
+        self.undecodable.iter().any(|other| other == path)
+    }
+
     /// What a content rule may conclude, having matched nothing.
     ///
     /// The four-way distinction from [`crate::evidence_input`], decided once.
@@ -119,14 +131,18 @@ impl<'a> RuleInput<'a> {
         // confident `MISSING` that means "we looked, it is not there", not the
         // `UNABLE_TO_VERIFY` that means "we did not open the file that would
         // have said so".
-        if self
-            .paths
-            .iter()
-            .any(|path| wants(path) && !self.was_read(path))
-        {
-            // The tree listed it; selection or the byte budget did not retrieve
-            // it. We know it exists and nothing about what is inside.
-            return ContentVerdict::Unverifiable(Unverifiable::NotRetrieved);
+        for path in self.paths.iter().filter(|path| wants(path)) {
+            if self.was_read(path) {
+                continue;
+            }
+            // Both are silences about a file that exists, and they are not the
+            // same silence. Bytes that arrived and would not decode are not
+            // bytes nobody fetched.
+            return ContentVerdict::Unverifiable(if self.is_undecodable(path) {
+                Unverifiable::NotDecodable
+            } else {
+                Unverifiable::NotRetrieved
+            });
         }
 
         if self.tree_truncated {
@@ -198,6 +214,7 @@ mod verdict_tests {
             commit: &commit,
             paths: &paths,
             files: &[],
+            undecodable: &[],
             tree_truncated: false,
             contents_collected: false,
         };
@@ -220,6 +237,7 @@ mod verdict_tests {
             commit: &commit,
             paths: &paths,
             files: &files,
+            undecodable: &[],
             tree_truncated: false,
             contents_collected: true,
         };
@@ -243,6 +261,7 @@ mod verdict_tests {
             commit: &commit,
             paths: &paths,
             files: &files,
+            undecodable: &[],
             tree_truncated: false,
             contents_collected: true,
         };
@@ -265,6 +284,7 @@ mod verdict_tests {
             commit: &commit,
             paths: &paths,
             files: &[],
+            undecodable: &[],
             tree_truncated: false,
             contents_collected: true,
         };
@@ -289,6 +309,7 @@ mod verdict_tests {
             commit: &commit,
             paths: &paths,
             files: &files,
+            undecodable: &[],
             tree_truncated: false,
             contents_collected: true,
         };
@@ -316,6 +337,7 @@ mod verdict_tests {
             commit: &commit,
             paths: &paths,
             files: &files,
+            undecodable: &[],
             tree_truncated: false,
             contents_collected: true,
         };
@@ -339,6 +361,7 @@ mod verdict_tests {
             commit: &commit,
             paths: &paths,
             files: &files,
+            undecodable: &[],
             tree_truncated: true,
             contents_collected: true,
         };
@@ -346,6 +369,57 @@ mod verdict_tests {
         assert_eq!(
             input.content_verdict(wants_cargo),
             ContentVerdict::Unverifiable(Unverifiable::TreeTruncated)
+        );
+    }
+
+    #[test]
+    fn bytes_that_arrived_and_would_not_decode_are_not_bytes_nobody_fetched() {
+        // Both silences are about a file that exists, and they send a reader
+        // somewhere different: `FILE_NOT_RETRIEVED` says the budget or the
+        // selection stopped us, which invites "raise the budget". Here the
+        // request was spent and the bytes arrived — nothing about a larger
+        // budget would help.
+        let paths = vec!["Cargo.toml".to_owned()];
+        let undecodable = vec!["Cargo.toml".to_owned()];
+        let repository = coordinate();
+        let commit = commit();
+        let input = RuleInput {
+            repository: &repository,
+            commit: &commit,
+            paths: &paths,
+            files: &[],
+            undecodable: &undecodable,
+            tree_truncated: false,
+            contents_collected: true,
+        };
+
+        assert_eq!(
+            input.content_verdict(wants_cargo),
+            ContentVerdict::Unverifiable(Unverifiable::NotDecodable)
+        );
+    }
+
+    #[test]
+    fn an_undecodable_file_elsewhere_does_not_change_this_rule() {
+        // The list is consulted per path, not as a global mood.
+        let paths = vec!["Cargo.toml".to_owned()];
+        let undecodable = vec!["src/latin1.rs".to_owned()];
+        let files = vec![file("Cargo.toml", "[package]\nname = \"x\"\n", false)];
+        let repository = coordinate();
+        let commit = commit();
+        let input = RuleInput {
+            repository: &repository,
+            commit: &commit,
+            paths: &paths,
+            files: &files,
+            undecodable: &undecodable,
+            tree_truncated: false,
+            contents_collected: true,
+        };
+
+        assert_eq!(
+            input.content_verdict(wants_cargo),
+            ContentVerdict::ReadAndAbsent
         );
     }
 
@@ -359,6 +433,7 @@ mod verdict_tests {
             commit: &commit,
             paths: &paths,
             files: &[],
+            undecodable: &[],
             tree_truncated: true,
             contents_collected: true,
         };
@@ -379,6 +454,7 @@ mod verdict_tests {
             commit: &commit,
             paths: &paths,
             files: &[],
+            undecodable: &[],
             tree_truncated: false,
             contents_collected: true,
         };

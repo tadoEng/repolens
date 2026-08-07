@@ -10,14 +10,15 @@
 //! When a content rule finds nothing, exactly one of these is true, and they are
 //! not interchangeable:
 //!
-//! | Situation                                    | Honest outcome     |
-//! | -------------------------------------------- | ------------------ |
-//! | Contents were never collected for this run    | `UNABLE_TO_VERIFY` |
-//! | The tree was truncated, so the file may exist | `UNABLE_TO_VERIFY` |
-//! | The path exists but the bytes were not read   | `UNABLE_TO_VERIFY` |
-//! | The file was read, and the thing is not in it | `MISSING`          |
+//! | Situation                                     | Honest outcome     |
+//! | --------------------------------------------- | ------------------ |
+//! | Contents were never collected for this run     | `UNABLE_TO_VERIFY` |
+//! | The tree was truncated, so the file may exist  | `UNABLE_TO_VERIFY` |
+//! | The path exists but the bytes were not read    | `UNABLE_TO_VERIFY` |
+//! | The bytes arrived but are not readable as text | `UNABLE_TO_VERIFY` |
+//! | The file was read, and the thing is not in it  | `MISSING`          |
 //!
-//! Only the last is knowledge. The other three are absence of evidence, and
+//! Only the last is knowledge. The other four are absence of evidence, and
 //! collapsing any of them into `MISSING` reports a repository as lacking
 //! something nobody actually looked for.
 //!
@@ -87,6 +88,14 @@ pub struct RuleEvidence {
     pub digest: Option<ContentDigest>,
     /// 1-based inclusive line range of the excerpt.
     pub line_range: Option<(u32, u32)>,
+    /// Whether `excerpt` was cut short of the line it came from.
+    ///
+    /// Carried rather than recomputed downstream. A reader shown a clipped
+    /// excerpt with no marker concludes the source line ended there, and a
+    /// trailing `…` is a character in a string — not something a renderer
+    /// should have to parse to find out whether it is looking at the whole
+    /// line.
+    pub excerpt_truncated: bool,
 }
 
 impl RuleEvidence {
@@ -98,20 +107,24 @@ impl RuleEvidence {
             excerpt: None,
             digest: None,
             line_range: None,
+            // Nothing was read, so nothing was clipped.
+            excerpt_truncated: false,
         }
     }
 
     /// Evidence quoting one line of a file that was read.
     #[must_use]
     pub fn line(file: &FileContent, line_number: u32, text: &str) -> Self {
+        // Trimmed and bounded. An excerpt is for a human to recognise, and a
+        // minified bundle on one line would otherwise put the whole file in the
+        // report.
+        let (excerpt, excerpt_truncated) = bounded_excerpt(text);
         Self {
             path: file.path.clone(),
-            // Trimmed and bounded. An excerpt is for a human to recognise, and
-            // a minified bundle on one line would otherwise put the whole file
-            // in the report.
-            excerpt: Some(bounded_excerpt(text)),
+            excerpt: Some(excerpt),
             digest: Some(file.digest.clone()),
             line_range: Some((line_number, line_number)),
+            excerpt_truncated,
         }
     }
 }
@@ -122,15 +135,19 @@ impl RuleEvidence {
 /// dominate a report.
 const MAX_EXCERPT_CHARS: usize = 200;
 
-fn bounded_excerpt(text: &str) -> String {
+/// The excerpt to show, and whether it is short of the line it came from.
+///
+/// The flag is returned rather than inferred from the trailing `…`, because a
+/// source line may genuinely end in one.
+fn bounded_excerpt(text: &str) -> (String, bool) {
     let trimmed = text.trim();
     if trimmed.chars().count() <= MAX_EXCERPT_CHARS {
-        return trimmed.to_owned();
+        return (trimmed.to_owned(), false);
     }
     // Truncated on a character boundary, and said so — a silently clipped
     // excerpt would look like the line genuinely ended there.
     let kept: String = trimmed.chars().take(MAX_EXCERPT_CHARS).collect();
-    format!("{kept}…")
+    (format!("{kept}…"), true)
 }
 
 /// Why a rule could not reach a conclusion from content.
@@ -142,6 +159,13 @@ pub enum Unverifiable {
     TreeTruncated,
     /// The path was seen in the tree but its bytes were not retrieved.
     NotRetrieved,
+    /// The bytes were retrieved and are not valid UTF-8.
+    ///
+    /// Separate from [`Unverifiable::NotRetrieved`] because that one states
+    /// something untrue about this case: the request was spent and the file
+    /// arrived. What is missing is text, not bytes — and the fix is a decoder
+    /// or a different file, not a larger budget.
+    NotDecodable,
     /// The file was read, but the per-blob cap cut it short.
     FileTruncated,
 }
@@ -154,6 +178,7 @@ impl Unverifiable {
             Self::ContentsNotCollected => "CONTENTS_NOT_COLLECTED",
             Self::TreeTruncated => "TREE_TRUNCATED",
             Self::NotRetrieved => "FILE_NOT_RETRIEVED",
+            Self::NotDecodable => "FILE_NOT_DECODABLE",
             Self::FileTruncated => "FILE_TRUNCATED",
         }
     }
@@ -232,11 +257,39 @@ members = [\"crates/*\"]
         let (number, text) = file.find_line(|line| line.starts_with('x')).unwrap();
         let evidence = RuleEvidence::line(&file, number, text);
 
+        assert!(
+            evidence.excerpt_truncated,
+            "the wire contract's `truncated` bit is what stops the UI implying \
+             the line ended here, and it has to come from the clip itself"
+        );
+
         let excerpt = evidence.excerpt.expect("an excerpt is present");
         assert!(excerpt.chars().count() <= MAX_EXCERPT_CHARS + 1);
         assert!(
             excerpt.ends_with('…'),
             "a clipped excerpt must not look like the line ended there"
         );
+    }
+
+    #[test]
+    fn a_line_that_fits_is_not_marked_truncated() {
+        // The other half: a `truncated` bit that were always true would be as
+        // useless as one that were always false.
+        let file = file("Cargo.toml", "axum = \"0.8\"\n");
+        let (number, text) = file.find_line(|line| line.starts_with("axum")).unwrap();
+
+        assert!(!RuleEvidence::line(&file, number, text).excerpt_truncated);
+    }
+
+    #[test]
+    fn a_line_ending_in_an_ellipsis_is_not_mistaken_for_a_clipped_one() {
+        // Which is why the flag is returned by the clip rather than sniffed off
+        // the end of the string afterwards.
+        let file = file("README.md", "and so on…\n");
+        let (number, text) = file.find_line(|line| line.starts_with("and")).unwrap();
+        let evidence = RuleEvidence::line(&file, number, text);
+
+        assert_eq!(evidence.excerpt.as_deref(), Some("and so on…"));
+        assert!(!evidence.excerpt_truncated);
     }
 }

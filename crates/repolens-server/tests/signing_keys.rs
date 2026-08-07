@@ -291,7 +291,7 @@ async fn the_cached_lifetime_is_the_one_google_served() {
     let two_hours = lifetime_for(Some(7200)).await;
     assert!(
         about(two_hours, 7200),
-        "max-age=7200 must yield roughly two hours, got {two_hours:?} — a fixed          default would read one hour here"
+        "max-age=7200 must yield roughly two hours, got {two_hours:?} — a fixed default would read one hour here"
     );
 }
 

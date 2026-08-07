@@ -330,6 +330,22 @@ impl GitHubRestClient {
                 continue;
             }
 
+            // The same question as the sniff above, asked exactly: can a rule
+            // read text out of this?
+            //
+            // A latin-1 source file carries no `NUL`, passes `is_binary`, and
+            // still cannot become a `&str`. Deciding that here rather than
+            // downstream is what keeps every requested path accounted for —
+            // each one ends in `retrieved` or in `skipped`, and a caller that
+            // dropped it later would have a file that is in neither.
+            if std::str::from_utf8(&bytes).is_err() {
+                selection.skipped.push(SkippedPath {
+                    path: path.clone(),
+                    reason: SkipReason::Undecodable,
+                });
+                continue;
+            }
+
             selection.retrieved.push(BlobContent {
                 path: path.clone(),
                 sha: entry.sha.clone(),
