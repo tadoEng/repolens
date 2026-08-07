@@ -1,0 +1,345 @@
+//! The seed ruleset.
+//!
+//! Deliberately small. Six rules is enough to prove the evidence contract end
+//! to end — a report that cites real paths at a real commit — without turning
+//! the demo into a rules project. Issue #5 grows this; the shape it grows into
+//! is fixed here.
+//!
+//! Every rule is a pure function of the evidence it is handed. No I/O, no
+//! clock, no configuration it did not receive. That is what makes two runs over
+//! the same commit produce the same report, which is the property the whole
+//! product rests on.
+//!
+//! These rules read **paths only**, not file contents. A path-based rule can
+//! honestly claim `DETECTED` for presence and cite the path as evidence, which
+//! is a weaker claim than reading the file but a true one — and it needs no
+//! blob fetches, so a report costs one tree request rather than dozens.
+//! Content-reading rules arrive with #5, and will carry higher confidence
+//! because they can show an excerpt.
+
+use serde::{Deserialize, Serialize};
+
+/// Version of this ruleset, part of the reproducibility key.
+///
+/// Bump on any change that could alter a report: a new rule, a changed
+/// threshold, a different evidence path. Two reports with the same commit and
+/// different ruleset versions are allowed to disagree; two with the same
+/// version are not.
+///
+/// `2` renamed `contract.openapi` to `contract.openapi.committed` and narrowed
+/// its title to the filename it actually tests. A rule id is how a stored
+/// report is read back, so the rename alone would make version `1` reports
+/// disagree with version `2` reports about a rule that never changed its
+/// verdict — which is precisely what the version exists to explain.
+pub const RULESET_VERSION: &str = "2";
+
+/// What a rule concluded.
+///
+/// Mirrors the wire `FindingState` without depending on it — the contract lives
+/// in `repolens-server`, and a domain crate that imported it would invert the
+/// dependency the architecture forbids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Outcome {
+    /// Observed directly.
+    Detected,
+    /// Looked for and genuinely absent.
+    Missing,
+    /// Could not be established from the evidence collected.
+    UnableToVerify,
+}
+
+/// One rule's verdict, with the paths that justify it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleOutcome {
+    /// Stable rule identifier, e.g. `rust.workspace`.
+    pub rule_id: &'static str,
+    /// What the rule concluded.
+    pub outcome: Outcome,
+    /// Paths supporting the conclusion. Empty for `UNABLE_TO_VERIFY`, which is
+    /// precisely the case where there is nothing to show.
+    pub evidence_paths: Vec<String>,
+}
+
+/// A rule: a name, and a predicate over repository paths.
+struct PathRule {
+    rule_id: &'static str,
+    /// Matches a path that would satisfy the rule.
+    matches: fn(&str) -> bool,
+}
+
+/// The rules, in report order.
+///
+/// Order is fixed here rather than sorted later, because the report promises a
+/// server-decided order and a stable one is the cheapest way to keep that
+/// promise honest.
+const RULES: &[PathRule] = &[
+    PathRule {
+        rule_id: "rust.workspace",
+        matches: |path| path == "Cargo.toml",
+    },
+    PathRule {
+        rule_id: "ci.workflows",
+        matches: |path| path.starts_with(".github/workflows/"),
+    },
+    PathRule {
+        rule_id: "docs.architecture",
+        matches: |path| {
+            let lower = path.to_ascii_lowercase();
+            lower.starts_with("docs/architecture") || lower == "architecture.md"
+        },
+    },
+    PathRule {
+        // Named for the filename convention it tests, not for the property a
+        // reader wishes it tested. "This repository publishes an OpenAPI
+        // contract" is a strictly broader claim than "a file with this name is
+        // committed", and only the second is decidable from a path.
+        //
+        // `rust-lang/crates.io` at 7bef82ce is the case that settles it: it
+        // generates its document with utoipa and commits it, as a 174 KB insta
+        // snapshot at `src/tests/snapshots/integration__openapi__openapi_snapshot-2.snap`.
+        // No `openapi.json` or `openapi.yaml` exists, so this rule reports
+        // MISSING over a complete tree — correct for the narrow claim, and a
+        // false negative for the broad one. Detecting the general case needs a
+        // content or dependency rule, which is #5.
+        rule_id: "contract.openapi.committed",
+        // The **final path component**, compared exactly. `ends_with` was wrong
+        // in the direction that matters: `notopenapi.json`, `my-openapi.yaml`
+        // and `vendor/legacy-openapi.json` all end with the string and none of
+        // them is the conventional artifact this rule claims to find. A rule
+        // whose title names a filename has to compare a filename.
+        matches: |path| {
+            matches!(
+                path.rsplit('/').next(),
+                Some("openapi.json" | "openapi.yaml")
+            )
+        },
+    },
+    PathRule {
+        rule_id: "database.migrations",
+        // Extension compared case-insensitively: `.SQL` is the same migration to
+        // every tool that will run it, and treating it as a different file would
+        // report a schema as absent because of how somebody named it.
+        matches: |path| {
+            path.starts_with("migrations/")
+                && std::path::Path::new(path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))
+        },
+    },
+    PathRule {
+        rule_id: "tests.present",
+        matches: |path| {
+            path.starts_with("tests/") || path.contains("/tests/") || path.ends_with(".test.ts")
+        },
+    },
+];
+
+/// Evaluates every rule against a repository's paths.
+///
+/// `tree_truncated` is not a detail — it changes what a negative result *means*.
+/// When the collector could not see the whole tree, "no architecture document
+/// among the paths we have" is `UNABLE_TO_VERIFY`, not `MISSING`. Reporting the
+/// second would be claiming knowledge the evidence does not support, which is
+/// the single failure this product exists to avoid.
+#[must_use]
+pub fn evaluate(paths: &[String], tree_truncated: bool) -> Vec<RuleOutcome> {
+    RULES
+        .iter()
+        .map(|rule| {
+            let matched: Vec<String> = paths
+                .iter()
+                .filter(|path| (rule.matches)(path))
+                .cloned()
+                .collect();
+
+            let outcome = if matched.is_empty() {
+                if tree_truncated {
+                    Outcome::UnableToVerify
+                } else {
+                    Outcome::Missing
+                }
+            } else {
+                Outcome::Detected
+            };
+
+            RuleOutcome {
+                rule_id: rule.rule_id,
+                outcome,
+                // Bounded: a repository with 4,000 test files should cite a few,
+                // not send all of them to a browser.
+                evidence_paths: matched.into_iter().take(3).collect(),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn detects_what_is_present_and_cites_it() {
+        let outcomes = evaluate(&paths(&["Cargo.toml", ".github/workflows/ci.yml"]), false);
+
+        let workspace = outcomes
+            .iter()
+            .find(|o| o.rule_id == "rust.workspace")
+            .unwrap();
+        assert_eq!(workspace.outcome, Outcome::Detected);
+        assert_eq!(workspace.evidence_paths, vec!["Cargo.toml".to_owned()]);
+    }
+
+    #[test]
+    fn a_complete_tree_makes_absence_reportable() {
+        let outcomes = evaluate(&paths(&["README.md"]), false);
+        let docs = outcomes
+            .iter()
+            .find(|o| o.rule_id == "docs.architecture")
+            .unwrap();
+        assert_eq!(docs.outcome, Outcome::Missing);
+        assert!(docs.evidence_paths.is_empty());
+    }
+
+    #[test]
+    fn a_truncated_tree_turns_absence_into_unable_to_verify() {
+        // The distinction the whole product rests on: we did not see it is not
+        // it is not there.
+        let outcomes = evaluate(&paths(&["README.md"]), true);
+        let docs = outcomes
+            .iter()
+            .find(|o| o.rule_id == "docs.architecture")
+            .unwrap();
+        assert_eq!(docs.outcome, Outcome::UnableToVerify);
+    }
+
+    #[test]
+    fn truncation_does_not_weaken_a_positive_result() {
+        // Seeing a file proves it exists regardless of what else was missed.
+        let outcomes = evaluate(&paths(&["Cargo.toml"]), true);
+        let workspace = outcomes
+            .iter()
+            .find(|o| o.rule_id == "rust.workspace")
+            .unwrap();
+        assert_eq!(workspace.outcome, Outcome::Detected);
+    }
+
+    #[test]
+    fn evidence_is_bounded() {
+        let many: Vec<String> = (0..4_000).map(|i| format!("tests/case_{i}.rs")).collect();
+        let outcomes = evaluate(&many, false);
+        let tests = outcomes
+            .iter()
+            .find(|o| o.rule_id == "tests.present")
+            .unwrap();
+        assert!(tests.evidence_paths.len() <= 3);
+    }
+
+    #[test]
+    fn the_order_is_stable() {
+        let first: Vec<_> = evaluate(&paths(&["Cargo.toml"]), false)
+            .into_iter()
+            .map(|o| o.rule_id)
+            .collect();
+        let second: Vec<_> = evaluate(&paths(&["Cargo.toml"]), false)
+            .into_iter()
+            .map(|o| o.rule_id)
+            .collect();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn the_openapi_rule_claims_only_the_filename_it_tests() {
+        // Both halves matter, and the second is the one that keeps the title
+        // honest.
+        let committed = evaluate(&paths(&["contracts/openapi.json"]), false);
+        let found = committed
+            .iter()
+            .find(|o| o.rule_id == "contract.openapi.committed")
+            .unwrap();
+        assert_eq!(found.outcome, Outcome::Detected);
+
+        // `rust-lang/crates.io` at 7bef82ce: utoipa generates the document and
+        // the repository commits it — as an insta snapshot, under a name this
+        // rule cannot recognise. MISSING is the correct answer to "is there a
+        // committed openapi.json or openapi.yaml" and the wrong answer to "does
+        // this repository publish an OpenAPI contract", which is why the
+        // finding's title asks only the first.
+        let snapshot = evaluate(
+            &paths(&[
+                "src/openapi.rs",
+                "src/tests/openapi.rs",
+                "src/tests/snapshots/integration__openapi__openapi_snapshot-2.snap",
+            ]),
+            false,
+        );
+        let found = snapshot
+            .iter()
+            .find(|o| o.rule_id == "contract.openapi.committed")
+            .unwrap();
+        assert_eq!(
+            found.outcome,
+            Outcome::Missing,
+            "a path-based rule cannot see an OpenAPI document committed under another name; \
+             if this ever detects one, the title must widen to match"
+        );
+    }
+
+    #[test]
+    fn the_openapi_rule_compares_a_filename_rather_than_a_suffix() {
+        let outcome = |items: &[&str]| {
+            evaluate(&paths(items), false)
+                .into_iter()
+                .find(|o| o.rule_id == "contract.openapi.committed")
+                .unwrap()
+                .outcome
+        };
+
+        // The conventional artifact, at the root and nested.
+        for accepted in [
+            "openapi.json",
+            "openapi.yaml",
+            "contracts/openapi.json",
+            "api/v1/openapi.yaml",
+        ] {
+            assert_eq!(
+                outcome(&[accepted]),
+                Outcome::Detected,
+                "should detect {accepted}"
+            );
+        }
+
+        // Near misses. Every one of these ends with the string the rule used to
+        // test, and not one of them is a committed OpenAPI document — a false
+        // DETECTED is worse than the false MISSING this rule was narrowed to
+        // avoid, because it claims evidence that does not exist.
+        for rejected in [
+            "notopenapi.json",
+            "my-openapi.yaml",
+            "vendor/legacy-openapi.json",
+            "openapi.json.bak",
+            "openapi.yaml.tmpl",
+            "openapi.jsonc",
+            "docs/openapi.md",
+            "openapi.yml",
+        ] {
+            assert_eq!(
+                outcome(&[rejected]),
+                Outcome::Missing,
+                "should not accept {rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_rule_has_a_distinct_id() {
+        let mut ids: Vec<_> = RULES.iter().map(|r| r.rule_id).collect();
+        ids.sort_unstable();
+        let count = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "two rules share an id");
+    }
+}

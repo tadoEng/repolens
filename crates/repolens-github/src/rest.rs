@@ -1028,13 +1028,20 @@ impl GitHubRestClient {
             return Err(GitHubSourceError::RepositoryNotFound(coordinate.clone()));
         }
 
-        if payload.size > limits::MAX_REPOSITORY_KILOBYTES {
-            return Err(GitHubSourceError::LimitExceeded {
-                limit_name: "repository kilobytes",
-                limit: limits::MAX_REPOSITORY_KILOBYTES,
-                observed: payload.size,
-            });
-        }
+        // The size ceiling is **not** enforced here, and that is deliberate.
+        //
+        // It used to be, above this point, which meant an oversized repository
+        // was rejected before `full_name` had been parsed — so the caller
+        // received `LimitExceeded` with no way to learn the canonical
+        // coordinate, and a renamed repository reached a terminal state under
+        // the address the submitter typed. Rejecting is a policy decision the
+        // caller has to record against a specific repository, so it belongs
+        // where that repository is known.
+        //
+        // `size_kilobytes` below carries the number for the caller to judge.
+        // Nothing has been downloaded at this point: this is one metadata
+        // request, so refusing here bought no bandwidth that refusing one step
+        // later does not.
 
         // Taken from the response rather than the request, so a repository that
         // has been renamed is analyzed and recorded under the name it now has.
@@ -1076,16 +1083,17 @@ impl GitHubRestClient {
 
         let malformed = || GitHubSourceError::MalformedResponse { resource: "commit" };
 
-        // Both digests are validated even though only one is kept as a typed
-        // value. They become the analysis' identity, and an identity assembled
-        // from unvalidated strings is one that can be forged by a malformed
-        // response rather than chosen.
+        // Both digests are validated and both stay typed. They become the
+        // analysis' identity, and an identity assembled from unvalidated
+        // strings is one that can be forged by a malformed response rather than
+        // chosen. Keeping the tree as a `TreeSha` all the way to the wire DTO
+        // is what stops it from being swapped with `sha` downstream.
         let sha = CommitSha::parse(&payload.sha).map_err(|_| malformed())?;
         let tree_sha = TreeSha::parse(&payload.commit.tree.sha).map_err(|_| malformed())?;
 
         Ok(ResolvedCommit {
             sha,
-            tree_sha: tree_sha.as_str().to_owned(),
+            tree_sha,
             committed_at: payload.commit.committer.date,
         })
     }

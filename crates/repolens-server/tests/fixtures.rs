@@ -84,11 +84,25 @@ fn pending(state: AnalysisState, trigger: TriggerStatus, commit: Option<&str>) -
 }
 
 /// An analysis that failed, carrying the server's retry decision.
-fn failed(state: AnalysisState, error: ApiError, retry: RetryPolicy) -> Analysis {
+///
+/// `commit` is a parameter rather than a constant because **not every failure
+/// has one**. A repository that is absent, archived, or over the metadata size
+/// ceiling is rejected during resolution, before `resolve_commit` is ever
+/// called, so those fixtures must carry `null`. Hardcoding a SHA for all of
+/// them made the executable contract describe states the pipeline cannot
+/// produce — the fixtures proved serialization and nothing about behaviour, and
+/// `null` is precisely the honest representation the contract already defines
+/// for "resolution has not produced a commit".
+fn failed(
+    state: AnalysisState,
+    error: ApiError,
+    retry: RetryPolicy,
+    commit: Option<&str>,
+) -> Analysis {
     Analysis {
         id: ANALYSIS_ID,
         repository: repository(),
-        commit_sha: Some(COMMIT_SHA.to_owned()),
+        commit_sha: commit.map(ToOwned::to_owned),
         state,
         execution: ExecutionMetadata {
             trigger_status: TriggerStatus::Succeeded,
@@ -346,6 +360,8 @@ fn failure_fixtures() -> Vec<(&'static str, Analysis)> {
             allowed: true,
             reason: None,
         },
+        // The rate limit is most often hit fetching the tree, after resolution.
+        Some(COMMIT_SHA),
     );
 
     let permanent = failed(
@@ -361,6 +377,8 @@ fn failure_fixtures() -> Vec<(&'static str, Analysis)> {
                     .to_owned(),
             ),
         },
+        // The analyzer runs on a resolved commit by definition.
+        Some(COMMIT_SHA),
     );
 
     let worker_retriable = failed(
@@ -373,6 +391,8 @@ fn failure_fixtures() -> Vec<(&'static str, Analysis)> {
             allowed: true,
             reason: None,
         },
+        // The worker stops after the report was built, so a commit exists.
+        Some(COMMIT_SHA),
     );
 
     let inaccessible = failed(
@@ -385,6 +405,9 @@ fn failure_fixtures() -> Vec<(&'static str, Analysis)> {
             allowed: true,
             reason: None,
         },
+        // Reachable both before and after resolution; the fixture shows the
+        // case where a commit had already been established.
+        Some(COMMIT_SHA),
     );
 
     vec![
@@ -392,6 +415,75 @@ fn failure_fixtures() -> Vec<(&'static str, Analysis)> {
         ("failed-permanent.json", permanent),
         ("failed-worker-retriable.json", worker_retriable),
         ("failed-inaccessible.json", inaccessible),
+    ]
+    .into_iter()
+    .chain(repository_failure_fixtures())
+    .collect()
+}
+
+/// Failures decided about the *repository* rather than about the analysis.
+///
+/// Split from `failure_fixtures` for the same reason that one was split from
+/// `fixtures`: the workspace function-length lint, not taste.
+fn repository_failure_fixtures() -> Vec<(&'static str, Analysis)> {
+    /// Every one of these is permanent, and the reason is the same each time.
+    fn permanent() -> RetryPolicy {
+        RetryPolicy {
+            allowed: false,
+            reason: Some(
+                "This failure is deterministic: the same commit and ruleset will fail again."
+                    .to_owned(),
+            ),
+        }
+    }
+
+    // The three below are reached during an analysis and written to the row by
+    // `store::fail`, so each is a terminal state a user can land on. All are
+    // permanent: waiting will not create a repository, un-archive one, or
+    // shrink one past an ingestion bound.
+    let not_found = failed(
+        AnalysisState::FailedPermanent,
+        ApiError::new(
+            ErrorCode::RepositoryNotFound,
+            "No public repository was found at that address. Check the owner and name, and note \
+             that private repositories are not supported.",
+        ),
+        permanent(),
+        // Rejected during resolution: `resolve_commit` is never reached, so
+        // there is no commit and `null` is the honest value.
+        None,
+    );
+
+    let archived = failed(
+        AnalysisState::FailedPermanent,
+        ApiError::new(
+            ErrorCode::RepositoryArchived,
+            "This repository is archived. It can still be read, but it is not under active \
+             development, which is worth knowing before drawing conclusions from it.",
+        ),
+        permanent(),
+        // Rejected during resolution: `resolve_commit` is never reached, so
+        // there is no commit and `null` is the honest value.
+        None,
+    );
+
+    let too_large = failed(
+        AnalysisState::FailedPermanent,
+        ApiError::new(
+            ErrorCode::RepositoryTooLarge,
+            "This repository is larger than the limits this analysis is allowed to spend. The \
+             limits are ours, not a judgement about the repository.",
+        ),
+        permanent(),
+        // Rejected during resolution: `resolve_commit` is never reached, so
+        // there is no commit and `null` is the honest value.
+        None,
+    );
+
+    vec![
+        ("failed-repository-not-found.json", not_found),
+        ("failed-repository-archived.json", archived),
+        ("failed-repository-too-large.json", too_large),
     ]
 }
 
@@ -524,15 +616,31 @@ fn every_error_code_is_either_in_a_fixture_or_explicitly_exempt() {
     // closed-set gate. Adding a ninth code left it green while proving nothing.
     // It now iterates every variant, so a new code must be either rendered in a
     // fixture or listed here as a deliberate omission.
-    // Rejected at submission, before an analysis exists, so no analysis fixture
-    // can carry them. They are still rendered — the unknown-variant gate in the
-    // client package covers every code, including these. Anything reachable
-    // *during* an analysis must appear below.
-    const EXEMPT: [ErrorCode; 4] = [
+    // Exempt only where the code can never be *persisted on an analysis*.
+    //
+    // `INVALID_REPOSITORY_URL` is decided before the row is inserted, so no
+    // analysis can carry it. The other five are produced by the HTTP layer — a
+    // body that is not JSON, a body over the limit, a request that ran out of
+    // time, an unknown analysis id, a report that is not ready, a panic — and
+    // `pipeline` cannot construct any of them, so no analysis can reach a terminal state carrying one. A
+    // fixture asserting otherwise would describe a state the system cannot
+    // produce. All of them are still rendered: the unknown-variant gate in the
+    // client package covers every code.
+    //
+    // `REPOSITORY_NOT_FOUND`, `REPOSITORY_ARCHIVED` and `REPOSITORY_TOO_LARGE`
+    // were previously in this list and should never have been. Each is reached
+    // *during* an analysis — the first two from resolution, the third from an
+    // exceeded ingestion bound — and each is written to the row by
+    // `store::fail`. Exempting them meant three terminal states a user can
+    // actually hit had no proof that the frontend renders them.
+    const EXEMPT: [ErrorCode; 7] = [
         ErrorCode::InvalidRepositoryUrl,
-        ErrorCode::RepositoryNotFound,
-        ErrorCode::RepositoryArchived,
-        ErrorCode::RepositoryTooLarge,
+        ErrorCode::AnalysisNotFound,
+        ErrorCode::ReportNotAvailable,
+        ErrorCode::MalformedRequest,
+        ErrorCode::RequestTooLarge,
+        ErrorCode::RequestTimedOut,
+        ErrorCode::InternalError,
     ];
 
     let rendered: String = fixtures().into_iter().map(|(_, body)| body).collect();

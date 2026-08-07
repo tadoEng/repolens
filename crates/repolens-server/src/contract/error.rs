@@ -41,6 +41,51 @@ pub enum ErrorCode {
     /// The analyzer failed deterministically. Retrying the same commit with the
     /// same ruleset will fail identically, so the UI must not offer retry.
     AnalyzerFailedPermanent,
+    /// No analysis exists with that identifier, or it has no report yet.
+    ///
+    /// Deliberately not [`RepositoryNotFound`](Self::RepositoryNotFound), which
+    /// is a claim about a *repository* — that it is absent or private on
+    /// GitHub. Answering it for an unknown analysis id tells the caller to go
+    /// and check a repository that was never the problem, and the UI would
+    /// offer to correct a URL that is already right.
+    AnalysisNotFound,
+    /// The analysis exists, but its report is not ready.
+    ///
+    /// Not [`AnalysisNotFound`](Self::AnalysisNotFound): the identifier is
+    /// correct and the work is still running or has failed. Answering "no such
+    /// analysis" here is false, and it tells a client to stop polling something
+    /// that may be seconds from finishing.
+    ReportNotAvailable,
+    /// The request itself could not be interpreted: a body that is not valid
+    /// JSON, a missing or wrong `Content-Type`, or a path parameter that is not
+    /// the type the route declares.
+    ///
+    /// Distinct from [`InvalidRepositoryUrl`](Self::InvalidRepositoryUrl),
+    /// which means a well-formed request carrying a value we understood and
+    /// rejected. This one means we never got as far as the value, so the UI
+    /// must not echo it back as a correctable repository URL.
+    MalformedRequest,
+    /// The request body exceeded the configured ceiling.
+    ///
+    /// Not [`RepositoryTooLarge`](Self::RepositoryTooLarge), which is a
+    /// statement about the repository being analyzed. This is a statement about
+    /// the HTTP request, and no repository has been looked at yet.
+    RequestTooLarge,
+    /// The request occupied a server slot for longer than it is allowed to.
+    ///
+    /// Retriable: it says the deployment was slow, not that the input was bad.
+    RequestTimedOut,
+    /// An unhandled fault in this service.
+    ///
+    /// The message is deliberately fixed and uninformative: a panic payload can
+    /// carry internal paths, query fragments, or retrieved repository content.
+    ///
+    /// The detail does **not** go to the log either. `telemetry::install_panic_hook`
+    /// replaces the process-wide hook so the payload is never written, because
+    /// the default hook prints it to stderr before unwinding even begins — a
+    /// disclosure that catching the unwind cannot undo. What is recorded is the
+    /// panic's source location, which is what makes it actionable.
+    InternalError,
 }
 
 impl ErrorCode {
@@ -49,7 +94,7 @@ impl ErrorCode {
     /// Hand-maintained but *not* hand-trusted: `all_variants_are_listed` fails
     /// if this drifts from the enum. Without it, a test that iterates "all
     /// codes" would quietly iterate only the ones somebody remembered.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 14] = [
         Self::InvalidRepositoryUrl,
         Self::RepositoryNotFound,
         Self::RepositoryInaccessible,
@@ -58,6 +103,12 @@ impl ErrorCode {
         Self::RateLimited,
         Self::WorkerFailedRetriable,
         Self::AnalyzerFailedPermanent,
+        Self::AnalysisNotFound,
+        Self::ReportNotAvailable,
+        Self::MalformedRequest,
+        Self::RequestTooLarge,
+        Self::RequestTimedOut,
+        Self::InternalError,
     ];
 
     /// Whether another attempt at the *same* input could plausibly succeed.
@@ -70,7 +121,11 @@ impl ErrorCode {
     pub const fn is_retriable(self) -> bool {
         matches!(
             self,
-            Self::RepositoryInaccessible | Self::RateLimited | Self::WorkerFailedRetriable
+            Self::RepositoryInaccessible
+                | Self::RateLimited
+                | Self::WorkerFailedRetriable
+                // The deployment was slow, not the request wrong.
+                | Self::RequestTimedOut
         )
     }
 }
@@ -198,7 +253,13 @@ mod tests {
                 | ErrorCode::RepositoryTooLarge
                 | ErrorCode::RateLimited
                 | ErrorCode::WorkerFailedRetriable
-                | ErrorCode::AnalyzerFailedPermanent => {}
+                | ErrorCode::AnalyzerFailedPermanent
+                | ErrorCode::AnalysisNotFound
+                | ErrorCode::ReportNotAvailable
+                | ErrorCode::MalformedRequest
+                | ErrorCode::RequestTooLarge
+                | ErrorCode::RequestTimedOut
+                | ErrorCode::InternalError => {}
             }
         }
 

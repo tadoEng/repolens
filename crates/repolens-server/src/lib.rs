@@ -17,5 +17,7 @@
 pub mod api;
 pub mod config;
 pub mod contract;
+pub mod pipeline;
 pub mod state;
+pub mod store;
 pub mod telemetry;

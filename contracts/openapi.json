@@ -10,6 +10,270 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/analyses": {
+      "post": {
+        "tags": [
+          "analyses"
+        ],
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAnalysisRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted; the analysis is queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Analysis"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The URL is not a public GitHub repository",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The request exceeded the server time budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is over the limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Content-Type is not application/json",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The body is JSON but not this request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unhandled fault in this service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The analysis store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/analyses/{analysis_id}": {
+      "get": {
+        "tags": [
+          "analyses"
+        ],
+        "operationId": "read",
+        "parameters": [
+          {
+            "name": "analysis_id",
+            "in": "path",
+            "description": "Analysis identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current state of the analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Analysis"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The identifier is not a UUID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The request exceeded the server time budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unhandled fault in this service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The analysis store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/analyses/{analysis_id}/report": {
+      "get": {
+        "tags": [
+          "analyses"
+        ],
+        "operationId": "read_report",
+        "parameters": [
+          {
+            "name": "analysis_id",
+            "in": "path",
+            "description": "Analysis identifier",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The completed report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Report"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The identifier is not a UUID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No report for that analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The request exceeded the server time budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unhandled fault in this service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The analysis store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/system/probe": {
       "get": {
         "tags": [
@@ -23,6 +287,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SystemProbeResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The request exceeded the server time budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unhandled fault in this service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -43,6 +327,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/LivenessResponse"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The request exceeded the server time budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unhandled fault in this service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -249,6 +553,19 @@
           "HIGH"
         ]
       },
+      "CreateAnalysisRequest": {
+        "type": "object",
+        "description": "What a caller submits to start an analysis.",
+        "required": [
+          "repository_url"
+        ],
+        "properties": {
+          "repository_url": {
+            "type": "string",
+            "description": "A public GitHub repository URL, e.g. `https://github.com/rust-lang/crates.io`.\n\nA URL rather than separate owner and name fields, because a URL is what a\nperson has in their clipboard. Parsing it is our job, not theirs."
+          }
+        }
+      },
       "ErrorCode": {
         "type": "string",
         "description": "Why a request or an analysis failed.\n\n`SCREAMING_SNAKE_CASE` per the settled convention (#14). The set is closed on\npurpose — see [`super::UNKNOWN_VARIANT_POLICY`] for what the frontend does\nwhen a future backend adds one it has never seen.",
@@ -260,7 +577,13 @@
           "REPOSITORY_TOO_LARGE",
           "RATE_LIMITED",
           "WORKER_FAILED_RETRIABLE",
-          "ANALYZER_FAILED_PERMANENT"
+          "ANALYZER_FAILED_PERMANENT",
+          "ANALYSIS_NOT_FOUND",
+          "REPORT_NOT_AVAILABLE",
+          "MALFORMED_REQUEST",
+          "REQUEST_TOO_LARGE",
+          "REQUEST_TIMED_OUT",
+          "INTERNAL_ERROR"
         ]
       },
       "Evidence": {

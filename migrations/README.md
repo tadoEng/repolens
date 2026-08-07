@@ -13,6 +13,14 @@ endpoint.
 | Migration              | What it establishes                                  |
 | ---------------------- | ---------------------------------------------------- |
 | `0001_schema_meta.sql` | A baseline row the system probe reads, so `GET /api/v1/system/probe` proves connection, migration and query in one call |
+| `0002_analyses.sql`    | `analyses` and `reports` — two tables, not eight      |
+
+A report is stored as one JSONB document rather than normalised into findings,
+evidence and limitation rows. Nothing in Phase 0 queries *inside* a report: it
+is written once when an analysis completes and read back whole. Normalising it
+would buy join complexity and a second definition of a shape the contract
+already fixes. A later phase that needs "every repository where rule X fired"
+gets a deliberate migration with a real query behind it.
 
 ## Queries are written at runtime, not compiled
 

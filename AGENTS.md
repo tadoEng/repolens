@@ -84,7 +84,14 @@ node scripts/check-agent-contracts.mjs
 node --test "scripts/*.test.mjs"
 ```
 
-Four things about that list are not visible from it:
+Five things about that list are not visible from it:
+
+- `cargo test --workspace` needs a PostgreSQL. `crates/repolens-server/tests/postgres.rs`
+  panics when `DATABASE_URL` is unset rather than skipping, because a suite that
+  vanishes with its dependency reports green while proving nothing. Export
+  `DATABASE_URL` and `DATABASE_DIRECT_URL` and run `cargo run --bin migrate`
+  once against that database first; CI provisions a `postgres:17` service and
+  does the same.
 
 - CI exports `RUSTFLAGS: -D warnings`, so locally either export it too or append
   `-- -D warnings` to the Clippy line. The workspace enables `clippy::pedantic`,

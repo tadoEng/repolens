@@ -34,18 +34,35 @@ during extraction, **abandoned-lease recovery is mandatory and every worker
 effect is idempotent.** Re-running a claimed step must not duplicate a row, a
 trigger, or a report.
 
-An HTTP request never performs analysis. The API enqueues; the worker works.
+The intended split is that an HTTP request never performs analysis: the API
+enqueues, the worker works. **That is not yet true.** `POST /api/v1/analyses`
+writes the row, then runs the pipeline on a spawned task in the API process, so
+an analysis in flight does not survive a restart or a revision rollout. Issue #7
+replaces the spawn with a durable claim and the `worker` binary above becomes
+the thing that runs it. Until then, treat "the worker works" as the design, not
+as a description of `master`.
 
 ## Configuration
 
-| Variable              | Endpoint | Used by                                         |
+| Variable              | Required | Used by                                         |
 | --------------------- | -------- | ----------------------------------------------- |
-| `DATABASE_URL`        | pooled   | API and ordinary worker transactions            |
-| `DATABASE_DIRECT_URL` | direct   | migrations and session-dependent administration |
+| `DATABASE_URL`        | yes      | API and ordinary worker transactions, pooled endpoint |
+| `DATABASE_DIRECT_URL` | yes      | migrations and session-dependent administration, direct endpoint |
+| `GH_ANALYSIS_TOKEN`   | no       | raises GitHub's rate-limit ceiling               |
 
-Both should carry `sslmode=verify-full`; `config.rs` warns at startup when a
-non-local URL does not. `CORS_ALLOWED_ORIGIN` names one exact origin or the
-layer is not applied at all.
+Both database URLs should carry `sslmode=verify-full`; `config.rs` warns at
+startup when a non-local URL does not. `CORS_ALLOWED_ORIGIN` names one exact
+origin or the layer is not applied at all.
+
+`GH_ANALYSIS_TOKEN` is optional and its absence is not a failure. The client is
+built either way, because only public repositories are analyzed, so the token
+raises the request budget without widening what can be read — roughly sixty
+requests an hour become five thousand. `AppState` therefore holds a
+`GitHubRestClient`, never an `Option<GitHubRestClient>`: a state that can
+represent "no GitHub access" invites a handler to answer
+`REPOSITORY_INACCESSIBLE` without asking GitHub, which reports a failure for a
+repository that is very likely readable. Whether a request succeeds is GitHub's
+answer to give.
 
 Logs carry neither credentials nor repository excerpts. `config.rs` deliberately
 never echoes a value it rejected — a mistyped connection string or token would
@@ -53,7 +70,7 @@ otherwise be copied verbatim into a log line.
 
 ## Middleware order is a tested behaviour
 
-The layer stack in `src/api.rs` is ordered deliberately: body limit, timeout,
+The layer stack in `src/api/mod.rs` is ordered deliberately: body limit, timeout,
 panic capture, tracing, CORS. Assert it by driving the real `Router` through
 `tower::ServiceExt::oneshot` in `tests/api.rs`, never by reading the builder —
 a reordering that changes which layer sees a panic first is invisible in review
@@ -84,7 +101,15 @@ the query set ever earns it.
 Migrations are authored with `sqlx migrate add <name>`, are append-only once
 deployed, and run over the direct endpoint via `cargo run --bin migrate`.
 
-There are no PostgreSQL integration tests yet, and CI provisions no database.
-The first ones must fail loudly when `DATABASE_URL` is unset rather than skip
-into a green run, and must arrive together with the CI service that runs them —
-a suite nothing executes is a suite nobody maintains.
+`tests/postgres.rs` runs against a real PostgreSQL and **panics when
+`DATABASE_URL` is unset rather than skipping** — a suite that disappears with
+its dependency reports green while proving nothing. CI provisions a
+`postgres:17` service and applies `migrations/` with the `migrate` binary, so
+the schema under test is never a fixture free to drift. Locally, export both
+database URLs and run `cargo run --bin migrate` once.
+
+It holds what cannot be checked without a database: that a terminal write
+carries the canonical repository coordinate. Adopting that coordinate
+mid-pipeline is best-effort, so the only durable guarantee is the one
+`store::complete` and `store::fail` make in the statement that sets the terminal
+state — a property of the SQL, not of any Rust value.

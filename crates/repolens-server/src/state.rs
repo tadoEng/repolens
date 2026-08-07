@@ -4,6 +4,9 @@
 //! "what can this endpoint touch?" is answered by reading one struct rather
 //! than by tracing imports.
 
+use std::sync::Arc;
+
+use repolens_github::GitHubRestClient;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
@@ -37,19 +40,45 @@ pub struct AppState {
     /// the truthful answer — better than refusing to boot and blocking UI
     /// development, and better than pretending the database is fine.
     pool: Option<PgPool>,
+    /// GitHub access. Always present.
+    ///
+    /// Deliberately not an `Option`, unlike the pool. A client can always be
+    /// built: the public API base is a compile-time constant and the token is
+    /// optional, so "no GitHub access" describes no reachable configuration.
+    /// Modelling it as absent would let a handler answer
+    /// `REPOSITORY_INACCESSIBLE` without asking GitHub — inventing a failure for
+    /// a repository that is very likely accessible, since only public ones are
+    /// read. Whether a request succeeds is GitHub's answer to give.
+    ///
+    /// `Arc` because the client is not `Clone` — it holds a configured
+    /// `reqwest::Client` and a secret — and an analysis is spawned onto a task
+    /// that outlives the request.
+    github: Arc<GitHubRestClient>,
 }
 
 impl AppState {
     /// Builds state with a live pool.
     #[must_use]
-    pub fn with_pool(pool: PgPool) -> Self {
-        Self { pool: Some(pool) }
+    pub fn with_pool(pool: PgPool, github: GitHubRestClient) -> Self {
+        Self {
+            pool: Some(pool),
+            github: Arc::new(github),
+        }
+    }
+
+    /// Borrows the GitHub client.
+    #[must_use]
+    pub fn github(&self) -> &Arc<GitHubRestClient> {
+        &self.github
     }
 
     /// Builds state with no database configured.
     #[must_use]
-    pub fn without_database() -> Self {
-        Self { pool: None }
+    pub fn without_database(github: GitHubRestClient) -> Self {
+        Self {
+            pool: None,
+            github: Arc::new(github),
+        }
     }
 
     /// Borrows the pool, if one was configured.

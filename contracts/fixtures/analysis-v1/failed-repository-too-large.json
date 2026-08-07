@@ -1,0 +1,27 @@
+{
+  "analysis": {
+    "id": "0193a5c0-0000-7000-8000-000000000001",
+    "repository": {
+      "owner": "rust-lang",
+      "name": "crates.io"
+    },
+    "commit_sha": null,
+    "state": "FAILED_PERMANENT",
+    "execution": {
+      "trigger_status": "SUCCEEDED",
+      "execution_id": "exec-0193a5c0",
+      "triggered_at": "2026-08-06T09:00:00Z"
+    },
+    "retry": {
+      "allowed": false,
+      "reason": "This failure is deterministic: the same commit and ruleset will fail again."
+    },
+    "error": {
+      "code": "REPOSITORY_TOO_LARGE",
+      "message": "This repository is larger than the limits this analysis is allowed to spend. The limits are ours, not a judgement about the repository."
+    },
+    "created_at": "2026-08-06T09:00:00Z",
+    "updated_at": "2026-08-06T09:00:04Z",
+    "report_available": false
+  }
+}

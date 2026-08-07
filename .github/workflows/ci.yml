@@ -48,10 +48,38 @@ jobs:
     name: Rust workspace
     runs-on: ubuntu-latest
 
-    # No PostgreSQL service yet. Nothing in the workspace connects to one, so a
-    # container provisioned "for later" is startup time and a moving part that
-    # buys nothing today — the same reasoning that keeps empty future crates out
-    # of the workspace. It arrives with the first test that needs it (issue #7).
+    # PostgreSQL arrives here with the first tests that need it,
+    # `tests/postgres.rs`, exactly as the previous note said it would. Those
+    # tests panic when DATABASE_URL is unset rather than skipping, so this
+    # service is not an optimisation — without it the job fails, which is the
+    # point: a suite that can quietly vanish is a coverage claim nobody checks.
+    #
+    # Pinned to the major version Neon runs. An ephemeral container is the right
+    # target for CI even though production is Neon: these assert SQL behaviour,
+    # not the hosting, and pointing CI at a shared database would make runs
+    # interfere with each other and leak a credential into every log.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: repolens
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Both point at the same container. The split exists because Neon
+      # separates a pooled endpoint from a direct one; a local PostgreSQL has
+      # no such distinction, and inventing one here would test a fiction.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/repolens
+      DATABASE_DIRECT_URL: postgres://postgres:postgres@localhost:5432/repolens
+
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -79,6 +107,12 @@ jobs:
 
       - name: Build
         run: cargo build --workspace --locked
+
+      - name: Apply migrations
+        # The same binary a deployment runs, against the same schema. A test
+        # fixture that built the tables itself would be a second definition of
+        # the schema, free to drift from migrations/ and certain to.
+        run: cargo run --bin migrate
 
       - name: Test
         run: cargo test --workspace --locked

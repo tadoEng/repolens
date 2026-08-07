@@ -42,7 +42,7 @@ pub use rest::{GitHubClientConfig, GitHubRestClient};
 use std::future::Future;
 use std::path::Path;
 
-use repolens_core::{CommitSha, ContentDigest, RepositoryCoordinate};
+use repolens_core::{CommitSha, ContentDigest, RepositoryCoordinate, TreeSha};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -78,7 +78,14 @@ pub struct ResolvedCommit {
     /// The commit itself.
     pub sha: CommitSha,
     /// Root tree of that commit. Part of canonical identity alongside `sha`.
-    pub tree_sha: String,
+    ///
+    /// A [`TreeSha`] rather than a `String`, which is what makes transposing
+    /// the two halves of the identity a compile error rather than a review
+    /// question. Both are 40-character SHA-1 digests, so a `String` here would
+    /// accept `sha` — the exact substitution that once wrote the commit SHA
+    /// into both fields and read as correct because it was a well-formed
+    /// digest. Convert to a string only when producing the wire DTO.
+    pub tree_sha: TreeSha,
     /// Commit timestamp, displayed so a reader can see how current the
     /// analyzed state is.
     pub committed_at: OffsetDateTime,
@@ -112,7 +119,18 @@ pub struct TreeEntry {
 /// A recursive tree listing, with GitHub's truncation flag preserved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryTree {
-    /// Root tree SHA this listing describes.
+    /// The SHA this listing was **requested by**, echoed back by GitHub.
+    ///
+    /// Not necessarily a tree SHA. The tree endpoint accepts a commit SHA and
+    /// resolves it to that commit's root tree, but reports the SHA it was given
+    /// rather than the tree it resolved to — so fetching by commit returns the
+    /// commit SHA here, for exactly the same entries.
+    ///
+    /// **Use [`ResolvedCommit::tree_sha`] when the canonical tree SHA is what
+    /// you need.** That value comes from the commit object itself and is the
+    /// tree either way. Taking this field instead writes the commit SHA into
+    /// both halves of the identity, which reads as correct because it is a
+    /// well-formed digest.
     pub sha: String,
     /// Entries returned.
     pub entries: Vec<TreeEntry>,

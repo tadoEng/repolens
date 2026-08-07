@@ -21,6 +21,7 @@ pub mod ids;
 pub mod repository;
 pub mod reproducibility;
 pub mod rule;
+pub mod ruleset;
 
 pub use composition::{
     CompositionLimitBreach, CompositionOutcome, LanguageComposition, RepositoryComposition,
@@ -32,3 +33,4 @@ pub use ids::{AnalysisId, FindingId, SnapshotId};
 pub use repository::{CommitSha, CommitShaError, RepositoryCoordinate, TreeSha};
 pub use reproducibility::{CompositionCounter, EvidenceSource, ReproducibilityKey};
 pub use rule::{AnalyzerRule, RuleId, RuleInput};
+pub use ruleset::{Outcome, RULESET_VERSION, RuleOutcome, evaluate};
