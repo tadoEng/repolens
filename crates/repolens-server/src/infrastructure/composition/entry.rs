@@ -48,16 +48,6 @@ pub enum Refusal {
     /// Directories are created on demand from the file paths themselves, so an
     /// entry for one carries no information the extractor needs.
     NotARegularFile,
-    /// The entry declares more bytes than any single file may hold.
-    ///
-    /// Recorded per entry rather than ending the run: one enormous blob in an
-    /// otherwise ordinary repository should cost that file, not the report.
-    TooLarge {
-        /// Size the archive declared.
-        declared_bytes: u64,
-        /// The ceiling it exceeded.
-        limit_bytes: u64,
-    },
 }
 
 impl Refusal {
@@ -69,7 +59,6 @@ impl Refusal {
             Self::PathUnusable => "ARCHIVE_PATH_UNUSABLE",
             Self::Link => "ARCHIVE_ENTRY_IS_LINK",
             Self::NotARegularFile => "ARCHIVE_ENTRY_NOT_A_FILE",
-            Self::TooLarge { .. } => "ARCHIVE_ENTRY_TOO_LARGE",
         }
     }
 
@@ -92,10 +81,6 @@ impl Refusal {
             Self::NotARegularFile => {
                 "An archive entry was not a regular file. Directories are created from the file \
                  paths themselves, and nothing else in a tarball is source code."
-            }
-            Self::TooLarge { .. } => {
-                "An archive entry declared more bytes than any single file may hold, so it was \
-                 skipped. The rest of the repository was still counted."
             }
         }
     }
@@ -122,29 +107,22 @@ pub enum EntryKind {
 /// (`owner-repo-sha/`). Rejecting is the default: a component this function
 /// does not understand is a component it refuses.
 ///
+/// Size is deliberately **not** decided here. An entry that is too large is not
+/// an entry we chose to leave out — it is one the extractor could not process —
+/// and issue #12 lists the individual-file ceiling among the seven controls,
+/// every one of which ends the run with `UNABLE_TO_VERIFY`. That check lives
+/// with the other ceilings in [`super::extract`], which leaves this function
+/// about admissibility alone.
+///
 /// # Errors
 ///
-/// [`Refusal`], which the caller records in the exclusion ledger rather than
-/// treating as a failure of the analysis.
-pub fn admit(
-    declared_path: &Path,
-    kind: EntryKind,
-    declared_bytes: u64,
-    max_file_bytes: u64,
-) -> Result<std::path::PathBuf, Refusal> {
+/// [`Refusal`], which the caller records rather than treating as a failure of
+/// the analysis.
+pub fn admit(declared_path: &Path, kind: EntryKind) -> Result<std::path::PathBuf, Refusal> {
     match kind {
         EntryKind::RegularFile => {}
         EntryKind::Link => return Err(Refusal::Link),
         EntryKind::Other => return Err(Refusal::NotARegularFile),
-    }
-
-    // Checked before the path, because it needs no path to be true and a
-    // gigantic entry is worth refusing even if its name is impeccable.
-    if declared_bytes > max_file_bytes {
-        return Err(Refusal::TooLarge {
-            declared_bytes,
-            limit_bytes: max_file_bytes,
-        });
     }
 
     let safe = safe_relative(declared_path)?;
@@ -194,6 +172,9 @@ fn safe_relative(path: &Path) -> Result<std::path::PathBuf, Refusal> {
                 if text.contains('/') || text.contains('\\') {
                     return Err(Refusal::PathEscapes);
                 }
+                if looks_like_a_drive(&text) {
+                    return Err(Refusal::PathEscapes);
+                }
                 out.push(part);
                 any = true;
             }
@@ -212,4 +193,28 @@ fn safe_relative(path: &Path) -> Result<std::path::PathBuf, Refusal> {
     } else {
         Err(Refusal::PathUnusable)
     }
+}
+
+/// Whether a component is shaped like a Windows drive specifier.
+///
+/// Checked by hand rather than left to [`Component::Prefix`], which is the
+/// point: `Prefix` is produced **only by the Windows path parser**. Production
+/// runs on Linux, where `C:/Windows/x` parses as three perfectly ordinary
+/// `Normal` components and sails through a `Prefix` check that never fires.
+///
+/// The existing `C:\Windows\...` test passed for the wrong reason — the
+/// backslashes were caught, not the drive. And the shape that actually arrives
+/// is `owner-repo-sha/C:/Windows/x`, which becomes drive-shaped only *after*
+/// the wrapper is stripped, so the guard has to be per-component rather than a
+/// look at the front of the path.
+///
+/// `C:` and `C:foo` are both refused: the second is a drive-relative path on
+/// Windows, which resolves against that drive's current directory rather than
+/// against ours.
+fn looks_like_a_drive(component: &str) -> bool {
+    let mut bytes = component.bytes();
+    matches!(
+        (bytes.next(), bytes.next()),
+        (Some(letter), Some(b':')) if letter.is_ascii_alphabetic()
+    )
 }

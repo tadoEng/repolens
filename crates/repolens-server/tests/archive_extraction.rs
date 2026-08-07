@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use proptest::prelude::*;
 use repolens_server::infrastructure::composition::entry::{EntryKind, Refusal, admit};
 use repolens_server::infrastructure::composition::extract::{
-    Ceilings, ExtractionError, ExtractionLimit, extract,
+    Ceilings, ExtractionError, ExtractionLimit, ExtractionStorage, extract, extract_to,
 };
 
 /// Builds a gzip'd tar from `(path, kind, bytes)` triples.
@@ -173,11 +173,78 @@ fn traversal_and_absolute_paths_are_refused_by_name() {
         "owner-repo/..",
     ] {
         assert_eq!(
-            admit(Path::new(hostile), EntryKind::RegularFile, 1, 1024),
+            admit(Path::new(hostile), EntryKind::RegularFile),
             Err(Refusal::PathEscapes),
             "{hostile} was not refused"
         );
     }
+}
+
+#[test]
+fn a_drive_letter_is_refused_on_every_platform() {
+    /*
+     * `Component::Prefix` is produced only by the **Windows** path parser.
+     * Production runs on Linux, where `C:/Windows/x` is three ordinary `Normal`
+     * components and a `Prefix` check never fires at all.
+     *
+     * The backslash forms in the test above passed for the wrong reason — the
+     * separators were caught, not the drive — so this pins the forward-slash
+     * ones, which are the shape that survives a Linux parse.
+     */
+    // Which half of the defence catches these depends on where the suite runs,
+    // and that is worth knowing before someone deletes the guard: on Windows
+    // the leading `C:` is a `Prefix` and the platform parser refuses it, so
+    // these cases still pass with the guard removed. On Linux — production, and
+    // CI — only the guard refuses them. The wrapped test below is the one that
+    // exercises the guard on every platform, because a `C:` in the middle of a
+    // path is never a `Prefix` anywhere.
+    for hostile in [
+        "C:/Windows/System32/x",
+        "c:/x",
+        "Z:/x",
+        "C:",
+        "C:relative/x",
+    ] {
+        assert_eq!(
+            admit(Path::new(hostile), EntryKind::RegularFile),
+            Err(Refusal::PathEscapes),
+            "{hostile} was not refused"
+        );
+    }
+}
+
+#[test]
+fn a_drive_letter_hidden_under_the_wrapper_is_refused_too() {
+    // The form that actually arrives. GitHub wraps everything in
+    // `owner-repo-sha/`, so a hostile entry is drive-shaped only *after* the
+    // wrapper is stripped — which is why the guard is per-component rather
+    // than a look at the front of the path.
+    for hostile in ["owner-repo-abc/C:/Windows/x", "owner-repo-abc/nested/D:/x"] {
+        assert_eq!(
+            admit(Path::new(hostile), EntryKind::RegularFile),
+            Err(Refusal::PathEscapes),
+            "{hostile} was not refused"
+        );
+    }
+
+    // And through the extractor, not only the predicate.
+    let (_scratch, path) = archive(&[
+        file("owner-repo-abc/C:/Windows/x", b"pwned\n"),
+        file("owner-repo-abc/kept.rs", b"fn main() {}\n"),
+    ]);
+    let parent = tempfile::tempdir().expect("a scratch parent");
+
+    let extraction = extract(&path, parent.path(), Ceilings::default()).expect("extraction");
+
+    assert_eq!(extraction.files_written, 1);
+    assert!(
+        extraction
+            .refusals
+            .iter()
+            .any(|(_, refusal)| *refusal == Refusal::PathEscapes),
+        "{:?}",
+        extraction.refusals
+    );
 }
 
 #[test]
@@ -228,7 +295,7 @@ fn links_are_refused_in_both_directions() {
     // not in this repository. Neither is worth preserving in a tree that exists
     // only to be counted and deleted.
     assert_eq!(
-        admit(Path::new("owner-repo/link"), EntryKind::Link, 0, 1024),
+        admit(Path::new("owner-repo/link"), EntryKind::Link),
         Err(Refusal::Link)
     );
 
@@ -284,7 +351,7 @@ proptest! {
         separator in prop_oneof![Just("/"), Just("\\")],
     ) {
         let raw = segments.join(separator);
-        let Ok(admitted) = admit(Path::new(&raw), EntryKind::RegularFile, 1, 1024) else {
+        let Ok(admitted) = admit(Path::new(&raw), EntryKind::RegularFile) else {
             // Refusing is always a safe answer.
             return Ok(());
         };
@@ -345,9 +412,19 @@ fn a_decompression_bomb_is_caught_by_the_decompressed_ceiling() {
 }
 
 #[test]
-fn one_oversized_entry_costs_that_file_and_not_the_report() {
-    // Per-file and archive-wide are separate ceilings for a reason: a single
-    // enormous blob should not make the rest of a repository uncountable.
+fn an_oversized_entry_makes_the_whole_count_unverifiable() {
+    /*
+     * It used to skip the file and carry on, which read as reasonable and was
+     * wrong for LOC specifically.
+     *
+     * A policy exclusion — vendored code, generated output — is a decision
+     * about what *should* be counted, and a report can state it. A source file
+     * dropped because the extractor could not process it makes the number
+     * itself incomplete, and "counted" would then quietly mean "counted, minus
+     * whatever we choked on". Issue #12 lists the individual-file ceiling among
+     * the seven controls, and every one of those ends the run with the limit
+     * and the observed value.
+     */
     let big = vec![b'x'; 256 * 1024];
     let (_scratch, path) = archive(&[
         file("owner-repo-abc/huge.bin", &big),
@@ -359,26 +436,51 @@ fn one_oversized_entry_costs_that_file_and_not_the_report() {
     };
     let parent = tempfile::tempdir().expect("a scratch parent");
 
-    let extraction = extract(&path, parent.path(), ceilings).expect("the archive still extracts");
+    let error = extract(&path, parent.path(), ceilings).expect_err("the ceiling ends the run");
+    let ExtractionError::Limit(limit @ ExtractionLimit::FileSize { .. }) = error else {
+        panic!("expected a per-file breach, got {error:?}");
+    };
+
+    let breach = limit.breach();
+    assert_eq!(breach.limit_name, "ARCHIVE_FILE_SIZE_LIMIT");
+    assert_eq!(breach.limit_value, 1024);
+    assert_eq!(breach.observed_value, big.len() as u64);
+}
+
+#[test]
+fn a_link_that_declares_an_absurd_size_is_still_refused_as_a_link() {
+    // Order matters: admission first, size second. Otherwise a symlink with a
+    // fabricated size would end the whole run instead of being skipped as the
+    // link it is — letting any archive deny counting with one crafted header.
+    let ceilings = Ceilings {
+        file_bytes: 16,
+        ..Ceilings::default()
+    };
+    // The link declares 256 KiB against a 16-byte ceiling.
+    //
+    // An empty one — which is how this was written first — would have passed
+    // whatever the ordering, because a zero-length entry breaches nothing. The
+    // entry has to actually exceed the ceiling for the ordering to be under
+    // test at all.
+    let (_scratch, path) = archive(&[
+        (
+            "owner-repo-abc/link",
+            tar::EntryType::Symlink,
+            vec![b'z'; 256 * 1024],
+        ),
+        file("owner-repo-abc/ok.rs", b"fn x(){}\n"),
+    ]);
+    let parent = tempfile::tempdir().expect("a scratch parent");
+
+    let extraction = extract(&path, parent.path(), ceilings).expect("a link never ends the run");
 
     assert_eq!(extraction.files_written, 1);
-    assert!(extraction.root().join("small.rs").is_file());
-    assert!(!extraction.root().join("huge.bin").exists());
-
-    let (_, refusal) = extraction
-        .refusals
-        .iter()
-        .find(|(_, refusal)| matches!(refusal, Refusal::TooLarge { .. }))
-        .expect("the oversized entry is recorded");
-    let Refusal::TooLarge {
-        declared_bytes,
-        limit_bytes,
-    } = refusal
-    else {
-        unreachable!()
-    };
-    assert_eq!(*limit_bytes, 1024);
-    assert_eq!(*declared_bytes, big.len() as u64);
+    assert!(
+        extraction
+            .refusals
+            .iter()
+            .any(|(_, refusal)| *refusal == Refusal::Link)
+    );
 }
 
 #[test]
@@ -437,6 +539,99 @@ fn filling_the_extraction_volume_is_reportable_rather_than_fatal() {
     );
     assert_eq!(breach.limit_value, 200 * 1024);
     assert!(breach.observed_value > breach.limit_value, "{breach:?}");
+}
+
+/// A volume with room for `capacity` bytes and not one more.
+///
+/// The predictive ceiling in the extractor refuses a write it can *see* will
+/// not fit. A real mount does not announce itself: it accepts writes until it
+/// does not, and the failure surfaces from whichever call happened to be next.
+/// This reproduces that, so the translation to `EXTRACTION_STORAGE_LIMIT` is
+/// exercised rather than asserted.
+struct FullVolume {
+    capacity: std::cell::Cell<u64>,
+}
+
+impl ExtractionStorage for FullVolume {
+    fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(path)
+    }
+
+    fn write_file(&self, path: &Path, source: &mut dyn std::io::Read) -> std::io::Result<u64> {
+        let mut buffer = Vec::new();
+        source.read_to_end(&mut buffer)?;
+        let wanted = buffer.len() as u64;
+        if wanted > self.capacity.get() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "no space left on device",
+            ));
+        }
+        self.capacity.set(self.capacity.get() - wanted);
+        std::fs::write(path, &buffer)?;
+        Ok(wanted)
+    }
+}
+
+#[test]
+fn a_volume_that_actually_fills_is_named_rather_than_anonymous() {
+    /*
+     * Issue #12's requirement, and the one the predictive test above does not
+     * reach. Without the storage seam this arrives as
+     * `ExtractionError::Io("could not read the archive")` — the analysis would
+     * tell a reader the archive was unreadable when the machine had simply run
+     * out of room, which is the opposite of the diagnosis that helps.
+     *
+     * The ceilings here are deliberately generous: nothing predicts this
+     * failure, the volume just says no.
+     */
+    let chunk = vec![b'y'; 64 * 1024];
+    let (_scratch, path) = archive(&[
+        file("owner-repo-abc/a.rs", &chunk),
+        file("owner-repo-abc/b.rs", &chunk),
+    ]);
+    let parent = tempfile::tempdir().expect("a scratch parent");
+    let volume = FullVolume {
+        capacity: std::cell::Cell::new(100 * 1024),
+    };
+
+    let error = extract_to(&path, parent.path(), Ceilings::default(), &volume)
+        .expect_err("a full volume stops the extraction");
+    let ExtractionError::Limit(limit @ ExtractionLimit::Storage { .. }) = error else {
+        panic!("expected a storage breach, got {error:?}");
+    };
+
+    let breach = limit.breach();
+    assert_eq!(breach.limit_name, "EXTRACTION_STORAGE_LIMIT");
+}
+
+#[test]
+fn a_full_volume_is_not_confused_with_an_unreadable_archive() {
+    // The other half of the same distinction: an ordinary I/O failure must stay
+    // an I/O failure, or every disk problem would be reported as a capacity
+    // ceiling and the name would mean nothing.
+    struct Broken;
+    impl ExtractionStorage for Broken {
+        fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+            std::fs::create_dir_all(path)
+        }
+        fn write_file(&self, _: &Path, _: &mut dyn std::io::Read) -> std::io::Result<u64> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied",
+            ))
+        }
+    }
+
+    let (_scratch, path) = archive(&[file("owner-repo-abc/a.rs", b"fn x(){}\n")]);
+    let parent = tempfile::tempdir().expect("a scratch parent");
+
+    let error = extract_to(&path, parent.path(), Ceilings::default(), &Broken)
+        .expect_err("a refused write stops the extraction");
+    assert!(
+        matches!(error, ExtractionError::Io(_)),
+        "a permission failure is not a capacity ceiling: {error:?}"
+    );
 }
 
 #[test]

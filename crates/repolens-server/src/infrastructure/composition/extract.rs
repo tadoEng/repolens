@@ -84,6 +84,22 @@ pub enum ExtractionLimit {
         /// What was seen when it tripped.
         observed: usize,
     },
+    /// One entry declared more bytes than any single file may hold.
+    ///
+    /// Ends the run rather than skipping the file, and the distinction is the
+    /// whole point of counting lines. A policy exclusion — vendored code,
+    /// generated output — is a decision about what *should* be counted, and a
+    /// report can state it. A source file left out because the extractor could
+    /// not process it makes the number itself wrong, and a "counted" result
+    /// that quietly means "counted, minus whatever we choked on" is the failure
+    /// mode LOC reporting is most prone to.
+    #[error("an entry declares {observed} bytes, over the {limit} any one file may hold")]
+    FileSize {
+        /// The ceiling.
+        limit: u64,
+        /// What the entry declared.
+        observed: u64,
+    },
     /// The bounded extraction volume could not take another byte.
     #[error("extraction storage filled at {observed} bytes, against a {limit} ceiling")]
     Storage {
@@ -105,6 +121,7 @@ impl ExtractionLimit {
             Self::EntryCount { limit, observed } => {
                 (limits::names::ENTRY_COUNT, limit as u64, observed as u64)
             }
+            Self::FileSize { limit, observed } => (limits::names::FILE_BYTES, limit, observed),
             Self::Storage { limit, observed } => {
                 (limits::names::EXTRACTION_STORAGE, limit, observed)
             }
@@ -130,6 +147,65 @@ pub enum ExtractionError {
     /// would otherwise reach a log unfiltered.
     #[error("could not read the archive")]
     Io(#[source] io::Error),
+}
+
+/// Where extracted bytes are put.
+///
+/// A seam, and one issue #12 effectively asks for. The storage ceiling below is
+/// a *prediction* — it refuses a write it can see will not fit — and a
+/// prediction is not the same control as a volume that is genuinely full. A
+/// real mount fills during `create_dir_all`, `File::create`, `copy` or `flush`,
+/// and without this trait every one of those arrives as an anonymous
+/// [`ExtractionError::Io`]: the analysis would report "could not read the
+/// archive" for a machine that simply ran out of room.
+///
+/// With the seam, a test can hand the extractor a volume that fills, and the
+/// translation to `EXTRACTION_STORAGE_LIMIT` is exercised rather than asserted.
+pub trait ExtractionStorage {
+    /// Creates a directory and its parents.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying filesystem reports.
+    fn create_dir_all(&self, path: &Path) -> io::Result<()>;
+
+    /// Writes `source` to `path`, returning the bytes written.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying filesystem reports.
+    fn write_file(&self, path: &Path, source: &mut dyn Read) -> io::Result<u64>;
+}
+
+/// The real filesystem.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Filesystem;
+
+impl ExtractionStorage for Filesystem {
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir_all(path)
+    }
+
+    fn write_file(&self, path: &Path, source: &mut dyn Read) -> io::Result<u64> {
+        let mut sink = fs::File::create(path)?;
+        let written = io::copy(source, &mut sink)?;
+        // Flushed explicitly, because `File`'s own drop swallows the error —
+        // and a write that failed on flush is exactly the shape a full volume
+        // takes.
+        sink.flush()?;
+        Ok(written)
+    }
+}
+
+/// Whether an I/O failure means the volume has no room left.
+///
+/// `StorageFull` and `QuotaExceeded` are both "the machine ran out", differing
+/// only in who imposed the ceiling, and a reader does not need that difference.
+fn is_out_of_space(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+    )
 }
 
 /// Every ceiling one extraction runs under.
@@ -174,6 +250,23 @@ pub fn extract(
     archive: &Path,
     parent: &Path,
     ceilings: Ceilings,
+) -> Result<Extraction, ExtractionError> {
+    extract_to(archive, parent, ceilings, &Filesystem)
+}
+
+/// [`extract`], against a caller-supplied storage.
+///
+/// Exists so a test can supply a volume that fills. Production always passes
+/// [`Filesystem`].
+///
+/// # Errors
+///
+/// As [`extract`].
+pub fn extract_to(
+    archive: &Path,
+    parent: &Path,
+    ceilings: Ceilings,
+    storage: &dyn ExtractionStorage,
 ) -> Result<Extraction, ExtractionError> {
     let file = fs::File::open(archive).map_err(ExtractionError::Io)?;
 
@@ -254,15 +347,31 @@ pub fn extract(
 
         let declared = entry.path().map_err(&classify)?.into_owned();
         let kind = kind_of(entry.header().entry_type());
+        // `u64::MAX` when the header is unreadable, so an entry that will not
+        // say how big it is trips the per-file ceiling rather than sliding
+        // under it.
         let size = entry.header().size().unwrap_or(u64::MAX);
 
-        let relative = match admit(&declared, kind, size, ceilings.file_bytes) {
+        let relative = match admit(&declared, kind) {
             Ok(path) => path,
             Err(refusal) => {
                 extraction.refusals.push((declared, refusal));
                 continue;
             }
         };
+
+        // Checked after admission, so a link or a directory that happens to
+        // declare an absurd size is refused as what it is rather than ending
+        // the run. Only a *file* we would otherwise have counted can breach
+        // this ceiling, which is what makes the breach mean the counts are
+        // incomplete.
+        if size > ceilings.file_bytes {
+            return Err(ExtractionLimit::FileSize {
+                limit: ceilings.file_bytes,
+                observed: size,
+            }
+            .into());
+        }
 
         // Joined onto the root only after `admit` has proved the path is a
         // plain relative one. The order matters: `Path::join` with an absolute
@@ -277,15 +386,17 @@ pub fn extract(
             .into());
         }
 
-        if let Some(parent_dir) = destination.parent() {
-            fs::create_dir_all(parent_dir).map_err(&classify)?;
-        }
-
-        // `entry` is read through its own `take` as well, so a header that lies
-        // about its size cannot write more than it declared.
-        let mut sink = fs::File::create(&destination).map_err(&classify)?;
-        let written = io::copy(&mut entry.by_ref().take(size), &mut sink).map_err(&classify)?;
-        sink.flush().map_err(&classify)?;
+        let written = write_entry(
+            storage,
+            &destination,
+            &mut entry.by_ref().take(size),
+            ceilings.storage_bytes,
+            extraction.bytes_written,
+        )
+        .map_err(|error| match error {
+            WriteFailure::OutOfSpace(limit) => limit.into(),
+            WriteFailure::Io(error) => classify(error),
+        })?;
 
         extraction.files_written += 1;
         extraction.bytes_written = extraction.bytes_written.saturating_add(written);
@@ -303,6 +414,49 @@ pub fn extract(
     }
 
     Ok(extraction)
+}
+
+/// What a write can fail as.
+enum WriteFailure {
+    /// The volume said no more, whoever imposed the ceiling.
+    OutOfSpace(ExtractionLimit),
+    /// Anything else, which the caller still checks against the byte counter.
+    Io(io::Error),
+}
+
+/// Writes one entry, distinguishing a full volume from every other failure.
+///
+/// Split out so the loop stays readable, but the distinction is the reason it
+/// exists: a real mount fills during `create_dir_all`, `File::create`, `copy`
+/// or `flush`, and reporting any of those as an unexplained I/O error would
+/// tell a reader the archive was unreadable when the machine had run out of
+/// room.
+fn write_entry(
+    storage: &dyn ExtractionStorage,
+    destination: &Path,
+    source: &mut dyn Read,
+    storage_ceiling: u64,
+    written_so_far: u64,
+) -> Result<u64, WriteFailure> {
+    let out_of_space = |error: io::Error| {
+        if is_out_of_space(&error) {
+            WriteFailure::OutOfSpace(ExtractionLimit::Storage {
+                limit: storage_ceiling,
+                observed: written_so_far,
+            })
+        } else {
+            WriteFailure::Io(error)
+        }
+    };
+
+    if let Some(parent) = destination.parent() {
+        storage.create_dir_all(parent).map_err(&out_of_space)?;
+    }
+    // `source` is already bounded by the declared size, so a header that lies
+    // about it cannot write more than it asked for.
+    storage
+        .write_file(destination, source)
+        .map_err(out_of_space)
 }
 
 /// Maps tar's entry types onto the three this extractor distinguishes.
