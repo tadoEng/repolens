@@ -186,8 +186,18 @@ const FIREBASE_ERROR_CODE = /^auth\/[a-z0-9-]{1,64}$/;
  */
 function errorCode(cause: unknown): string {
 	if (typeof cause !== 'object' || cause === null || !('code' in cause)) return '';
-	const raw = (cause as { code: unknown }).code;
-	return typeof raw === 'string' ? raw : '';
+	try {
+		// Reading the property is itself arbitrary code: `code` may be an
+		// accessor, and an accessor may throw. Real Firebase errors are plain
+		// data, so this never fires for them — but "never fires for the values
+		// we expect" is the whole category of thing this function exists to not
+		// assume, and the cost of being wrong is a blank page instead of an
+		// error message.
+		const raw = (cause as { code: unknown }).code;
+		return typeof raw === 'string' ? raw : '';
+	} catch {
+		return '';
+	}
 }
 
 /**

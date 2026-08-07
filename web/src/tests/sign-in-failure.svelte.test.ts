@@ -159,6 +159,26 @@ test('a code that is not shaped like a Firebase code is never echoed', () => {
 	expect(logged).toContain('unknown');
 });
 
+test('a code behind a throwing getter is described rather than crashing', () => {
+	const warn = captureWarnings();
+
+	/*
+	 * `'code' in cause` passes and reading it runs somebody else's function.
+	 * Real Firebase errors are plain data, so this never happens for them —
+	 * which is exactly the assumption this whole function refuses to make. The
+	 * cost of being wrong is a blank page in place of the message explaining
+	 * why sign-in failed.
+	 */
+	const cause = {
+		get code(): string {
+			throw new Error('boom');
+		}
+	};
+
+	expect(describeSignInFailure(cause)).toBe('Sign-in did not complete. Try again.');
+	expect(String(warn.mock.calls[0]?.[0])).toContain('unknown');
+});
+
 test('an over-long code is rejected rather than logged in part', () => {
 	const warn = captureWarnings();
 
