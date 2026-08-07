@@ -171,8 +171,11 @@ class Session {
  *
  * Cancelling a popup is not a failure and must not be reported as one — it is the single
  * most common outcome after clicking sign-in and changing your mind.
+ *
+ * Exported for testability: `signIn` reaches this only when `signInConfigured` is true, and
+ * CI has no Firebase configuration, so a test driven through the popup would be vacuous there.
  */
-function describeSignInFailure(cause: unknown): string | null {
+export function describeSignInFailure(cause: unknown): string | null {
 	const code =
 		typeof cause === 'object' && cause !== null && 'code' in cause
 			? String((cause as { code: unknown }).code)
@@ -192,7 +195,32 @@ function describeSignInFailure(cause: unknown): string | null {
 			// Cloudflare domain to Firebase's authorised list. It fails only in
 			// production, so it says exactly what to do.
 			return 'This site is not an authorised sign-in domain for the configured Firebase project.';
+		case 'auth/configuration-not-found':
+			// The deployment mistake this message exists for: a Firebase project that
+			// exists and is configured here, but never had Authentication turned on in
+			// it at all. Identity Toolkit answers `CONFIGURATION_NOT_FOUND`. It hid
+			// behind the generic message for about an hour, because "try again" is the
+			// one instruction that cannot possibly work — no browser, account or retry
+			// changes a product that was never enabled.
+			return 'Sign-in is not enabled for the configured Firebase project. This is a deployment fault; retrying cannot fix it.';
+		case 'auth/operation-not-allowed':
+			// The neighbouring mistake, one console page away: Authentication is on, but
+			// the Google provider inside it is not. Same conclusion for the reader and
+			// the same refusal to say "try again", worded separately because the operator
+			// has to look somewhere else to fix it.
+			return 'Google sign-in is disabled for the configured Firebase project. This is a deployment fault; retrying cannot fix it.';
 		default:
+			/*
+			 * The list above is a guess at which codes matter, and the guess has already
+			 * been wrong once — `auth/configuration-not-found` was absent from it, so a
+			 * misconfigured project was indistinguishable from a blocked popup or a flaky
+			 * network. Printing the code makes the next unmapped one diagnosable from a
+			 * deployed browser instead of from a rebuild.
+			 *
+			 * The code and nothing else: a Firebase error also carries the request that
+			 * produced it, and a console is not the place to put that.
+			 */
+			console.warn(`[repolens] sign-in failed with an unmapped code: ${code || '(none)'}`);
 			return 'Sign-in did not complete. Try again.';
 	}
 }
