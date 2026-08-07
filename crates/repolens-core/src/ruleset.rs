@@ -39,7 +39,13 @@ use crate::rule::RuleInput;
 /// report is read back, so the rename alone would make version `1` reports
 /// disagree with version `2` reports about a rule that never changed its
 /// verdict — which is precisely what the version exists to explain.
-pub const RULESET_VERSION: &str = "2";
+///
+/// `3` added the content rules and, with them, changed what every existing
+/// finding may carry: evidence can now quote a line and cite a digest. Both
+/// halves qualify on their own — three new rule ids, and a different evidence
+/// shape — so a version `2` report and a version `3` report of the same commit
+/// are expected to differ, and the key says why.
+pub const RULESET_VERSION: &str = "3";
 
 /// What a rule concluded.
 ///
