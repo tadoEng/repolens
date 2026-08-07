@@ -102,12 +102,21 @@ if (!signInConfigured) {
  * policy rather than permitting hosts it will never contact.
  *
  * `signInWithPopup` opens `https://<authDomain>/__/auth/handler`, which is a
- * separate browsing context and not governed by this document's CSP — but the
- * SDK also talks to Identity Toolkit and the secure-token service from *this*
- * document, and renders a helper iframe from the auth domain. Omitting any of
- * these produces a sign-in button that does nothing and reports a CSP violation
- * to the console, which is exactly the class of failure that only appears after
- * deploy.
+ * separate browsing context and not governed by this document's CSP. Everything
+ * else the flow needs *is* governed by it:
+ *
+ *   - `script-src` — the SDK loads Google's gapi helper from `apis.google.com`
+ *     into this document before it can open anything;
+ *   - `connect-src` — Identity Toolkit and the secure-token service;
+ *   - `frame-src` — the helper iframe on the auth domain, and the account
+ *     chooser on `accounts.google.com`.
+ *
+ * `script-src` was missed on the first pass and cost a deployed, broken sign-in
+ * button: the helper was blocked, the flow never started, and the UI reported
+ * only "Sign-in did not complete." Nothing catches this before deploy — the
+ * e2e suite never signs in, and the CSP is inert until a real browser applies
+ * it — so the list above is the check, and it is written out rather than
+ * remembered.
  */
 const authConnectSrc = signInConfigured
 	? [
@@ -116,6 +125,7 @@ const authConnectSrc = signInConfigured
 			`https://${firebase.authDomain}`
 		]
 	: [];
+const authScriptSrc = signInConfigured ? ['https://apis.google.com'] : [];
 const authFrameSrc = signInConfigured
 	? [`https://${firebase.authDomain}`, 'https://accounts.google.com']
 	: [];
@@ -221,7 +231,7 @@ const config = {
 			mode: 'hash',
 			directives: {
 				'default-src': ['self'],
-				'script-src': ['self'],
+				'script-src': ['self', ...authScriptSrc],
 				'style-src': ['self'],
 				'img-src': ['self', 'data:'],
 				'font-src': ['self'],
