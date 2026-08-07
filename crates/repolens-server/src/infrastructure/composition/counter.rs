@@ -35,11 +35,22 @@ use super::exclusion::{self, EXCLUSION_POLICY_VERSION};
 
 /// The Tokei release these counts were produced by.
 ///
-/// Read from the pinned dependency rather than written by hand, so it cannot
-/// drift from the code that produced the number. `Cargo.toml` pins the version
-/// exactly for this reason: Tokei's language detection *is* the definition of
-/// what counts as Rust, and a minor release that reclassifies one extension
-/// silently changes every report.
+/// Written here **and** pinned in `Cargo.toml`, which is a duplication and
+/// therefore a place a report can start lying: bump the dependency, forget this
+/// line, and every result claims counts from a version that did not produce
+/// them. Tokei has no public constant to read, and a build script to synthesise
+/// one is a lot of machinery for one string.
+///
+/// So the duplication is kept and *gated*. `tests/tokei_version.rs` reads the
+/// version out of `Cargo.lock` and the requirement out of `Cargo.toml`, and
+/// fails if either disagrees with this — or if the requirement stops being an
+/// exact pin. The constant cannot drift silently; it can only drift through a
+/// red test.
+///
+/// The pin matters because Tokei's language detection *is* the definition of
+/// what counts as Rust: a minor release that reclassifies one extension changes
+/// every report, which is exactly the kind of change a reproducibility key has
+/// to be able to explain.
 pub const TOKEI_VERSION: &str = "14.0.0";
 
 /// One file that was counted, for the manifest.
@@ -256,7 +267,7 @@ fn partition(root: &Path) -> Result<(Vec<PathBuf>, Vec<CompositionExclusion>), C
     let exclusions = ledger
         .into_values()
         .map(|(rule, file_count, bytes)| CompositionExclusion {
-            path_or_rule: rule.expression.to_owned(),
+            path_or_rule: rule.expression(),
             reason: rule.reason.to_owned(),
             matched_rule: rule.id.to_owned(),
             file_count,
