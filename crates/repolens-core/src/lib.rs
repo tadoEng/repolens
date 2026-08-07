@@ -16,6 +16,7 @@
 
 pub mod composition;
 pub mod digest;
+pub mod evidence_input;
 pub mod finding;
 pub mod ids;
 pub mod repository;
@@ -28,6 +29,7 @@ pub use composition::{
     RepositoryCompositionCounter,
 };
 pub use digest::{ContentDigest, ContentDigestError};
+pub use evidence_input::{ContentVerdict, FileContent, RuleEvidence, Unverifiable};
 pub use finding::{Confidence, Evidence, Finding, Severity};
 pub use ids::{AnalysisId, FindingId, SnapshotId};
 pub use repository::{CommitSha, CommitShaError, RepositoryCoordinate, TreeSha};
