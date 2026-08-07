@@ -34,7 +34,7 @@ use crate::contract::error::{ApiError, ErrorCode};
 ///
 /// Carries the status alongside the body so the mapping from "what went wrong"
 /// to "what HTTP says" lives in one place rather than at every call site.
-pub(crate) struct Failure(pub(crate) StatusCode, pub(crate) ApiError);
+pub(crate) struct Failure(pub(super) StatusCode, pub(super) ApiError);
 
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {

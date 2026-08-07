@@ -7,6 +7,8 @@
 use std::sync::Arc;
 
 use repolens_github::GitHubRestClient;
+
+use crate::auth::SharedVerifier;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
@@ -54,6 +56,15 @@ pub struct AppState {
     /// `reqwest::Client` and a secret — and an analysis is spawned onto a task
     /// that outlives the request.
     github: Arc<GitHubRestClient>,
+    /// Firebase ID token verifier, absent when no project is configured.
+    ///
+    /// `Option` unlike `github`, and the asymmetry is deliberate. A GitHub
+    /// client can always be built, so "no GitHub access" describes no reachable
+    /// configuration. A verifier cannot: it needs a project id, and a
+    /// deployment may genuinely not have one. Modelling that honestly is what
+    /// lets creation **close** in that case rather than silently run
+    /// unauthenticated — see `api::authenticated`.
+    verifier: Option<SharedVerifier>,
 }
 
 impl AppState {
@@ -63,7 +74,21 @@ impl AppState {
         Self {
             pool: Some(pool),
             github: Arc::new(github),
+            verifier: None,
         }
+    }
+
+    /// Attaches a token verifier, enabling authenticated creation.
+    #[must_use]
+    pub fn with_verifier(mut self, verifier: SharedVerifier) -> Self {
+        self.verifier = Some(verifier);
+        self
+    }
+
+    /// Borrows the verifier, when one is configured.
+    #[must_use]
+    pub fn verifier(&self) -> Option<&SharedVerifier> {
+        self.verifier.as_ref()
     }
 
     /// Borrows the GitHub client.
@@ -78,6 +103,7 @@ impl AppState {
         Self {
             pool: None,
             github: Arc::new(github),
+            verifier: None,
         }
     }
 

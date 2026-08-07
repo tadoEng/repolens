@@ -259,7 +259,7 @@ export interface components {
          *     when a future backend adds one it has never seen.
          * @enum {string}
          */
-        ErrorCode: "INVALID_REPOSITORY_URL" | "REPOSITORY_NOT_FOUND" | "REPOSITORY_INACCESSIBLE" | "REPOSITORY_ARCHIVED" | "REPOSITORY_TOO_LARGE" | "RATE_LIMITED" | "WORKER_FAILED_RETRIABLE" | "ANALYZER_FAILED_PERMANENT" | "ANALYSIS_NOT_FOUND" | "REPORT_NOT_AVAILABLE" | "MALFORMED_REQUEST" | "REQUEST_TOO_LARGE" | "REQUEST_TIMED_OUT" | "INTERNAL_ERROR";
+        ErrorCode: "INVALID_REPOSITORY_URL" | "REPOSITORY_NOT_FOUND" | "REPOSITORY_INACCESSIBLE" | "REPOSITORY_ARCHIVED" | "REPOSITORY_TOO_LARGE" | "RATE_LIMITED" | "WORKER_FAILED_RETRIABLE" | "ANALYZER_FAILED_PERMANENT" | "ANALYSIS_NOT_FOUND" | "REPORT_NOT_AVAILABLE" | "UNAUTHENTICATED" | "AUTHENTICATION_UNAVAILABLE" | "MALFORMED_REQUEST" | "REQUEST_TOO_LARGE" | "REQUEST_TIMED_OUT" | "INTERNAL_ERROR";
         /**
          * @description One checkable fact supporting a finding.
          *
@@ -702,6 +702,15 @@ export interface operations {
             };
             /** @description The URL is not a public GitHub repository */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description No valid Firebase ID token was presented */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -19,6 +19,14 @@ allowBuilds:
   # service worker into a public directory. We invoke that explicitly when browser mocking
   # is wired up (issue #14), so the script has nothing to do here.
   msw: false
+  # Arrived with `firebase` (#13). Its postinstall only patches its own package for
+  # bundlers that need CommonJS interop; Vite consumes the ESM build, so there is nothing
+  # for it to do and a third-party install script is not worth running for nothing.
+  '@firebase/util': false
+  # A transitive dependency of Firebase modules this app never imports — Firestore and
+  # the AI SDK. Its postinstall generates CLI helpers for code generation we do not
+  # perform, so it is denied rather than allowed "just in case".
+  protobufjs: false
 
 # Peer mismatches fail the install. A blanket escape hatch would also silence the
 # next mismatch — the one that actually matters — so each exception below is named

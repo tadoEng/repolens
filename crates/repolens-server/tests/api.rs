@@ -104,87 +104,32 @@ fn assert_envelope(
 }
 
 #[tokio::test]
-async fn a_malformed_json_body_is_answered_with_the_envelope() {
-    // `axum`'s own JsonRejection answers in plain text. That makes the envelope
-    // a promise this API only sometimes keeps, which is worse than not making
-    // it — the generated client types every error as ApiError.
-    let (status, content_type, body) = send(
-        "POST",
-        "/api/v1/analyses",
-        Some("application/json"),
+async fn authentication_is_decided_before_the_body_is_read() {
+    // Creation is gated (#13), and the gate runs ahead of the JSON extractor.
+    // That ordering is deliberate and worth pinning: an unauthenticated caller
+    // must not be able to use body-parsing diagnostics as an oracle, and must
+    // not get a different answer for a malformed body than for a valid one.
+    //
+    // This router has no verifier configured, so creation is closed — 503
+    // rather than 401, because the fault is the deployment's. The envelope
+    // proofs for malformed bodies live in `tests/authentication.rs`, past the
+    // gate, which is the only place they are reachable.
+    for body in [
         "{not json",
-    )
-    .await;
-
-    assert_envelope(
-        status,
-        StatusCode::BAD_REQUEST,
-        content_type.as_deref(),
-        &body,
-        "MALFORMED_REQUEST",
-    );
-}
-
-#[tokio::test]
-async fn a_missing_content_type_is_answered_with_the_envelope() {
-    let (status, content_type, body) = send(
-        "POST",
-        "/api/v1/analyses",
-        None,
+        r#"{"repository":"wrong shape"}"#,
         r#"{"repository_url":"https://github.com/rust-lang/crates.io"}"#,
-    )
-    .await;
+    ] {
+        let (status, content_type, parsed) =
+            send("POST", "/api/v1/analyses", Some("application/json"), body).await;
 
-    assert_envelope(
-        status,
-        StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        content_type.as_deref(),
-        &body,
-        "MALFORMED_REQUEST",
-    );
-}
-
-#[tokio::test]
-async fn a_body_of_the_wrong_shape_is_answered_with_the_envelope() {
-    // Valid JSON, wrong document. Distinct from a syntax error and reported
-    // with its own status rather than flattened into one generic 400.
-    let (status, content_type, body) = send(
-        "POST",
-        "/api/v1/analyses",
-        Some("application/json"),
-        r#"{"repository":"rust-lang/crates.io"}"#,
-    )
-    .await;
-
-    assert_envelope(
-        status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        content_type.as_deref(),
-        &body,
-        "MALFORMED_REQUEST",
-    );
-}
-
-#[tokio::test]
-async fn an_oversized_body_is_answered_with_the_envelope() {
-    // The limit is 16 KiB. This is well past it, and the rejection surfaces
-    // through the JSON extractor rather than needing its own interception.
-    let oversized = format!(r#"{{"repository_url":"{}"}}"#, "x".repeat(32 * 1024));
-    let (status, content_type, body) = send(
-        "POST",
-        "/api/v1/analyses",
-        Some("application/json"),
-        &oversized,
-    )
-    .await;
-
-    assert_envelope(
-        status,
-        StatusCode::PAYLOAD_TOO_LARGE,
-        content_type.as_deref(),
-        &body,
-        "REQUEST_TOO_LARGE",
-    );
+        assert_envelope(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            content_type.as_deref(),
+            &parsed,
+            "AUTHENTICATION_UNAVAILABLE",
+        );
+    }
 }
 
 #[tokio::test]

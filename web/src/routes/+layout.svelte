@@ -17,9 +17,13 @@
 		<div class="app-header__inner">
 			<a class="wordmark" href={resolve('/')}>RepoLens</a>
 			<!--
-				Minimal auth state (§3.1) lands with the Firebase gate at issue #13.
-				Nothing is rendered here yet because there is no auth state to render, and
-				a placeholder control would have to be un-built rather than filled in.
+				Sign-in state lives on the home route, next to the control it gates, rather
+				than in this header.
+
+				Issue #13 landed the gate, so there *is* auth state to render now — this is a
+				choice, not a gap. Two of the three routes are public report views reached by a
+				shared URL, and a persistent "sign in" affordance on those would imply the
+				reader needs an account to read what they were just sent. They do not.
 			-->
 		</div>
 	</header>

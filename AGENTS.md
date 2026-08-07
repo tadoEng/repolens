@@ -26,7 +26,7 @@ packages/repolens-api-client   generated TypeScript client
 packages/repolens-msw          MSW handlers driven by those fixtures
 web/                           SvelteKit application, static output only
 migrations/                    SQL applied by the `migrate` binary
-docs/                          architecture, agent-contract manifest
+docs/                          architecture, deployment runbook, agent-contract manifest
 scripts/                       repository-level checks that are neither Cargo nor pnpm
 ```
 
@@ -200,6 +200,8 @@ was run but never committed fails there.
 - [`README.md`](README.md) — the product boundary and what is deliberately out
   of scope
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — why each invariant exists
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — every deployed variable, the
+  order the two hosts must go out in, and the smoke test
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — the gates exactly as
   they run
 - [`Cargo.toml`](Cargo.toml), [`package.json`](package.json),

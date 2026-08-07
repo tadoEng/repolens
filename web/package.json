@@ -19,7 +19,8 @@
     "test:e2e:integration": "playwright test --config playwright.integration.config.ts"
   },
   "dependencies": {
-    "@repolens/api-client": "workspace:*"
+    "@repolens/api-client": "workspace:*",
+    "firebase": "^12.17.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.12.1",

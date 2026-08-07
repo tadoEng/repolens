@@ -47,6 +47,16 @@
               }
             }
           },
+          "401": {
+            "description": "No valid Firebase ID token was presented",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "408": {
             "description": "The request exceeded the server time budget",
             "content": {
@@ -580,6 +590,8 @@
           "ANALYZER_FAILED_PERMANENT",
           "ANALYSIS_NOT_FOUND",
           "REPORT_NOT_AVAILABLE",
+          "UNAUTHENTICATED",
+          "AUTHENTICATION_UNAVAILABLE",
           "MALFORMED_REQUEST",
           "REQUEST_TOO_LARGE",
           "REQUEST_TIMED_OUT",

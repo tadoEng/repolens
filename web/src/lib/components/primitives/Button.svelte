@@ -6,14 +6,22 @@
 	 * reach for one if it did: `<button>` is already keyboard-operable, already announces
 	 * its disabled state, and already fires on Space and Enter.
 	 *
-	 * `type="button"` is hardcoded. The HTML default is `submit`, which inside a form makes
-	 * every unlabelled button a submit button — the one default worth taking away.
+	 * `type` **defaults to `button`, and that default is the point.** The HTML default is
+	 * `submit`, which inside a form makes every unlabelled button a submit button — the one
+	 * default worth taking away. `type="submit"` is therefore opt-in and never inherited: a
+	 * form's one real submit control asks for it by name, and nothing else can acquire it by
+	 * being placed inside a `<form>`.
 	 */
 	import type { Snippet } from 'svelte';
 
 	interface Props {
 		/** `primary` is the single main action on a screen. Everything else is `secondary`. */
 		variant?: 'primary' | 'secondary';
+		/**
+		 * `submit` only for the control that submits the form it sits in. Anything else —
+		 * including buttons that merely live inside a form — stays `button`.
+		 */
+		type?: 'button' | 'submit';
 		disabled?: boolean;
 		/** Set while an action is in flight, so the label can say so and the control locks. */
 		busy?: boolean;
@@ -23,6 +31,7 @@
 
 	let {
 		variant = 'secondary',
+		type = 'button',
 		disabled = false,
 		busy = false,
 		onclick,
@@ -31,7 +40,7 @@
 </script>
 
 <button
-	type="button"
+	{type}
 	class="button button--{variant}"
 	disabled={disabled || busy}
 	aria-busy={busy ? 'true' : undefined}

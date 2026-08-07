@@ -633,10 +633,12 @@ fn every_error_code_is_either_in_a_fixture_or_explicitly_exempt() {
     // exceeded ingestion bound — and each is written to the row by
     // `store::fail`. Exempting them meant three terminal states a user can
     // actually hit had no proof that the frontend renders them.
-    const EXEMPT: [ErrorCode; 7] = [
+    const EXEMPT: [ErrorCode; 9] = [
         ErrorCode::InvalidRepositoryUrl,
         ErrorCode::AnalysisNotFound,
         ErrorCode::ReportNotAvailable,
+        ErrorCode::Unauthenticated,
+        ErrorCode::AuthenticationUnavailable,
         ErrorCode::MalformedRequest,
         ErrorCode::RequestTooLarge,
         ErrorCode::RequestTimedOut,

@@ -26,9 +26,12 @@ repository = "https://github.com/tadoEng/repolens"
 # version, exclusion-policy version, GitHub REST API version — none of which are
 # ordinary Cargo dependencies at this stage.
 #
-# Only plan §4.3 "#11 skeleton" dependencies are installed. reqwest, tokei, tar,
-# flate2, jsonwebtoken, and google-cloud-auth belong to later stages and are
-# deliberately absent.
+# Dependencies arrive with the stage that needs them, never "for later".
+# `reqwest` came with ingestion (#4) and `jsonwebtoken` with authenticated
+# creation (#13). `tokei`, `tar` and `flate2` belong to archive-based
+# composition (#12) and are still absent; so is `google-cloud-auth`, because
+# verifying a Firebase ID token needs only Google's *public* signing keys and
+# the project id, not a service-account credential.
 [workspace.dependencies]
 repolens-core = { path = "crates/repolens-core" }
 repolens-github = { path = "crates/repolens-github" }
@@ -108,6 +111,16 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 sha2 = "0.10"
 hex = "0.4"
 secrecy = "0.10"
+
+# Firebase ID token verification (#13). RS256 only: Google signs ID tokens with
+# rotating RSA keys published as JWKs, so no key material and no service-account
+# credential live in this repository — the public project id is the whole
+# server-side configuration.
+# `rust_crypto` rather than `aws_lc_rs`: a pure-Rust provider needs no C
+# toolchain, which keeps the container build and the Windows developer build
+# identical. jsonwebtoken 10 requires exactly one provider to be selected and
+# panics at first use if none is.
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

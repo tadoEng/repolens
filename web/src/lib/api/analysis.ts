@@ -17,25 +17,26 @@
  * exception when nothing answered at all — and `Fetched<T>` is the single union every caller
  * reads instead of rediscovering that split at each call site.
  *
- * ## Why there is no retry, and no create
+ * ## One mutation, and why there is still no retry
  *
- * Reads only, and that is a boundary rather than an omission. Both operations here are
- * idempotent and anonymous by design — the unguessable analysis id *is* the capability —
- * which is what lets a progress page work for someone who has not signed in. Starting or
- * retrying an analysis is none of those things. It **starts work**: it is an authenticated
- * mutation on the paid path, it needs the Firebase bearer credential that issue #13 owns,
- * and it needs declared idempotency semantics.
+ * `createAnalysis` is the only write this app makes, and it arrived with the credential
+ * that makes it safe: issue #13 gates `POST /api/v1/analyses` on a verified Firebase ID
+ * token. The two reads stay anonymous by design — the unguessable analysis id *is* the
+ * capability, which is what lets a progress page and a report work for someone who has
+ * never signed in.
  *
- * `POST /api/v1/analyses` now exists in the generated `paths`, and that changes nothing
- * here. A create sent without those is not a smaller version of the real feature; it is a
- * request whose behaviour on a double-click, on a replay, or against a server that has
- * already queued the work is undefined, and whose failure mode is duplicate paid analyses
- * rather than an error message. So the affordance stays withheld, visibly and with the
- * reason stated on screen (`RetryNotice.svelte`), until it can arrive with its credential.
+ * **Retry is still withheld**, and for a reason creation does not share. A retry is a
+ * second request against work that may already be queued, so its behaviour on a
+ * double-click, on a replay, or against a server that has already requeued is undefined,
+ * and the failure mode is duplicate paid analyses rather than an error message. Creation
+ * has an answer to that arriving in #28 (idempotent reuse keyed on the full
+ * output-changing identity); retry has none yet. So the affordance stays withheld,
+ * visibly and with the reason stated on screen (`RetryNotice.svelte`), until #28 lands.
  */
 
 import { api } from '$lib/api/client';
 import type { Analysis, ApiError, Report } from '@repolens/api-client';
+import { session } from '$lib/auth/session.svelte';
 
 export type { Analysis, ApiError, Report };
 
@@ -162,6 +163,31 @@ export function fetchReport(analysisId: string): Promise<Fetched<Report>> {
 	return fetched<Report>(
 		api.GET('/api/v1/analyses/{analysis_id}/report', {
 			params: { path: { analysis_id: analysisId } }
+		})
+	);
+}
+
+/**
+ * Starts an analysis of one public GitHub repository.
+ *
+ * The only mutation this app makes, and the only request that carries a credential. The
+ * ID token goes in `Authorization`, to the configured API origin and nowhere else —
+ * `api` is bound to that single origin at construction, so there is no code path here
+ * that could send it somewhere Firebase or a redirect chose.
+ *
+ * A missing token is *not* short-circuited into a local error. The request is sent
+ * without it and the API refuses it, which keeps one authority for the rule: a browser
+ * that believed itself signed in when it was not would otherwise show a different
+ * outcome than the server produced. `UNAUTHENTICATED` comes back in the envelope and the
+ * form renders it like any other refusal.
+ */
+export async function createAnalysis(repositoryUrl: string): Promise<Fetched<Analysis>> {
+	const token = await session.idToken();
+
+	return fetched<Analysis>(
+		api.POST('/api/v1/analyses', {
+			body: { repository_url: repositoryUrl },
+			...(token ? { headers: { Authorization: `Bearer ${token}` } } : {})
 		})
 	);
 }

@@ -44,6 +44,10 @@ utoipa-axum = { workspace = true }
 
 sqlx = { workspace = true }
 
+# Fetching Google's signing keys, and verifying against them.
+reqwest = { workspace = true }
+jsonwebtoken = { workspace = true }
+
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
@@ -52,3 +56,19 @@ anyhow = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# Generates the RSA keypair `tests/authentication.rs` signs test tokens with.
+#
+# Generated per run rather than committed: `.gitignore` blocks `*.pem` and
+# `*.key` on purpose, and carving an exception for a fixture would weaken a net
+# that exists to catch the real thing. A key that is never written to disk
+# cannot be mistaken for a credential by a scanner, a reviewer, or a future
+# copy-paste.
+rsa = "0.9"
+rand = "0.8"
+# Serves a key set `tests/signing_keys.rs` controls, so request counts and key
+# rotation are observed rather than reasoned about.
+wiremock = "0.6"
+# Encodes the RSA modulus and exponent into the JWK form the verifier parses.
+base64 = "0.22"
