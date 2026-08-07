@@ -4,11 +4,40 @@ Two hosts and one database: the Axum API on **Render**, the SvelteKit static
 build on **Cloudflare Workers Static Assets**, and **Neon** PostgreSQL behind
 the API.
 
-This file names variables and never their values.
+This file names **credentials** and never their values.
 [`.env.example`](../.env.example) keeps its right-hand sides empty and so does
 this runbook. A credential that has appeared in a document, an issue, a pull
 request, a CI log or a chat window is rotated at the provider — deleting it does
 not un-disclose it.
+
+The deployed **origins** are a different thing and are written down below. They
+are public by construction — a browser sends them to anyone who asks, and the
+API publishes one of them in every CORS response — so withholding them protects
+nothing and costs the thing this runbook exists for. Without them, nobody can
+check whether a deploy worked from the repository alone. That gap is not
+hypothetical: it happened, and a plausible-looking guess at the frontend
+hostname reached an unrelated project that shares the name.
+
+## Where it is deployed
+
+| Role | Origin |
+| ---- | ------ |
+| Frontend (Cloudflare Workers Static Assets) | `https://repolens.dothanhtupt.workers.dev` |
+| API (Render) | `https://repolens-api-hemv.onrender.com` |
+
+These are the two values that point at each other: `CORS_ALLOWED_ORIGIN` on the
+API is the frontend origin, and `PUBLIC_API_ORIGIN` in the frontend build is the
+API origin. Changing either means redeploying the other — see the ordering
+section below.
+
+The database has no public origin and is reached only by the API.
+
+### The first request after an idle period will look broken
+
+Render's free tier spins the service down. The first request wakes it and can
+take **longer than a minute**, so a smoke test with a short timeout reports a
+hang that is really a cold start. Give the first call a generous timeout, or
+make one throwaway request and start timing from the second.
 
 [`ARCHITECTURE.md`](ARCHITECTURE.md) and the crate documentation describe Cloud
 Run, which is the platform the three-role split was designed against. Render is
@@ -197,6 +226,17 @@ that could have caught it.
 
 Run these in order against the deployed hosts. Each one either passes or the
 deployment is not done.
+
+Steps 1–3 and 8 need no browser and no account, so they are worth running after
+every merge. Against the origins recorded above:
+
+```bash
+API=https://repolens-api-hemv.onrender.com; WEB=https://repolens.dothanhtupt.workers.dev; curl -s --max-time 90 "$API/api/v1/system/probe"; echo; curl -s -o /dev/null -w "web %{http_code}\n" --max-time 30 "$WEB/"; curl -s -w "\nHTTP %{http_code}\n" --max-time 30 -X POST "$API/api/v1/analyses" -H 'content-type: application/json' -d '{"owner":"tadoEng","name":"repolens"}'
+```
+
+The probe also reports `build_sha`. Compare it against the commit you expected
+to deploy: a green CI run and a *stale* `build_sha` means the host never picked
+the merge up, which no other check in this list would catch.
 
 1. `GET /api/v1/system/probe` reports `"api": "OK"` and `"database": "OK"`.
 2. The same response reports `"schema_version": 2` — the number, not `null` and
