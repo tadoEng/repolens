@@ -781,17 +781,107 @@ fn unverifiable_limitation(reason: repolens_core::Unverifiable) -> Limitation {
 
 /// Human-readable text for each rule.
 ///
-/// Kept beside the pipeline rather than in `repolens-core`, because it is
-/// presentation: the domain decides *what* was concluded, this decides how to
-/// say it. A rule with no entry still reports, using its id — a missing string
-/// must not silently drop a finding.
+/// Split in two only because the list outgrew one function. The division is
+/// arbitrary — what a rule *says* is presentation, and lives here rather than
+/// in the ruleset, so that a domain crate never has to hold a sentence.
 fn describe(rule_id: &str) -> (&'static str, &'static str, FindingCategory) {
-    match rule_id {
-        "rust.workspace" => (
-            "Rust workspace detected",
-            "A Cargo manifest is present at the repository root.",
+    describe_structure(rule_id)
+        .or_else(|| describe_technology(rule_id))
+        .unwrap_or((
+            "Unrecognised rule",
+            "This rule produced a result but has no description in this build. It is reported \
+             rather than dropped, because a missing string is a gap in presentation, not \
+             grounds to hide a finding.",
+            FindingCategory::Technology,
+        ))
+}
+
+/// What a repository says about itself: layout, documents, delivery.
+fn describe_structure(rule_id: &str) -> Option<(&'static str, &'static str, FindingCategory)> {
+    Some(match rule_id {
+        "rust.cargo_manifest" => (
+            "Cargo manifest at the repository root",
+            "A Cargo manifest is present at the root, so Rust is built here. It does not say \
+             how many crates there are — that needs reading the manifest.",
             FindingCategory::Technology,
         ),
+        "rust.workspace" => (
+            "Cargo workspace",
+            "The root manifest opens a [workspace] table, so this repository builds several \
+             crates together rather than one. Read from the manifest, not inferred from a \
+             directory layout.",
+            FindingCategory::Technology,
+        ),
+        "node.workspace" => (
+            "pnpm workspace",
+            "A pnpm workspace file is present at the root, so the npm packages here are managed \
+             together. It names the workspace, not what is in it.",
+            FindingCategory::BuildAndDependencies,
+        ),
+        "docs.license" => (
+            "Licence published",
+            "A licence file is committed at the repository root, so the terms of reuse are \
+             stated. Which licence it is needs reading the file.",
+            FindingCategory::SourceAndDocumentation,
+        ),
+        "docs.contributing" => (
+            "Contribution guide",
+            "A contribution guide is committed, so a newcomer has somewhere to start. Its \
+             absence means the process is not written down, not that there is none.",
+            FindingCategory::SourceAndDocumentation,
+        ),
+        "docs.security" => (
+            "Security policy",
+            "A security policy is committed, so there is a stated way to report a \
+             vulnerability privately. Without one, the usual fallback is a public issue.",
+            FindingCategory::SecurityAndMaintenance,
+        ),
+        "deployment.docker" => (
+            "Container image defined",
+            "A Dockerfile is committed, so this repository describes how to build a container \
+             image. It does not say that anything deploys from it.",
+            FindingCategory::Operations,
+        ),
+        "database.diesel" => (
+            "Database access through Diesel",
+            "The Cargo manifest declares diesel. Committed migrations say a schema is \
+             versioned; this says what reaches it.",
+            FindingCategory::Technology,
+        ),
+        "database.seaorm" => (
+            "Database access through SeaORM",
+            "The Cargo manifest declares sea-orm. Committed migrations say a schema is \
+             versioned; this says what reaches it.",
+            FindingCategory::Technology,
+        ),
+        "framework.vite" => (
+            "Built with Vite",
+            "The npm manifest declares vite, so the frontend is built by it. A separate fact \
+             from which framework is used: SvelteKit builds with Vite, and plenty of Vite \
+             projects are not SvelteKit.",
+            FindingCategory::Technology,
+        ),
+        "frontend.adapter_static" => (
+            "Frontend builds to static files",
+            "The npm manifest declares @sveltejs/adapter-static, so the build produces files a \
+             CDN can serve rather than an application a Node server must run. This is the \
+             deployment fact the framework rule deliberately does not claim.",
+            FindingCategory::Operations,
+        ),
+        "contract.client.openapi_typescript" => (
+            "TypeScript client generated with openapi-typescript",
+            "The npm manifest declares openapi-typescript, so the frontend types are generated \
+             from the API document rather than written by hand. Named for the generator it \
+             recognises: a project generating its client another way reports this as missing.",
+            FindingCategory::BuildAndDependencies,
+        ),
+        _ => return None,
+    })
+}
+
+/// What a repository is built with, read from its manifests.
+fn describe_technology(rule_id: &str) -> Option<(&'static str, &'static str, FindingCategory)> {
+    Some(match rule_id {
         "ci.workflows" => (
             "GitHub Actions workflows present",
             "Workflow definitions exist under .github/workflows. This states that CI is \
@@ -840,14 +930,8 @@ fn describe(rule_id: &str) -> (&'static str, &'static str, FindingCategory) {
             "The Cargo manifest declares sqlx. Committed migrations say a schema is versioned; this says what reaches it.",
             FindingCategory::Technology,
         ),
-        _ => (
-            "Unrecognised rule",
-            "This rule produced a result but has no description in this build. It is reported \
-             rather than dropped, because a missing string is a gap in presentation, not \
-             grounds to hide a finding.",
-            FindingCategory::Technology,
-        ),
-    }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

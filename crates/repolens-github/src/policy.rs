@@ -44,6 +44,25 @@ const NAMED_FILE_PATTERNS: &[&str] = &[
     "SECURITY*",
 ];
 
+/// Manifests, wherever in the tree they sit.
+///
+/// Matched on the final path component at any depth, unlike
+/// [`NAMED_FILE_PATTERNS`], whose `*` deliberately stops at a `/`.
+///
+/// The root patterns are not enough, and RepoLens is the proof: its root
+/// `Cargo.toml` is a bare `[workspace]` table and its root `package.json` is
+/// four scripts. Every dependency this repository actually has is declared in
+/// `crates/*/Cargo.toml`, `web/package.json` or
+/// `packages/repolens-api-client/package.json`. Selecting only the root ones
+/// left every content rule answering `UNABLE_TO_VERIFY` on the one repository
+/// we can check by hand — honest, and useless. That is the shape of most
+/// monorepos, not a quirk of this one.
+///
+/// Bounded the same way everything else here is: excluded directories are
+/// skipped, and the selection ceiling still applies. A `node_modules` tree
+/// holds thousands of these.
+const MANIFEST_FILENAMES: &[&str] = &["Cargo.toml", "package.json"];
+
 /// Extensions that make a file a candidate implementation file.
 ///
 /// A closed list rather than "anything textual". The bounded rule the issue asks
@@ -225,6 +244,9 @@ pub struct BlobSelection {
 /// Binary content cannot be judged from a path at all, so that check lives with
 /// retrieval in [`GitHubRestClient`](crate::GitHubRestClient).
 pub fn select_paths(tree: &RepositoryTree) -> FileSelection {
+    /// Dropped manifests worth naming before the count stands in for the rest.
+    const MAX_RECORDED_DROPS: usize = 8;
+
     let mut selection = FileSelection::default();
     let mut chosen: Vec<&str> = Vec::new();
 
@@ -244,6 +266,44 @@ pub fn select_paths(tree: &RepositoryTree) -> FileSelection {
             // absence from the evidence is a fact about the analysis, not noise.
             admit(&mut selection, &mut chosen, entry, true);
         }
+    }
+
+    // Manifests below the root, before implementation files.
+    //
+    // A nested manifest answers "what is this built with" outright, which no
+    // number of source files does, so it outranks them for the remaining
+    // budget. Shallow-first for the same reason as below: `web/package.json`
+    // describes the frontend, `web/vendor/thing/package.json` describes
+    // somebody else's.
+    let mut manifests: Vec<&crate::TreeEntry> = tree
+        .entries
+        .iter()
+        .filter(|entry| is_nested_manifest(&entry.path))
+        .collect();
+    manifests.sort_by(|left, right| {
+        depth(&left.path)
+            .cmp(&depth(&right.path))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    // A manifest that did not fit is worth recording, unlike the 65th source
+    // file: every dependency finding rests on one, so "we did not read it" is
+    // the gap a reader needs told. Bounded all the same — a repository with a
+    // thousand packages would otherwise put a thousand near-identical entries
+    // into a report that has already said the selection filled up.
+    let mut recorded_drops = 0;
+
+    for entry in manifests {
+        if chosen.contains(&entry.path.as_str()) {
+            continue;
+        }
+        if chosen.len() >= limits::MAX_SELECTED_FILES {
+            if recorded_drops >= MAX_RECORDED_DROPS {
+                break;
+            }
+            recorded_drops += 1;
+        }
+        admit(&mut selection, &mut chosen, entry, true);
     }
 
     let mut candidates: Vec<&crate::TreeEntry> = tree
@@ -338,6 +398,24 @@ fn is_implementation_candidate(path: &str) -> bool {
     }
 }
 
+/// A manifest below the repository root, outside vendored directories.
+///
+/// Root manifests are left to [`NAMED_FILE_PATTERNS`], which ranks them among
+/// the other files a repository uses to describe itself. This is only the ones
+/// that pass would never reach.
+fn is_nested_manifest(path: &str) -> bool {
+    if depth(path) == 0 {
+        return false;
+    }
+    if path
+        .split('/')
+        .any(|segment| EXCLUDED_DIRECTORIES.contains(&segment))
+    {
+        return false;
+    }
+    MANIFEST_FILENAMES.contains(&path.rsplit('/').next().unwrap_or(path))
+}
+
 /// How many directories deep a repository-relative path sits.
 fn depth(path: &str) -> usize {
     path.bytes().filter(|byte| *byte == b'/').count()
@@ -390,6 +468,98 @@ mod tests {
 
     fn selection_of(entries: Vec<TreeEntry>) -> FileSelection {
         select_paths(&tree(entries))
+    }
+
+    #[test]
+    fn a_monorepo_manifest_below_the_root_is_selected() {
+        // The gap that made every dependency rule useless on a monorepo: the
+        // root patterns stop at a `/`, so `web/package.json` was never read and
+        // "which framework" answered UNABLE_TO_VERIFY on a repository whose
+        // frontend framework is written down.
+        let tree = tree(vec![
+            blob("Cargo.toml", 10),
+            blob("package.json", 10),
+            blob("web/package.json", 10),
+            blob("crates/server/Cargo.toml", 10),
+            blob("packages/api-client/package.json", 10),
+        ]);
+
+        let selection = select_paths(&tree);
+
+        for path in [
+            "web/package.json",
+            "crates/server/Cargo.toml",
+            "packages/api-client/package.json",
+        ] {
+            assert!(
+                selection.paths.iter().any(|chosen| chosen == path),
+                "{path} was not selected: {:?}",
+                selection.paths
+            );
+        }
+    }
+
+    #[test]
+    fn a_vendored_manifest_is_not_selected() {
+        // `node_modules` alone holds thousands, and none of them is a fact
+        // about this repository.
+        let tree = tree(vec![
+            blob("package.json", 10),
+            blob("node_modules/left-pad/package.json", 10),
+            blob("web/node_modules/thing/package.json", 10),
+            blob("vendor/lib/Cargo.toml", 10),
+            blob("target/package/x/Cargo.toml", 10),
+        ]);
+
+        let selection = select_paths(&tree);
+
+        assert_eq!(selection.paths, vec!["package.json".to_owned()]);
+    }
+
+    #[test]
+    fn manifests_are_selected_shallowest_first() {
+        // Deterministic, and ranked: `web/package.json` describes the frontend,
+        // `web/vendor-ish/deep/package.json` describes something nested inside
+        // it. When the budget runs out the shallow one has to be the survivor.
+        let tree = tree(vec![
+            blob("a/b/c/package.json", 10),
+            blob("z/package.json", 10),
+            blob("a/package.json", 10),
+        ]);
+
+        let selection = select_paths(&tree);
+
+        assert_eq!(
+            selection.paths,
+            vec![
+                "a/package.json".to_owned(),
+                "z/package.json".to_owned(),
+                "a/b/c/package.json".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_manifest_that_did_not_fit_is_recorded() {
+        // Every dependency finding rests on a manifest, so one that was dropped
+        // is exactly the gap a reader needs told — unlike the 65th source file.
+        let mut entries = vec![blob("package.json", 10)];
+        for index in 0..limits::MAX_SELECTED_FILES {
+            entries.push(blob(&format!("pkg{index:03}/package.json"), 10));
+        }
+        let tree = tree(entries);
+
+        let selection = select_paths(&tree);
+
+        assert_eq!(selection.paths.len(), limits::MAX_SELECTED_FILES);
+        assert!(
+            selection
+                .skipped
+                .iter()
+                .any(|skipped| matches!(skipped.reason, SkipReason::SelectionFull { .. })),
+            "a dropped manifest must be recorded: {:?}",
+            selection.skipped
+        );
     }
 
     #[test]
