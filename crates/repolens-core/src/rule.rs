@@ -86,6 +86,11 @@ impl<'a> RuleInput<'a> {
         self.paths.iter().any(|path| wants(path))
     }
 
+    /// Whether this exact path is among the files whose bytes were retrieved.
+    fn was_read(&self, path: &str) -> bool {
+        self.files.iter().any(|file| file.path == path)
+    }
+
     /// What a content rule may conclude, having matched nothing.
     ///
     /// The four-way distinction from [`crate::evidence_input`], decided once.
@@ -98,34 +103,42 @@ impl<'a> RuleInput<'a> {
             return ContentVerdict::Unverifiable(Unverifiable::ContentsNotCollected);
         }
 
-        let mut saw_file = false;
-        for file in self.matching(wants) {
-            saw_file = true;
-            if file.truncated {
-                // Read, but not all of it. Absence in the part we saw is not
-                // absence in the file.
-                return ContentVerdict::Unverifiable(Unverifiable::FileTruncated);
-            }
+        if self.matching(wants).any(|file| file.truncated) {
+            // Read, but not all of it. Absence in the part we saw is not
+            // absence in the file.
+            return ContentVerdict::Unverifiable(Unverifiable::FileTruncated);
         }
 
-        if saw_file {
-            // Read in full and the thing is not there. The only branch that is
-            // actually knowledge.
-            return ContentVerdict::ReadAndAbsent;
-        }
-
-        if self.path_exists(wants) {
+        // *Every* candidate the tree listed, not merely one of them.
+        //
+        // Reading one matching file and stopping is the mistake that makes this
+        // product lie, and RepoLens is its own counterexample: the root
+        // `package.json` declares no SvelteKit and `web/package.json` does. A
+        // rule that concluded from the first file it happened to read would
+        // report this repository as having no frontend framework — with the
+        // confident `MISSING` that means "we looked, it is not there", not the
+        // `UNABLE_TO_VERIFY` that means "we did not open the file that would
+        // have said so".
+        if self
+            .paths
+            .iter()
+            .any(|path| wants(path) && !self.was_read(path))
+        {
             // The tree listed it; selection or the byte budget did not retrieve
             // it. We know it exists and nothing about what is inside.
             return ContentVerdict::Unverifiable(Unverifiable::NotRetrieved);
         }
 
         if self.tree_truncated {
-            // Not among the paths we have — but we do not have all of them.
+            // Every path we know of was read in full — but we do not have all
+            // the paths, so a candidate may exist that was never listed. This
+            // outranks a full read for the same reason: the unseen part of the
+            // repository is exactly where the answer might be.
             return ContentVerdict::Unverifiable(Unverifiable::TreeTruncated);
         }
 
-        // A complete tree with no such path: there was nothing to read.
+        // A complete tree, every candidate read in full, and the thing is not
+        // there. The only branch that is actually knowledge.
         ContentVerdict::ReadAndAbsent
     }
 }
@@ -259,6 +272,80 @@ mod verdict_tests {
         assert_eq!(
             input.content_verdict(wants_cargo),
             ContentVerdict::Unverifiable(Unverifiable::NotRetrieved)
+        );
+    }
+
+    #[test]
+    fn one_file_read_does_not_settle_a_question_the_others_could_answer() {
+        // The monorepo case, in miniature. Both manifests are candidates; only
+        // one was retrieved. Concluding from it would report a fact about the
+        // repository drawn from a file chosen by the byte budget.
+        let paths = vec!["package.json".to_owned(), "web/package.json".to_owned()];
+        let files = vec![file("package.json", "{\"dependencies\":{}}", false)];
+        let repository = coordinate();
+        let commit = commit();
+        let input = RuleInput {
+            repository: &repository,
+            commit: &commit,
+            paths: &paths,
+            files: &files,
+            tree_truncated: false,
+            contents_collected: true,
+        };
+
+        assert_eq!(
+            input.content_verdict(|path| path.ends_with("package.json")),
+            ContentVerdict::Unverifiable(Unverifiable::NotRetrieved),
+            "an unread candidate makes absence unverifiable, however many were read"
+        );
+    }
+
+    #[test]
+    fn every_candidate_read_in_full_is_what_makes_absence_knowledge() {
+        // The positive half of the rule above: the distinction is between
+        // "some were read" and "all were", not between "none" and "some".
+        let paths = vec!["package.json".to_owned(), "web/package.json".to_owned()];
+        let files = vec![
+            file("package.json", "{\"dependencies\":{}}", false),
+            file("web/package.json", "{\"dependencies\":{}}", false),
+        ];
+        let repository = coordinate();
+        let commit = commit();
+        let input = RuleInput {
+            repository: &repository,
+            commit: &commit,
+            paths: &paths,
+            files: &files,
+            tree_truncated: false,
+            contents_collected: true,
+        };
+
+        assert_eq!(
+            input.content_verdict(|path| path.ends_with("package.json")),
+            ContentVerdict::ReadAndAbsent
+        );
+    }
+
+    #[test]
+    fn a_truncated_tree_outranks_a_file_that_was_read_in_full() {
+        // Reading `Cargo.toml` completely says nothing about a workspace member
+        // manifest the truncated listing never mentioned.
+        let paths = vec!["Cargo.toml".to_owned()];
+        let files = vec![file("Cargo.toml", "[package]\nname = \"x\"\n", false)];
+        let repository = coordinate();
+        let commit = commit();
+        let input = RuleInput {
+            repository: &repository,
+            commit: &commit,
+            paths: &paths,
+            files: &files,
+            tree_truncated: true,
+            contents_collected: true,
+        };
+
+        assert_eq!(
+            input.content_verdict(wants_cargo),
+            ContentVerdict::Unverifiable(Unverifiable::TreeTruncated)
         );
     }
 

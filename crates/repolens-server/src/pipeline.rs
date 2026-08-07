@@ -18,6 +18,9 @@
 //! reclaim it. Acceptable while the whole system is one process being demoed;
 //! unacceptable the moment it is not.
 
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
 use repolens_core::{RepositoryCoordinate, ruleset};
 use repolens_github::{GitHubRepositorySource, GitHubSourceError};
 use sqlx::PgPool;
@@ -198,34 +201,9 @@ where
         .map(|entry| entry.path.clone())
         .collect();
 
-    // Read a bounded set of files, so rules can say what a repository is built
-    // with rather than only which files it has.
-    //
-    // `select_paths` has existed since #4 and nothing called it: every report
-    // until now cost one tree request and could claim only presence. The
-    // selection is a pure function of the tree, so two runs at one commit read
-    // the same files in the same order — which is what keeps a content-backed
-    // report as reproducible as a path-backed one.
-    //
-    // A failure here is **not** fatal. Contents make findings stronger; losing
-    // them costs confidence, not the report. The rules are told collection did
-    // not happen, and every content rule then answers UNABLE_TO_VERIFY rather
-    // than mistaking an unread file for an absent feature.
-    let selection = repolens_github::select_paths(&tree);
-    let (files, contents_collected) = match source
-        .fetch_selected_blobs(coordinate, &commit.sha, &selection.paths)
-        .await
-    {
-        Ok(blobs) => (decode(&blobs), true),
-        Err(error) => {
-            tracing::warn!(
-                analysis = %id,
-                error = %error,
-                "could not read file contents; content rules will report unverified"
-            );
-            (Vec::new(), false)
-        }
-    };
+    let contents = collect_contents(source, id, coordinate, &tree).await;
+    let (files, skipped, contents_collected) =
+        (contents.files, contents.skipped, contents.collected);
 
     let input = repolens_core::RuleInput {
         repository: coordinate,
@@ -239,7 +217,15 @@ where
 
     advance(pool, id, AnalysisState::BuildingReport, None).await;
 
-    let report = build_report(id, coordinate, &commit, &tree, &outcomes);
+    let report = build_report(
+        id,
+        coordinate,
+        &commit,
+        &tree,
+        contents_collected,
+        &skipped,
+        &outcomes,
+    );
 
     store::complete(pool, id, &report).await.map_err(|error| {
         tracing::error!(analysis = %id, error = %error, "could not store the report");
@@ -264,18 +250,102 @@ where
 /// rendered as replacement characters can match a pattern by accident, and a
 /// rule that fired on mojibake would cite an excerpt no reader could recognise
 /// — worse than not having read the file, because it looks like evidence.
+/// What one run of content collection produced.
+struct Contents {
+    /// Files whose bytes were read and decoded.
+    files: Vec<repolens_core::FileContent>,
+    /// Every candidate that went unread, and why.
+    skipped: Vec<repolens_github::SkippedPath>,
+    /// Whether collection ran at all.
+    collected: bool,
+}
+
+/// Reads a bounded set of files, so rules can say what a repository is built
+/// with rather than only which files it has.
+///
+/// `select_paths` has existed since #4 and nothing called it: every report until
+/// now cost one tree request and could claim only presence. The selection is a
+/// pure function of the tree, so two runs at one commit read the same files in
+/// the same order — which is what keeps a content-backed report as reproducible
+/// as a path-backed one.
+///
+/// The tree is passed in, never re-fetched. Selection is derived from *this*
+/// listing, so asking the boundary to fetch its own would spend a second request
+/// re-deriving something already in hand and address content against a tree this
+/// run never saw.
+///
+/// Both skip ledgers are kept. `select_paths` rejects candidates before any
+/// request is spent; `collect_selected_blobs` records those a request was spent
+/// on and could not use. Downstream the two are indistinguishable from a file
+/// that simply has nothing in it, and only here is the difference known.
+///
+/// A failure is **not** fatal. Contents make findings stronger; losing them
+/// costs confidence, not the report. The rules are told collection did not
+/// happen, and every content rule then answers `UNABLE_TO_VERIFY` rather than
+/// mistaking an unread file for an absent feature.
+async fn collect_contents<S>(
+    source: &S,
+    id: Uuid,
+    coordinate: &RepositoryCoordinate,
+    tree: &repolens_github::RepositoryTree,
+) -> Contents
+where
+    S: GitHubRepositorySource,
+{
+    let selection = repolens_github::select_paths(tree);
+
+    match source
+        .collect_selected_blobs(coordinate, tree, &selection.paths)
+        .await
+    {
+        Ok(blobs) => Contents {
+            files: decode(&blobs.retrieved),
+            skipped: selection.skipped.into_iter().chain(blobs.skipped).collect(),
+            collected: true,
+        },
+        Err(error) => {
+            tracing::warn!(
+                analysis = %id,
+                error = %error,
+                "could not read file contents; content rules will report unverified"
+            );
+            Contents {
+                files: Vec::new(),
+                // The pre-request ledger survives the failure: those files were
+                // ruled out before anything went wrong, and that is still true.
+                skipped: selection.skipped,
+                collected: false,
+            }
+        }
+    }
+}
+
 fn decode(blobs: &[repolens_github::BlobContent]) -> Vec<repolens_core::FileContent> {
     blobs
         .iter()
         .filter_map(|blob| {
+            // A file that will not decode is dropped rather than repaired.
+            //
+            // It stays in `paths`, so `content_verdict` sees a candidate that
+            // was never read and answers `FILE_NOT_RETRIEVED`. Substituting
+            // replacement characters would hand rules text that can match by
+            // accident, which is a worse failure than an honest gap.
             let text = String::from_utf8(blob.bytes.clone()).ok()?;
             Some(repolens_core::FileContent {
                 path: blob.path.clone(),
                 text,
                 digest: blob.content_digest.clone(),
-                // The boundary caps each blob, and a rule that finds nothing in
-                // a file cut short has established nothing. Carried so
-                // `content_verdict` can say so.
+                // Always false, and that is a guarantee rather than a stub.
+                //
+                // `collect_blobs` never yields a partial read: a blob that
+                // exceeds the per-file cap or what is left of the analysis
+                // budget is *skipped*, with `TooLarge` or `BudgetSpent`, so no
+                // rule is ever handed the first half of a manifest.
+                // `Unverifiable::FileTruncated` therefore has no producer on
+                // this path. It is kept because the boundary is not the only
+                // way content will arrive — issue #12 reads an archive — and
+                // because a rule reasoning about a truncated file must already
+                // be correct on the day that becomes reachable.
                 truncated: false,
             })
         })
@@ -376,6 +446,8 @@ fn build_report(
     coordinate: &RepositoryCoordinate,
     commit: &repolens_github::ResolvedCommit,
     tree: &repolens_github::RepositoryTree,
+    contents_collected: bool,
+    skipped: &[repolens_github::SkippedPath],
     outcomes: &[ruleset::RuleOutcome],
 ) -> Report {
     let findings: Vec<Finding> = outcomes.iter().map(finding).collect();
@@ -392,33 +464,90 @@ fn build_report(
                 .to_owned(),
         });
     }
-    limitations.push(Limitation {
-        code: "PATHS_ONLY".to_owned(),
-        explanation: "This ruleset reads file paths, not file contents. A finding states that a \
-                      file exists at a path, not what it contains."
-            .to_owned(),
-    });
+    // Whether contents were read is a property of the run, not of the build.
+    //
+    // This replaces a `PATHS_ONLY` limitation that was emitted unconditionally
+    // and had become false: the ruleset reads files, and a report that quotes a
+    // dependency line while stating it reads only paths contradicts itself in
+    // its own body. What is *still* true is narrower and stated instead — the
+    // selection is bounded, so an unread file is a real limit on this report.
+    if contents_collected {
+        limitations.push(Limitation {
+            code: "BOUNDED_FILE_SELECTION".to_owned(),
+            explanation: "File contents were read for a bounded selection of files, not for the \
+                          whole repository. A check that depends on a file outside that selection \
+                          is reported as unverified rather than missing."
+                .to_owned(),
+        });
+    } else {
+        limitations.push(Limitation {
+            code: "CONTENTS_NOT_COLLECTED".to_owned(),
+            explanation: "File contents could not be retrieved for this analysis, so findings \
+                          rest on which paths exist rather than on what the files contain. Every \
+                          check that needs to read a file is reported as unverified."
+                .to_owned(),
+        });
+    }
+
+    limitations.extend(skip_limitations(skipped));
 
     let detected: Vec<String> = outcomes
         .iter()
         .filter(|o| o.outcome == ruleset::Outcome::Detected)
         .map(|o| o.rule_id.to_owned())
         .collect();
+    let unverified = outcomes
+        .iter()
+        .filter(|o| o.outcome == ruleset::Outcome::UnableToVerify)
+        .count();
+    // Findings whose evidence is a quoted line rather than a path that exists.
+    let quoted = outcomes
+        .iter()
+        .filter(|o| o.outcome == ruleset::Outcome::Detected)
+        .filter(|o| o.evidence.iter().any(|e| e.excerpt.is_some()))
+        .count();
+
+    let mut statement = if detected.is_empty() {
+        "No check in this ruleset was satisfied at this commit.".to_owned()
+    } else if quoted == 0 {
+        format!(
+            "{} of {} checks were satisfied by files present at this commit.",
+            detected.len(),
+            outcomes.len()
+        )
+    } else {
+        format!(
+            "{} of {} checks were satisfied at this commit, {quoted} of them by lines quoted \
+             from files that were read.",
+            detected.len(),
+            outcomes.len()
+        )
+    };
+    if unverified > 0 {
+        // Said in the overview rather than left to whoever expands a finding:
+        // the count of things nobody could establish is the part of a report a
+        // reader is most likely to assume away.
+        write!(
+            statement,
+            " {unverified} could not be verified from the evidence collected."
+        )
+        .expect("writing to a String cannot fail");
+    }
 
     let overview = vec![OverviewStatement {
-        statement: if detected.is_empty() {
-            "No rule in this ruleset matched anything in the collected paths.".to_owned()
+        statement,
+        // Grounded in what this run actually read, not fixed at build time.
+        //
+        // Low while nothing is read: presence is not behaviour. Medium once a
+        // finding rests on a quoted line — and never High for the overview,
+        // which generalises over a bounded selection and a nine-rule ruleset
+        // even when every individual citation is exact.
+        confidence: if quoted > 0 {
+            Confidence::Medium
         } else {
-            format!(
-                "{} of {} checks were satisfied by files present at this commit.",
-                detected.len(),
-                outcomes.len()
-            )
+            Confidence::Low
         },
         supporting_rule_ids: detected,
-        // Low, and honestly so: a path-based ruleset establishes presence, not
-        // behaviour. Confidence rises when #5 adds rules that read contents.
-        confidence: Confidence::Low,
     }];
 
     Report {
@@ -505,8 +634,92 @@ fn finding(outcome: &ruleset::RuleOutcome) -> Finding {
                 line_range: item.line_range.map(|(start, end)| LineRange { start, end }),
             })
             .collect(),
-        limitations: Vec::new(),
+        // Why this check could not be answered, when it could not be.
+        //
+        // The rule already decided this — `RuleInput::content_verdict` is the
+        // one place that distinguishes the four silences — and dropping it here
+        // reduced every one of them to a bare UNABLE_TO_VERIFY. That is the
+        // state a reader is most likely to misread as "nothing to see", so the
+        // reason has to travel with it.
+        limitations: outcome
+            .unverifiable
+            .map(unverifiable_limitation)
+            .into_iter()
+            .collect(),
         recommended_action: None,
+    }
+}
+
+/// The ingestion boundary's skip ledger, as report limitations.
+///
+/// Grouped by reason rather than listed per file. A repository can push dozens
+/// of candidates past the selection ceiling, and a limitation per file would
+/// bury the one that matters — "the manifest was too large to read" — under a
+/// list nobody finishes.
+///
+/// Named paths are bounded and the whole list is sorted, because two analyses
+/// of one commit must produce byte-identical reports and `HashMap` iteration
+/// order is not that.
+fn skip_limitations(skipped: &[repolens_github::SkippedPath]) -> Vec<Limitation> {
+    /// Paths named before the count stands in for the rest.
+    const MAX_NAMED: usize = 3;
+
+    let mut grouped: BTreeMap<&'static str, (&'static str, Vec<&str>)> = BTreeMap::new();
+    for entry in skipped {
+        grouped
+            .entry(entry.reason.code())
+            .or_insert_with(|| (entry.reason.explanation(), Vec::new()))
+            .1
+            .push(entry.path.as_str());
+    }
+
+    grouped
+        .into_iter()
+        .map(|(code, (explanation, mut paths))| {
+            paths.sort_unstable();
+            let named = paths
+                .iter()
+                .take(MAX_NAMED)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let detail = if paths.len() > MAX_NAMED {
+                format!(" {} files, including {named}.", paths.len())
+            } else {
+                format!(" Affected: {named}.")
+            };
+            Limitation {
+                code: code.to_owned(),
+                explanation: format!("{explanation}{detail}"),
+            }
+        })
+        .collect()
+}
+
+/// Why a check could not be answered, in the report's own vocabulary.
+///
+/// The codes are `Unverifiable::as_str`, unchanged: they are stable and
+/// low-cardinality by design, so a reader — or a later query — can group by
+/// them. Only the prose is added here, because prose belongs to presentation
+/// and the distinction belongs to the analyzer.
+fn unverifiable_limitation(reason: repolens_core::Unverifiable) -> Limitation {
+    let explanation = match reason {
+        repolens_core::Unverifiable::ContentsNotCollected => {
+            "No file contents were retrieved for this analysis, so this check could not be              evaluated against what any file contains."
+        }
+        repolens_core::Unverifiable::TreeTruncated => {
+            "The repository tree listing was truncated, so a file that would answer this check              may exist without having been seen."
+        }
+        repolens_core::Unverifiable::NotRetrieved => {
+            "A file this check depends on was listed in the tree, but its contents were not among              those retrieved. Nothing was read from it, so its absence proves nothing."
+        }
+        repolens_core::Unverifiable::FileTruncated => {
+            "A file this check reads was cut short by the per-file byte cap. The answer may be in              the part that was not read."
+        }
+    };
+    Limitation {
+        code: reason.as_str().to_owned(),
+        explanation: explanation.to_owned(),
     }
 }
 
@@ -603,6 +816,343 @@ mod tests {
         }
     }
 
+    /// A run that read `files`, with `paths` listing the whole tree.
+    fn content_input(
+        paths: &[String],
+        files: &[repolens_core::FileContent],
+    ) -> repolens_core::RuleInput<'static> {
+        repolens_core::RuleInput {
+            repository: Box::leak(Box::new(RepositoryCoordinate::new("owner", "name"))),
+            commit: Box::leak(Box::new(
+                repolens_core::CommitSha::parse(&"a".repeat(40)).expect("a literal digest"),
+            )),
+            paths: Box::leak(paths.to_vec().into_boxed_slice()),
+            files: Box::leak(files.to_vec().into_boxed_slice()),
+            tree_truncated: false,
+            contents_collected: true,
+        }
+    }
+
+    fn read_file(path: &str, text: &str) -> repolens_core::FileContent {
+        repolens_core::FileContent {
+            path: path.to_owned(),
+            text: text.to_owned(),
+            digest: repolens_core::ContentDigest::from_sha256([0x22; 32]),
+            truncated: false,
+        }
+    }
+
+    fn empty_tree() -> repolens_github::RepositoryTree {
+        repolens_github::RepositoryTree {
+            sha: "a".repeat(40),
+            entries: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    fn a_commit() -> repolens_github::ResolvedCommit {
+        repolens_github::ResolvedCommit {
+            sha: repolens_core::CommitSha::parse(&"a".repeat(40)).expect("a literal digest"),
+            tree_sha: repolens_core::TreeSha::parse(&"b".repeat(40)).expect("a literal digest"),
+            committed_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    const CARGO_WITH_AXUM: &str = "[dependencies]\naxum = \"0.8\"\n";
+
+    /// A report over `outcomes`, from a run that did or did not read contents.
+    fn report_over(contents_collected: bool, outcomes: &[ruleset::RuleOutcome]) -> Report {
+        build_report(
+            Uuid::nil(),
+            &RepositoryCoordinate::new("owner", "name"),
+            &a_commit(),
+            &empty_tree(),
+            contents_collected,
+            &[],
+            outcomes,
+        )
+    }
+
+    fn limitation_codes(report: &Report) -> Vec<&str> {
+        report.limitations.iter().map(|l| l.code.as_str()).collect()
+    }
+
+    fn finding_of<'a>(report: &'a Report, rule_id: &str) -> &'a Finding {
+        report
+            .findings
+            .iter()
+            .find(|f| f.rule_id == rule_id)
+            .unwrap_or_else(|| panic!("{rule_id} is not in the report"))
+    }
+
+    #[test]
+    fn a_report_that_quotes_a_file_does_not_claim_to_read_only_paths() {
+        /*
+         * The contradiction this closes: the report carried a `PATHS_ONLY`
+         * limitation unconditionally, so a finding quoting `axum = "0.8"` from
+         * a manifest sat underneath a sentence saying no file contents are
+         * read. A reader who believes the limitation discounts the evidence;
+         * one who believes the evidence distrusts every limitation.
+         */
+        let files = vec![read_file("Cargo.toml", CARGO_WITH_AXUM)];
+        let outcomes = ruleset::evaluate(&content_input(&["Cargo.toml".to_owned()], &files));
+        let report = report_over(true, &outcomes);
+
+        let codes = limitation_codes(&report);
+        assert!(
+            !codes.contains(&"PATHS_ONLY"),
+            "the analyzer reads contents; saying otherwise contradicts the findings"
+        );
+        assert!(
+            codes.contains(&"BOUNDED_FILE_SELECTION"),
+            "what is still true is narrower, and has to be said: {codes:?}"
+        );
+
+        // And the evidence that limitation used to deny is really there.
+        let axum = finding_of(&report, "framework.axum");
+        assert_eq!(axum.state, FindingState::Detected);
+        assert!(axum.evidence.iter().any(|e| e.excerpt.is_some()));
+    }
+
+    #[test]
+    fn a_run_that_read_nothing_says_so_instead() {
+        // The honest half of the same distinction: with no contents, findings
+        // really do rest on which paths exist.
+        let outcomes = ruleset::evaluate(&path_input(&["Cargo.toml".to_owned()]));
+        let report = report_over(false, &outcomes);
+
+        let codes = limitation_codes(&report);
+        assert!(codes.contains(&"CONTENTS_NOT_COLLECTED"), "{codes:?}");
+        assert!(!codes.contains(&"BOUNDED_FILE_SELECTION"), "{codes:?}");
+    }
+
+    #[test]
+    fn the_overview_confidence_follows_the_evidence_this_run_collected() {
+        let files = vec![read_file("Cargo.toml", CARGO_WITH_AXUM)];
+        let quoted = report_over(
+            true,
+            &ruleset::evaluate(&content_input(&["Cargo.toml".to_owned()], &files)),
+        );
+        let paths_only = report_over(
+            false,
+            &ruleset::evaluate(&path_input(&["Cargo.toml".to_owned()])),
+        );
+
+        // Not a constant baked in at build time: one binary produces both.
+        assert_eq!(quoted.overview[0].confidence, Confidence::Medium);
+        assert_eq!(paths_only.overview[0].confidence, Confidence::Low);
+        assert!(
+            quoted.overview[0].statement.contains("quoted"),
+            "{}",
+            quoted.overview[0].statement
+        );
+        assert!(
+            paths_only.overview[0]
+                .statement
+                .contains("present at this commit"),
+            "{}",
+            paths_only.overview[0].statement
+        );
+    }
+
+    #[test]
+    fn the_overview_counts_what_could_not_be_verified() {
+        // The number a reader is most likely to assume away, so it is stated
+        // rather than left to whoever expands each finding.
+        let outcomes = ruleset::evaluate(&path_input(&["Cargo.toml".to_owned()]));
+        let report = report_over(false, &outcomes);
+
+        let unverified = report
+            .findings
+            .iter()
+            .filter(|f| f.state == FindingState::UnableToVerify)
+            .count();
+        assert!(unverified > 0, "the fixture must produce some");
+        assert!(
+            report.overview[0]
+                .statement
+                .contains(&format!("{unverified} could not be verified")),
+            "{}",
+            report.overview[0].statement
+        );
+    }
+
+    #[test]
+    fn an_unverifiable_finding_carries_the_reason_it_could_not_be_answered() {
+        /*
+         * `content_verdict` distinguishes four silences, and `finding()` threw
+         * the distinction away with `limitations: Vec::new()` — so every one of
+         * them reached the reader as a bare UNABLE_TO_VERIFY, which reads as
+         * "nothing to see" rather than "nobody opened the file".
+         */
+        let outcomes = ruleset::evaluate(&path_input(&["Cargo.toml".to_owned()]));
+        let report = report_over(false, &outcomes);
+
+        let axum = finding_of(&report, "framework.axum");
+        assert_eq!(axum.state, FindingState::UnableToVerify);
+        assert_eq!(
+            axum.limitations
+                .iter()
+                .map(|l| l.code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["CONTENTS_NOT_COLLECTED"],
+            "the reason must travel with the state"
+        );
+        assert!(!axum.limitations[0].explanation.is_empty());
+    }
+
+    #[test]
+    fn a_detected_finding_carries_no_limitation() {
+        // The reason is attached to a silence, not to every finding.
+        let files = vec![read_file("Cargo.toml", CARGO_WITH_AXUM)];
+        let outcomes = ruleset::evaluate(&content_input(&["Cargo.toml".to_owned()], &files));
+        let report = report_over(true, &outcomes);
+
+        assert!(finding_of(&report, "framework.axum").limitations.is_empty());
+    }
+
+    #[test]
+    fn a_manifest_left_unread_is_reported_as_unread_rather_than_missing() {
+        // RepoLens's own shape, seen through the report rather than the
+        // ruleset: the root manifest was read and declares no SvelteKit,
+        // `web/package.json` was never retrieved and does.
+        let files = vec![read_file("package.json", "{\n  \"private\": true\n}\n")];
+        let paths = vec!["package.json".to_owned(), "web/package.json".to_owned()];
+        let outcomes = ruleset::evaluate(&content_input(&paths, &files));
+        let report = report_over(true, &outcomes);
+
+        let kit = finding_of(&report, "framework.sveltekit");
+        assert_eq!(kit.state, FindingState::UnableToVerify);
+        assert_eq!(
+            kit.limitations
+                .iter()
+                .map(|l| l.code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["FILE_NOT_RETRIEVED"]
+        );
+    }
+
+    fn skipped(path: &str, reason: repolens_github::SkipReason) -> repolens_github::SkippedPath {
+        repolens_github::SkippedPath {
+            path: path.to_owned(),
+            reason,
+        }
+    }
+
+    #[test]
+    fn a_file_the_boundary_could_not_read_is_named_in_the_report() {
+        /*
+         * The ledger existed and reached nobody. `collect_blobs` records why
+         * each candidate went unread, `fetch_selected_blobs` returned only the
+         * successes, and the report was left unable to distinguish "the
+         * manifest was too large to read" from "the manifest says nothing".
+         */
+        let report = build_report(
+            Uuid::nil(),
+            &RepositoryCoordinate::new("owner", "name"),
+            &a_commit(),
+            &empty_tree(),
+            true,
+            &[skipped(
+                "Cargo.toml",
+                repolens_github::SkipReason::TooLarge {
+                    size_bytes: 9_000_000,
+                    limit_bytes: 1_000_000,
+                },
+            )],
+            &ruleset::evaluate(&path_input(&["Cargo.toml".to_owned()])),
+        );
+
+        let limitation = report
+            .limitations
+            .iter()
+            .find(|l| l.code == "FILE_SKIPPED_TOO_LARGE")
+            .expect("the skip reaches the report");
+        assert!(
+            limitation.explanation.contains("Cargo.toml"),
+            "the reader needs to know which file: {}",
+            limitation.explanation
+        );
+    }
+
+    #[test]
+    fn skips_are_grouped_by_reason_rather_than_listed_per_file() {
+        // A repository can push dozens of candidates past the ceiling. One
+        // limitation per file would bury the one that matters.
+        let many: Vec<_> = (0..20)
+            .map(|n| {
+                skipped(
+                    &format!("vendor/lib_{n}.rs"),
+                    repolens_github::SkipReason::SelectionFull { limit: 40 },
+                )
+            })
+            .chain(std::iter::once(skipped(
+                "logo.png",
+                repolens_github::SkipReason::Binary,
+            )))
+            .collect();
+
+        let report = build_report(
+            Uuid::nil(),
+            &RepositoryCoordinate::new("owner", "name"),
+            &a_commit(),
+            &empty_tree(),
+            true,
+            &many,
+            &ruleset::evaluate(&path_input(&[])),
+        );
+
+        let codes: Vec<&str> = limitation_codes(&report);
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|c| **c == "FILE_SKIPPED_SELECTION_FULL")
+                .count(),
+            1,
+            "twenty files, one limitation: {codes:?}"
+        );
+        assert!(codes.contains(&"FILE_SKIPPED_BINARY"), "{codes:?}");
+
+        let full = report
+            .limitations
+            .iter()
+            .find(|l| l.code == "FILE_SKIPPED_SELECTION_FULL")
+            .expect("present");
+        assert!(
+            full.explanation.contains("20 files"),
+            "the count stands in for the list: {}",
+            full.explanation
+        );
+    }
+
+    #[test]
+    fn the_skip_ledger_reads_the_same_on_every_run() {
+        // Two analyses of one commit must produce byte-identical reports, and
+        // the ledger arrives in whatever order the boundary produced it.
+        let first_order = vec![
+            skipped("b.rs", repolens_github::SkipReason::Binary),
+            skipped("a.rs", repolens_github::SkipReason::Binary),
+            skipped("c.toml", repolens_github::SkipReason::NotAFile),
+        ];
+        let mut second_order = first_order.clone();
+        second_order.reverse();
+
+        let render = |ledger: &[repolens_github::SkippedPath]| {
+            build_report(
+                Uuid::nil(),
+                &RepositoryCoordinate::new("owner", "name"),
+                &a_commit(),
+                &empty_tree(),
+                true,
+                ledger,
+                &ruleset::evaluate(&path_input(&[])),
+            )
+            .limitations
+        };
+
+        assert_eq!(render(&first_order), render(&second_order));
+    }
+
     #[test]
     fn every_seed_rule_has_a_description() {
         // A rule without one still reports, but under a generic title that tells
@@ -660,6 +1210,8 @@ mod tests {
             &RepositoryCoordinate::new("rust-lang", "crates.io"),
             &commit,
             &tree,
+            false,
+            &[],
             &ruleset::evaluate(&path_input(&[])),
         );
 
@@ -778,18 +1330,18 @@ mod tests {
             })
         }
 
-        async fn fetch_selected_blobs(
+        async fn collect_selected_blobs(
             &self,
             coordinate: &RepositoryCoordinate,
-            _commit: &repolens_core::CommitSha,
+            _tree: &repolens_github::RepositoryTree,
             _paths: &[String],
-        ) -> Result<Vec<repolens_github::BlobContent>, GitHubSourceError> {
+        ) -> Result<repolens_github::BlobSelection, GitHubSourceError> {
             // Recorded like the others: content collection is a request against
             // a specific repository, so it has to use the canonical coordinate
             // too. Returns nothing, which these tests treat as a run that read
             // no files — content rules then report unverified.
             self.seen.lock().unwrap().push(coordinate.clone());
-            Ok(Vec::new())
+            Ok(repolens_github::BlobSelection::default())
         }
 
         async fn download_archive(
@@ -1037,6 +1589,8 @@ mod tests {
             &canonical,
             &commit,
             &tree,
+            false,
+            &[],
             &ruleset::evaluate(&path_input(&[])),
         );
 

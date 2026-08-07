@@ -273,8 +273,12 @@ async fn every_request_carries_the_pinned_api_version() {
         .fetch_tree(&coordinate(), &commit())
         .await
         .expect("the tree is listed");
+    let tree = client
+        .fetch_tree(&coordinate(), &commit())
+        .await
+        .expect("the tree is listed");
     client
-        .fetch_selected_blobs(&coordinate(), &commit(), &["README.md".to_owned()])
+        .collect_selected_blobs(&coordinate(), &tree, &["README.md".to_owned()])
         .await
         .expect("the blob is fetched");
     client
@@ -282,8 +286,12 @@ async fn every_request_carries_the_pinned_api_version() {
         .await
         .expect("the archive downloads");
 
-    // Five calls, six requests: `fetch_selected_blobs` fetches a tree of its own
-    // before it can address content by blob SHA.
+    // Six calls, six requests, one apiece.
+    //
+    // It used to be five calls and six requests: content collection fetched a
+    // tree of its own before it could address a blob by SHA. It now takes the
+    // tree the caller already listed, so the extra request is gone and the
+    // count here is the number of calls made.
     assert_version_header_everywhere(&server, 6).await;
 
     drop(std::fs::remove_file(&archive));

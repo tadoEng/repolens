@@ -717,6 +717,75 @@ mod tests {
     }
 
     #[test]
+    fn repolens_itself_is_not_reported_as_having_no_frontend_framework() {
+        /*
+         * Ground truth, taken from this repository. The root `package.json`
+         * exists and declares no SvelteKit; `web/package.json` declares it. If
+         * only the root is retrieved, the honest answer is that we did not open
+         * the file that would have said so.
+         *
+         * This is the case that a rule reading the first matching file it
+         * happened to receive gets confidently wrong, and it gets it wrong in
+         * the worst direction: MISSING reads as "we looked", so nobody
+         * re-checks it.
+         */
+        let outcomes = evaluate(&read(
+            &["package.json", "web/package.json"],
+            &[file(
+                "package.json",
+                "{
+  \"private\": true,
+  \"packageManager\": \"pnpm@11.0.0\"
+}
+",
+            )],
+        ));
+        let kit = outcome_of(&outcomes, "framework.sveltekit");
+
+        assert_eq!(
+            kit.outcome,
+            Outcome::UnableToVerify,
+            "the manifest that declares SvelteKit was never read"
+        );
+        assert_eq!(kit.unverifiable, Some(Unverifiable::NotRetrieved));
+    }
+
+    #[test]
+    fn reading_both_manifests_finds_the_framework_in_the_workspace_package() {
+        // And the same repository, analyzed properly: the declaration is in the
+        // nested manifest, which is where it is in almost every real monorepo.
+        let outcomes = evaluate(&read(
+            &["package.json", "web/package.json"],
+            &[
+                file(
+                    "package.json",
+                    "{
+  \"private\": true
+}
+",
+                ),
+                file(
+                    "web/package.json",
+                    "{
+  \"devDependencies\": {
+    \"@sveltejs/kit\": \"^2.0.0\"
+  }
+}
+",
+                ),
+            ],
+        ));
+        let kit = outcome_of(&outcomes, "framework.sveltekit");
+
+        assert_eq!(kit.outcome, Outcome::Detected);
+        assert_eq!(
+            kit.evidence.first().map(|e| e.path.as_str()),
+            Some("web/package.json"),
+            "the evidence must point at the manifest that actually declares it"
+        );
+    }
+
+    #[test]
     fn a_name_that_merely_appears_is_not_a_declaration() {
         // `dependency_line` is crude, and this pins how crude. A mention in
         // prose must not become a DETECTED, because a wrong finding with a

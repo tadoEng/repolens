@@ -343,12 +343,22 @@ pub trait GitHubRepositorySource {
     /// Fetches a bounded, explicitly chosen set of blobs — never the whole
     /// repository. This is where semantic and architectural evidence comes
     /// from.
-    fn fetch_selected_blobs(
+    ///
+    /// Takes the tree the caller already holds rather than a commit to fetch
+    /// one from. Every caller of this ran [`select_paths`] over a tree to
+    /// decide what to ask for, so a signature taking a commit made each of
+    /// them spend a second tree request to re-derive something they had.
+    ///
+    /// Returns the whole [`BlobSelection`], skip ledger included. What was
+    /// *not* read is the part a report cannot reconstruct afterwards: an unread
+    /// file and a file that has nothing in it are the same absence downstream,
+    /// and only this boundary knows which one happened.
+    fn collect_selected_blobs(
         &self,
         coordinate: &RepositoryCoordinate,
-        commit: &CommitSha,
+        tree: &RepositoryTree,
         paths: &[String],
-    ) -> impl Future<Output = Result<Vec<BlobContent>, GitHubSourceError>> + Send;
+    ) -> impl Future<Output = Result<BlobSelection, GitHubSourceError>> + Send;
 
     /// Streams the commit archive to `destination`, refusing to write more than
     /// `max_compressed_bytes`.
