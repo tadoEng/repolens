@@ -1,5 +1,6 @@
 import adapter from '@sveltejs/adapter-static';
 import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+import { loadEnv } from 'vite';
 
 /**
  * The origin of the RepoLens API (the Axum service on Cloud Run).
@@ -25,9 +26,25 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
  */
 const LOCAL_API_ORIGIN = 'http://localhost:8080';
 
+/*
+ * The repository's single root `.env.local`, read the same way Vite reads it.
+ *
+ * `vite.config.ts` sets `envDir: '..'`, so the application resolves `PUBLIC_*`
+ * from the repository root. This file runs *before* that and reads
+ * `process.env` directly, so without loading the same files it would decide the
+ * CSP from a different set of values than the app is built with — permitting
+ * hosts the bundle never contacts, or omitting ones it does.
+ *
+ * `loadEnv` comes from Vite itself rather than a second dotenv dependency, and
+ * the merge order matches the Rust side: an explicitly exported variable wins
+ * over a file, so `PUBLIC_API_ORIGIN=… pnpm build` still overrides.
+ */
+const rootEnv = loadEnv(process.env.NODE_ENV ?? 'development', '..', 'PUBLIC_');
+const fromEnv = (name) => process.env[name] ?? rootEnv[name] ?? undefined;
+
 // `vite build` sets NODE_ENV=production; `vite dev` does not.
 const isProductionBuild = process.env.NODE_ENV === 'production';
-const configuredOrigin = process.env.PUBLIC_API_ORIGIN;
+const configuredOrigin = fromEnv('PUBLIC_API_ORIGIN');
 
 if (!configuredOrigin && isProductionBuild) {
 	throw new Error(
@@ -55,10 +72,10 @@ const apiOrigin = configuredOrigin ?? LOCAL_API_ORIGIN;
  * into a build failure.
  */
 const firebase = {
-	apiKey: process.env.PUBLIC_FIREBASE_API_KEY ?? '',
-	authDomain: process.env.PUBLIC_FIREBASE_AUTH_DOMAIN ?? '',
-	projectId: process.env.PUBLIC_FIREBASE_PROJECT_ID ?? '',
-	appId: process.env.PUBLIC_FIREBASE_APP_ID ?? ''
+	apiKey: fromEnv('PUBLIC_FIREBASE_API_KEY') ?? '',
+	authDomain: fromEnv('PUBLIC_FIREBASE_AUTH_DOMAIN') ?? '',
+	projectId: fromEnv('PUBLIC_FIREBASE_PROJECT_ID') ?? '',
+	appId: fromEnv('PUBLIC_FIREBASE_APP_ID') ?? ''
 };
 
 for (const [key, value] of Object.entries(firebase)) {

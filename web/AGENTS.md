@@ -21,6 +21,15 @@ places: the client's base URL and the CSP `connect-src` allowlist. They cannot
 be allowed to disagree, which is why there is one source and no default in a
 production build.
 
+Every `PUBLIC_*` value comes from the **repository root**, not from `web/`:
+`vite.config.ts` sets `envDir: '..'` and `svelte.config.js` reads the same
+directory through Vite's own `loadEnv`. The repository keeps one git-ignored
+root `.env.local` and this keeps the app and the CSP reading it. Without
+`envDir` Vite would search `web/`, find nothing, and resolve every `PUBLIC_*` to
+empty — which is quiet rather than loud, because absent Firebase configuration
+deliberately degrades to read-only, so it looks like a broken feature instead of
+a misconfigured build.
+
 ## Data comes from the generated client, only
 
 Import DTOs and operations from `@repolens/api-client`. Never hand-write a copy
