@@ -539,64 +539,7 @@ fn build_report(
 
     limitations.extend(skip_limitations(skipped));
 
-    let detected: Vec<String> = outcomes
-        .iter()
-        .filter(|o| o.outcome == ruleset::Outcome::Detected)
-        .map(|o| o.rule_id.to_owned())
-        .collect();
-    let unverified = outcomes
-        .iter()
-        .filter(|o| o.outcome == ruleset::Outcome::UnableToVerify)
-        .count();
-    // Findings whose evidence is a quoted line rather than a path that exists.
-    let quoted = outcomes
-        .iter()
-        .filter(|o| o.outcome == ruleset::Outcome::Detected)
-        .filter(|o| o.evidence.iter().any(|e| e.excerpt.is_some()))
-        .count();
-
-    let mut statement = if detected.is_empty() {
-        "No check in this ruleset was satisfied at this commit.".to_owned()
-    } else if quoted == 0 {
-        format!(
-            "{} of {} checks were satisfied by files present at this commit.",
-            detected.len(),
-            outcomes.len()
-        )
-    } else {
-        format!(
-            "{} of {} checks were satisfied at this commit, {quoted} of them by lines quoted \
-             from files that were read.",
-            detected.len(),
-            outcomes.len()
-        )
-    };
-    if unverified > 0 {
-        // Said in the overview rather than left to whoever expands a finding:
-        // the count of things nobody could establish is the part of a report a
-        // reader is most likely to assume away.
-        write!(
-            statement,
-            " {unverified} could not be verified from the evidence collected."
-        )
-        .expect("writing to a String cannot fail");
-    }
-
-    let overview = vec![OverviewStatement {
-        statement,
-        // Grounded in what this run actually read, not fixed at build time.
-        //
-        // Low while nothing is read: presence is not behaviour. Medium once a
-        // finding rests on a quoted line — and never High for the overview,
-        // which generalises over a bounded selection and a nine-rule ruleset
-        // even when every individual citation is exact.
-        confidence: if quoted > 0 {
-            Confidence::Medium
-        } else {
-            Confidence::Low
-        },
-        supporting_rule_ids: detected,
-    }];
+    let overview = overview_of(outcomes);
 
     Report {
         analysis_id,
@@ -629,12 +572,93 @@ fn build_report(
     }
 }
 
+/// The one-paragraph summary at the top of a report.
+///
+/// Pulled out of `build_report` when it outgrew clippy's line ceiling, and it
+/// earns the separation: every number here is a claim about the whole analysis,
+/// and they have to agree with each other.
+fn overview_of(outcomes: &[ruleset::RuleOutcome]) -> Vec<OverviewStatement> {
+    let detected: Vec<String> = outcomes
+        .iter()
+        .filter(|o| o.outcome == ruleset::Outcome::Detected)
+        .map(|o| o.rule_id.to_owned())
+        .collect();
+    let unverified = outcomes
+        .iter()
+        .filter(|o| o.outcome == ruleset::Outcome::UnableToVerify)
+        .count();
+    let not_applicable = outcomes
+        .iter()
+        .filter(|o| o.outcome == ruleset::Outcome::NotApplicable)
+        .count();
+    // Checks that had a question to answer here. A Rust-only repository is not
+    // scored out of twenty when five of the twenty are about npm manifests it
+    // does not have — that denominator reads as a failing grade for a property
+    // nobody was claiming.
+    let applicable = outcomes.len() - not_applicable;
+    // Findings whose evidence is a quoted line rather than a path that exists.
+    let quoted = outcomes
+        .iter()
+        .filter(|o| o.outcome == ruleset::Outcome::Detected)
+        .filter(|o| o.evidence.iter().any(|e| e.excerpt.is_some()))
+        .count();
+
+    let mut statement = if detected.is_empty() {
+        "No check in this ruleset was satisfied at this commit.".to_owned()
+    } else if quoted == 0 {
+        format!(
+            "{} of {applicable} checks were satisfied by files present at this commit.",
+            detected.len(),
+        )
+    } else {
+        format!(
+            "{} of {applicable} checks were satisfied at this commit, {quoted} of them by lines \
+                 quoted from files that were read.",
+            detected.len(),
+        )
+    };
+    if not_applicable > 0 {
+        write!(
+            statement,
+            " {not_applicable} do not apply to this repository."
+        )
+        .expect("writing to a String cannot fail");
+    }
+    if unverified > 0 {
+        // Said in the overview rather than left to whoever expands a finding:
+        // the count of things nobody could establish is the part of a report a
+        // reader is most likely to assume away.
+        write!(
+            statement,
+            " {unverified} could not be verified from the evidence collected."
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    vec![OverviewStatement {
+        statement,
+        // Grounded in what this run actually read, not fixed at build time.
+        //
+        // Low while nothing is read: presence is not behaviour. Medium once a
+        // finding rests on a quoted line — and never High for the overview,
+        // which generalises over a bounded selection and a nine-rule ruleset
+        // even when every individual citation is exact.
+        confidence: if quoted > 0 {
+            Confidence::Medium
+        } else {
+            Confidence::Low
+        },
+        supporting_rule_ids: detected,
+    }]
+}
+
 fn finding(outcome: &ruleset::RuleOutcome) -> Finding {
     let (title, explanation, category) = describe(outcome.rule_id);
 
     let state = match outcome.outcome {
         ruleset::Outcome::Detected => FindingState::Detected,
         ruleset::Outcome::Missing => FindingState::Missing,
+        ruleset::Outcome::NotApplicable => FindingState::NotApplicable,
         ruleset::Outcome::UnableToVerify => FindingState::UnableToVerify,
     };
 
@@ -653,8 +677,11 @@ fn finding(outcome: &ruleset::RuleOutcome) -> Finding {
         confidence: match outcome.outcome {
             // Seeing a path proves the file is there.
             ruleset::Outcome::Detected => Confidence::High,
-            // Not seeing one, across a complete tree, is a weaker claim.
-            ruleset::Outcome::Missing => Confidence::Medium,
+            // Not seeing one, across a complete tree, is a weaker claim — and
+            // `NotApplicable` is the same kind of claim, as well supported.
+            // Both rest on a complete tree listing rather than on contents, so
+            // they share a level deliberately rather than by oversight.
+            ruleset::Outcome::Missing | ruleset::Outcome::NotApplicable => Confidence::Medium,
             ruleset::Outcome::UnableToVerify => Confidence::Low,
         },
         title: title.to_owned(),
@@ -781,17 +808,108 @@ fn unverifiable_limitation(reason: repolens_core::Unverifiable) -> Limitation {
 
 /// Human-readable text for each rule.
 ///
-/// Kept beside the pipeline rather than in `repolens-core`, because it is
-/// presentation: the domain decides *what* was concluded, this decides how to
-/// say it. A rule with no entry still reports, using its id — a missing string
-/// must not silently drop a finding.
+/// Split in two only because the list outgrew one function. The division is
+/// arbitrary — what a rule *says* is presentation, and lives here rather than
+/// in the ruleset, so that a domain crate never has to hold a sentence.
 fn describe(rule_id: &str) -> (&'static str, &'static str, FindingCategory) {
-    match rule_id {
-        "rust.workspace" => (
-            "Rust workspace detected",
-            "A Cargo manifest is present at the repository root.",
+    describe_structure(rule_id)
+        .or_else(|| describe_technology(rule_id))
+        .unwrap_or((
+            "Unrecognised rule",
+            "This rule produced a result but has no description in this build. It is reported \
+             rather than dropped, because a missing string is a gap in presentation, not \
+             grounds to hide a finding.",
+            FindingCategory::Technology,
+        ))
+}
+
+/// What a repository says about itself: layout, documents, delivery.
+fn describe_structure(rule_id: &str) -> Option<(&'static str, &'static str, FindingCategory)> {
+    Some(match rule_id {
+        "rust.cargo_manifest" => (
+            "Cargo manifest at the repository root",
+            "A Cargo manifest is present at the root, so Rust is built here. It does not say \
+             how many crates there are — that needs reading the manifest.",
             FindingCategory::Technology,
         ),
+        "rust.workspace" => (
+            "Cargo workspace",
+            "The root manifest opens a [workspace] table, so this repository builds several \
+             crates together rather than one. Read from the manifest, not inferred from a \
+             directory layout.",
+            FindingCategory::Technology,
+        ),
+        "node.workspace" => (
+            "pnpm workspace",
+            "A pnpm workspace file is present at the root, so the npm packages here are managed \
+             together. It names the workspace, not what is in it.",
+            FindingCategory::BuildAndDependencies,
+        ),
+        "docs.license" => (
+            "Licence published",
+            "A licence file is committed at the repository root, so the terms of reuse are \
+             stated. Which licence it is needs reading the file.",
+            FindingCategory::SourceAndDocumentation,
+        ),
+        "docs.contributing" => (
+            "Contribution guide",
+            "A contribution guide is committed, so a newcomer has somewhere to start. Its \
+             absence means the process is not written down, not that there is none.",
+            FindingCategory::SourceAndDocumentation,
+        ),
+        "docs.security" => (
+            "Security policy",
+            "A security policy is committed, so there is a stated way to report a \
+             vulnerability privately. Without one, the usual fallback is a public issue.",
+            FindingCategory::SecurityAndMaintenance,
+        ),
+        "deployment.docker" => (
+            "Container image defined",
+            "A Dockerfile is committed, so this repository describes how to build a container \
+             image. It does not say that anything deploys from it.",
+            FindingCategory::Operations,
+        ),
+        "database.diesel" => (
+            "Database access through Diesel",
+            "The Cargo manifest declares diesel. Committed migrations say a schema is \
+             versioned; this says what reaches it.",
+            FindingCategory::Technology,
+        ),
+        "database.seaorm" => (
+            "Database access through SeaORM",
+            "The Cargo manifest declares sea-orm. Committed migrations say a schema is \
+             versioned; this says what reaches it.",
+            FindingCategory::Technology,
+        ),
+        "framework.vite" => (
+            "Built with Vite",
+            "The npm manifest declares vite, so the frontend is built by it. A separate fact \
+             from which framework is used: SvelteKit builds with Vite, and plenty of Vite \
+             projects are not SvelteKit.",
+            FindingCategory::Technology,
+        ),
+        "frontend.adapter_static.declared" => (
+            "adapter-static dependency declared",
+            "The npm manifest declares @sveltejs/adapter-static. That is a dependency, not a \
+             build: svelte.config.js selects exactly one adapter, and a project that moved to \
+             adapter-node may still carry this entry. Whether the build really produces static \
+             files needs reading that config.",
+            FindingCategory::Operations,
+        ),
+        "contract.client.openapi_typescript" => (
+            "TypeScript client generated with openapi-typescript",
+            "The npm manifest declares openapi-typescript, so the frontend types are generated \
+             from the API document rather than written by hand. Named for the generator it \
+             recognises: a project generating its client another way reports this as missing.",
+            FindingCategory::BuildAndDependencies,
+        ),
+        _ => return None,
+    })
+}
+
+/// What a repository is built with, read from its manifests.
+fn describe_technology(rule_id: &str) -> Option<(&'static str, &'static str, FindingCategory)> {
+    Some(match rule_id {
         "ci.workflows" => (
             "GitHub Actions workflows present",
             "Workflow definitions exist under .github/workflows. This states that CI is \
@@ -840,14 +958,8 @@ fn describe(rule_id: &str) -> (&'static str, &'static str, FindingCategory) {
             "The Cargo manifest declares sqlx. Committed migrations say a schema is versioned; this says what reaches it.",
             FindingCategory::Technology,
         ),
-        _ => (
-            "Unrecognised rule",
-            "This rule produced a result but has no description in this build. It is reported \
-             rather than dropped, because a missing string is a gap in presentation, not \
-             grounds to hide a finding.",
-            FindingCategory::Technology,
-        ),
-    }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -1372,6 +1484,65 @@ mod tests {
             );
             assert!(!sentence.is_empty(), "a published sentence is empty");
         }
+    }
+
+    #[test]
+    fn a_rule_with_nothing_to_be_about_reaches_the_wire_as_not_applicable() {
+        /*
+         * `FindingState::NotApplicable` has been in the contract since the
+         * start and no analyzer path produced it, so a Rust-only repository
+         * collected a MISSING for every npm rule — four confident absences
+         * about a frontend it never claimed to have. Issue #5 asks for this
+         * case explicitly.
+         */
+        let files = vec![read_file("Cargo.toml", CARGO_WITH_AXUM)];
+        let outcomes = ruleset::evaluate(&content_input(&["Cargo.toml".to_owned()], &files));
+        let report = report_over(true, &outcomes);
+
+        let kit = finding_of(&report, "framework.sveltekit");
+        assert_eq!(kit.state, FindingState::NotApplicable);
+        assert!(
+            kit.limitations.is_empty(),
+            "not applicable is a conclusion, not a limitation"
+        );
+        assert!(kit.evidence.is_empty());
+
+        // And the Rust half still answers, so this is not a blanket silence.
+        assert_eq!(
+            finding_of(&report, "framework.axum").state,
+            FindingState::Detected
+        );
+        assert_eq!(
+            finding_of(&report, "database.diesel").state,
+            FindingState::Missing
+        );
+    }
+
+    #[test]
+    fn the_overview_does_not_score_a_repository_against_questions_it_never_posed() {
+        // "3 of 20" reads as a failing grade when five of the twenty are about
+        // an ecosystem this repository does not use. The denominator is the
+        // checks that had something to be about.
+        let files = vec![read_file("Cargo.toml", CARGO_WITH_AXUM)];
+        let outcomes = ruleset::evaluate(&content_input(&["Cargo.toml".to_owned()], &files));
+        let report = report_over(true, &outcomes);
+
+        let not_applicable = report
+            .findings
+            .iter()
+            .filter(|f| f.state == FindingState::NotApplicable)
+            .count();
+        assert!(not_applicable > 0, "the fixture must produce some");
+
+        let statement = &report.overview[0].statement;
+        assert!(
+            statement.contains(&format!("of {}", report.findings.len() - not_applicable)),
+            "the denominator must exclude inapplicable checks: {statement}"
+        );
+        assert!(
+            statement.contains(&format!("{not_applicable} do not apply")),
+            "and it must say how many were set aside: {statement}"
+        );
     }
 
     #[test]

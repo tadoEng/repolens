@@ -111,6 +111,25 @@ impl<'a> RuleInput<'a> {
     /// confident `MISSING` for a file nobody opened.
     #[must_use]
     pub fn content_verdict(&self, wants: impl Fn(&str) -> bool + Copy) -> ContentVerdict {
+        // Applicability first, because it does not depend on what was read.
+        //
+        // A repository with no `package.json` anywhere is not a repository that
+        // is *missing* SvelteKit, and it is not one where SvelteKit could not be
+        // verified either — the question was never its to answer. Asking this
+        // before anything about collection is what keeps a Rust-only repository
+        // from reporting five npm rules as unverified.
+        //
+        // Over a truncated tree the claim is not available: `NOT_APPLICABLE`
+        // asserts that no such file exists, and a listing we know to be partial
+        // cannot support that.
+        if !self.path_exists(wants) {
+            return if self.tree_truncated {
+                ContentVerdict::Unverifiable(Unverifiable::TreeTruncated)
+            } else {
+                ContentVerdict::NotApplicable
+            };
+        }
+
         if !self.contents_collected {
             return ContentVerdict::Unverifiable(Unverifiable::ContentsNotCollected);
         }
@@ -146,8 +165,8 @@ impl<'a> RuleInput<'a> {
         }
 
         if self.tree_truncated {
-            // Every path we know of was read in full — but we do not have all
-            // the paths, so a candidate may exist that was never listed. This
+            // Every candidate we know of was read in full — but we do not have
+            // all the paths, so another may exist that was never listed. This
             // outranks a full read for the same reason: the unseen part of the
             // repository is exactly where the answer might be.
             return ContentVerdict::Unverifiable(Unverifiable::TreeTruncated);
@@ -445,7 +464,12 @@ mod verdict_tests {
     }
 
     #[test]
-    fn a_complete_tree_without_the_path_is_genuine_absence() {
+    fn a_complete_tree_without_the_path_makes_the_rule_inapplicable() {
+        // This used to be `ReadAndAbsent`, which the ruleset turned into
+        // MISSING — so a Python repository was reported as lacking every Rust
+        // dependency the set knows about. Nothing was lacking; the question was
+        // never that repository's to answer.
+
         let paths = vec!["README.md".to_owned()];
         let repository = coordinate();
         let commit = commit();
@@ -461,7 +485,56 @@ mod verdict_tests {
 
         assert_eq!(
             input.content_verdict(wants_cargo),
-            ContentVerdict::ReadAndAbsent
+            ContentVerdict::NotApplicable
+        );
+    }
+
+    #[test]
+    fn a_truncated_tree_cannot_call_a_rule_inapplicable() {
+        // `NOT_APPLICABLE` asserts that no such file exists anywhere, and a
+        // listing we know to be partial cannot support that. The manifest may
+        // be in the part nobody saw.
+        let paths = vec!["README.md".to_owned()];
+        let repository = coordinate();
+        let commit = commit();
+        let input = RuleInput {
+            repository: &repository,
+            commit: &commit,
+            paths: &paths,
+            files: &[],
+            undecodable: &[],
+            tree_truncated: true,
+            contents_collected: true,
+        };
+
+        assert_eq!(
+            input.content_verdict(wants_cargo),
+            ContentVerdict::Unverifiable(Unverifiable::TreeTruncated)
+        );
+    }
+
+    #[test]
+    fn a_rule_with_no_file_to_read_is_inapplicable_even_before_collection() {
+        // Applicability does not depend on what was read. A run that collected
+        // nothing at all still knows a Rust rule has no question to answer in a
+        // repository with no Cargo manifest, and reporting it as unverified
+        // would be a limitation nobody can act on.
+        let paths = vec!["README.md".to_owned()];
+        let repository = coordinate();
+        let commit = commit();
+        let input = RuleInput {
+            repository: &repository,
+            commit: &commit,
+            paths: &paths,
+            files: &[],
+            undecodable: &[],
+            tree_truncated: false,
+            contents_collected: false,
+        };
+
+        assert_eq!(
+            input.content_verdict(wants_cargo),
+            ContentVerdict::NotApplicable
         );
     }
 }

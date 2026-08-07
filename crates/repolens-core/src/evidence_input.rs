@@ -12,15 +12,25 @@
 //!
 //! | Situation                                     | Honest outcome     |
 //! | --------------------------------------------- | ------------------ |
+//! | No file this rule reads exists at all          | `NOT_APPLICABLE`   |
 //! | Contents were never collected for this run     | `UNABLE_TO_VERIFY` |
 //! | The tree was truncated, so the file may exist  | `UNABLE_TO_VERIFY` |
 //! | The path exists but the bytes were not read    | `UNABLE_TO_VERIFY` |
 //! | The bytes arrived but are not readable as text | `UNABLE_TO_VERIFY` |
 //! | The file was read, and the thing is not in it  | `MISSING`          |
 //!
-//! Only the last is knowledge. The other four are absence of evidence, and
+//! Only the last two are knowledge, and they are different knowledge.
+//! `MISSING` says the thing was looked for and is not there; `NOT_APPLICABLE`
+//! says the question was never this repository's to answer — a Python project
+//! has no Cargo manifest, and reporting "no axum dependency" against it is
+//! noise dressed as a finding. The other three are absence of evidence, and
 //! collapsing any of them into `MISSING` reports a repository as lacking
 //! something nobody actually looked for.
+//!
+//! `NOT_APPLICABLE` is a positive claim about the repository — *there is no
+//! Rust here* — so it carries the same evidence discipline as `MISSING`. Over a
+//! truncated tree it is not available: the manifest may sit in the part nobody
+//! listed.
 //!
 //! [`crate::RuleInput::content_verdict`] is where that decision lives, so it is
 //! made once rather than remembered by every rule author.
@@ -187,6 +197,12 @@ impl Unverifiable {
 /// What a content rule may conclude when it matched nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentVerdict {
+    /// No file of the kind this rule reads exists in the repository at all.
+    ///
+    /// Not a failure and not an absence: the rule had nothing to say here. A
+    /// repository with no `package.json` anywhere is not a repository that is
+    /// *missing* SvelteKit.
+    NotApplicable,
     /// The file was read in full and the thing is genuinely not in it.
     ReadAndAbsent,
     /// Nothing can be concluded, for this reason.
