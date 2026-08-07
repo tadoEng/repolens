@@ -55,6 +55,11 @@ use crate::rule::RuleInput;
 /// a version `4` report of a single-crate repository will disagree about
 /// `rust.workspace`, and the version is how a reader learns that the rule
 /// changed rather than the repository.
+///
+/// `4` also introduced [`Outcome::NotApplicable`], so a content rule whose file
+/// does not exist anywhere stops reporting `MISSING`. A Rust-only repository
+/// used to accrue an absence for every npm rule in the set; it now accrues
+/// none. Same commit, same evidence, different — and more honest — report.
 pub const RULESET_VERSION: &str = "4";
 
 /// What a rule concluded.
@@ -68,6 +73,13 @@ pub enum Outcome {
     Detected,
     /// Looked for and genuinely absent.
     Missing,
+    /// The rule had no question to answer here.
+    ///
+    /// Distinct from `Missing`, which claims the repository lacks something.
+    /// A Python project does not *lack* an axum dependency; it has no Cargo
+    /// manifest for the question to be about. Reporting the first as the second
+    /// fills a report with absences nobody should act on.
+    NotApplicable,
     /// Could not be established from the evidence collected.
     UnableToVerify,
 }
@@ -202,15 +214,23 @@ const RULES: &[Rule] = &[
         },
     },
     Rule {
+        // Root, `.github/` or `docs/` — the three places GitHub itself looks.
+        //
+        // Root-only matching made the rule's claim and its test disagree: a
+        // conventional `.github/CONTRIBUTING.md` is the single most common
+        // placement, and reporting it MISSING is a false absence about a file
+        // sitting in the repository.
         rule_id: "docs.contributing",
         kind: RuleKind::Path {
-            matches: |path| root_named(path, &["CONTRIBUTING"]),
+            matches: |path| conventionally_placed(path, &["CONTRIBUTING"]),
         },
     },
     Rule {
+        // Same three locations, and the same reason. `.github/SECURITY.md` is
+        // where GitHub's own prompt puts it.
         rule_id: "docs.security",
         kind: RuleKind::Path {
-            matches: |path| root_named(path, &["SECURITY"]),
+            matches: |path| conventionally_placed(path, &["SECURITY"]),
         },
     },
     Rule {
@@ -292,10 +312,21 @@ const RULES: &[Rule] = &[
         },
     },
     Rule {
-        // How the frontend is *deployed*, which `framework.sveltekit`
-        // deliberately does not claim. An adapter is the difference between an
-        // app that needs a Node server and one that can be a bucket of files.
-        rule_id: "frontend.adapter_static",
+        // Named for the declaration it reads, not the deployment it suggests.
+        //
+        // It used to be `frontend.adapter_static`, titled "Frontend builds to
+        // static files" — a conclusion a dependency line cannot reach. An
+        // adapter can be installed and never selected: `svelte.config.js` names
+        // exactly one, and a repository that switched to `adapter-node` last
+        // month may still carry this entry. The honest claim is that the
+        // dependency is declared, and the title now says so.
+        //
+        // Proving the stronger claim means reading `svelte.config.*`, which the
+        // selection reaches only at the repository root today. In a monorepo the
+        // config sits beside the app — `web/svelte.config.js` here — so the
+        // stronger rule needs config files selected at depth first, the way
+        // manifests now are.
+        rule_id: "frontend.adapter_static.declared",
         kind: RuleKind::Content {
             wants: is_node_manifest,
             find: |file| dependency_line(file, "@sveltejs/adapter-static"),
@@ -358,6 +389,35 @@ fn root_named(path: &str, names: &[&str]) -> bool {
         upper
             .strip_prefix(name)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '-', '_']))
+    })
+}
+
+/// A community-health file, in any of the places GitHub looks for one.
+///
+/// The repository root, `.github/`, or `docs/` — GitHub's own documented search
+/// order, and `.github/` is where its "add a security policy" prompt puts the
+/// file. Anywhere else does not count: a `SECURITY.md` inside a subproject is
+/// that subproject's policy.
+///
+/// Stricter about the name than [`root_named`], and deliberately so. GitHub
+/// recognises `SECURITY.md`, `SECURITY.txt` or a bare `SECURITY` — the stem
+/// plus an extension, nothing else. The `-` and `_` latitude that makes
+/// `LICENSE-MIT` a licence would make `SECURITY_NOTES.md` a security policy,
+/// and a wrong DETECTED is worse than a MISSING because nobody re-checks a
+/// ticked box. This test caught that on its first run.
+fn conventionally_placed(path: &str, names: &[&str]) -> bool {
+    let name = path
+        .strip_prefix(".github/")
+        .or_else(|| path.strip_prefix("docs/"))
+        .unwrap_or(path);
+    if name.contains('/') {
+        return false;
+    }
+    let upper = name.to_ascii_uppercase();
+    names.iter().any(|stem| {
+        upper
+            .strip_prefix(stem)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
     })
 }
 
@@ -482,6 +542,12 @@ fn evaluate_rule(rule: &Rule, input: &RuleInput<'_>) -> RuleOutcome {
             }
 
             match input.content_verdict(wants) {
+                ContentVerdict::NotApplicable => RuleOutcome {
+                    rule_id: rule.rule_id,
+                    outcome: Outcome::NotApplicable,
+                    evidence: Vec::new(),
+                    unverifiable: None,
+                },
                 ContentVerdict::ReadAndAbsent => RuleOutcome {
                     rule_id: rule.rule_id,
                     outcome: Outcome::Missing,
@@ -812,7 +878,10 @@ mod tests {
         };
 
         let outcomes = evaluate(&input);
-        for rule_id in ["framework.axum", "framework.sveltekit", "database.sqlx"] {
+        // Cargo rules only. The tree holds a `Cargo.toml` and no `package.json`,
+        // so the npm rules have no question to answer here — see the assertion
+        // below, which is the distinction this version added.
+        for rule_id in ["framework.axum", "database.sqlx", "database.diesel"] {
             let outcome = outcome_of(&outcomes, rule_id);
             assert_eq!(
                 outcome.outcome,
@@ -828,6 +897,95 @@ mod tests {
         // Path rules are unaffected: they never needed contents.
         assert_eq!(
             outcome_of(&outcomes, "rust.cargo_manifest").outcome,
+            Outcome::Detected
+        );
+
+        // And a rule whose file does not exist is not unverified — it is not
+        // applicable. Whether contents were collected changes nothing about a
+        // question this repository never posed.
+        assert_eq!(
+            outcome_of(&outcomes, "framework.sveltekit").outcome,
+            Outcome::NotApplicable
+        );
+    }
+
+    #[test]
+    fn a_repository_of_one_ecosystem_reports_no_absences_from_the_other() {
+        /*
+         * Issue #5 asks for a NOT_APPLICABLE case, and this is what it is for.
+         *
+         * A Rust-only repository used to accrue a MISSING for every npm rule in
+         * the set — four confident absences about a frontend it never claimed
+         * to have. MISSING means "looked for, not there"; a reader acts on it.
+         */
+        let outcomes = evaluate(&read(
+            &["Cargo.toml", "src/main.rs"],
+            &[file("Cargo.toml", "[dependencies]\naxum = \"0.8\"\n")],
+        ));
+
+        for rule_id in [
+            "framework.sveltekit",
+            "framework.vite",
+            "frontend.adapter_static.declared",
+            "contract.client.openapi_typescript",
+        ] {
+            let outcome = outcome_of(&outcomes, rule_id);
+            assert_eq!(
+                outcome.outcome,
+                Outcome::NotApplicable,
+                "{rule_id} has no npm manifest to be about"
+            );
+            assert!(outcome.evidence.is_empty());
+            assert!(
+                outcome.unverifiable.is_none(),
+                "not applicable is a conclusion, not a limitation"
+            );
+        }
+
+        // The Rust half still answers properly: one detected, one genuinely
+        // absent from a manifest that was read in full.
+        assert_eq!(
+            outcome_of(&outcomes, "framework.axum").outcome,
+            Outcome::Detected
+        );
+        assert_eq!(
+            outcome_of(&outcomes, "database.diesel").outcome,
+            Outcome::Missing
+        );
+    }
+
+    #[test]
+    fn a_community_health_file_counts_wherever_github_looks_for_it() {
+        // Root-only matching made the claim and the test disagree:
+        // `.github/SECURITY.md` is where GitHub's own prompt puts the file, and
+        // reporting it MISSING is a false absence about a committed document.
+        let detected = |path: &str| {
+            outcome_of(&evaluate(&from_paths(&[path], false)), "docs.security").outcome
+        };
+
+        for real in [
+            "SECURITY.md",
+            ".github/SECURITY.md",
+            "docs/SECURITY.md",
+            "SECURITY",
+        ] {
+            assert_eq!(detected(real), Outcome::Detected, "{real}");
+        }
+        for other in [
+            // A subproject's own policy is not this repository's.
+            "packages/api/SECURITY.md",
+            ".github/ISSUE_TEMPLATE/SECURITY.md",
+            "SECURITY_NOTES.md",
+        ] {
+            assert_eq!(detected(other), Outcome::Missing, "{other}");
+        }
+
+        assert_eq!(
+            outcome_of(
+                &evaluate(&from_paths(&[".github/CONTRIBUTING.md"], false)),
+                "docs.contributing"
+            )
+            .outcome,
             Outcome::Detected
         );
     }
@@ -1189,7 +1347,7 @@ mod tests {
             ("framework.axum", Outcome::Detected),
             ("framework.sveltekit", Outcome::Detected),
             ("framework.vite", Outcome::Detected),
-            ("frontend.adapter_static", Outcome::Detected),
+            ("frontend.adapter_static.declared", Outcome::Detected),
             // Render runs the Rust binary natively; there is no Dockerfile.
             ("deployment.docker", Outcome::Missing),
         ];
