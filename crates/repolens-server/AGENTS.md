@@ -78,10 +78,11 @@ otherwise be copied verbatim into a log line.
 ## Middleware order is a tested behaviour
 
 The layer stack in `src/api/mod.rs` is ordered deliberately: body limit, timeout,
-panic capture, tracing, CORS. Assert it by driving the real `Router` through
-`tower::ServiceExt::oneshot` in `tests/api.rs`, never by reading the builder —
-a reordering that changes which layer sees a panic first is invisible in review
-and obvious in a request.
+panic capture, metrics, tracing, CORS. Assert it by driving the real `Router`
+through `oneshot` in `tests/api.rs` and `tests/middleware.rs`, never by reading
+the builder — a reordering that sends a panic elsewhere first, or leaves it
+uncounted, is invisible in review and obvious in a request. Metric labels come
+from `MatchedPath`, never a URI; `tests/metrics.rs` asserts that on the registry.
 
 `tests/openapi.rs` regenerates `contracts/openapi.json` from the live router, so
 a route added without a `utoipa::path` annotation cannot be served.

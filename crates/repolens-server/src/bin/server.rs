@@ -16,6 +16,12 @@ async fn main() -> anyhow::Result<()> {
     // line would copy that line into the log. See `telemetry::install_panic_hook`.
     telemetry::install_panic_hook();
 
+    // Immediately after, so uptime is measured from process start rather than
+    // from whenever something first asks. Anchoring it lazily would report a
+    // process that had been up for days as one that started seconds ago —
+    // exactly backwards for the number a cold-start investigation depends on.
+    telemetry::process::mark_start();
+
     // Before telemetry, so RUST_LOG from .env.local is honoured by the
     // subscriber this call installs. Reporting is deferred until after, because
     // anything logged here would precede the subscriber and be discarded.

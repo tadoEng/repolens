@@ -18,6 +18,7 @@ use axum::http::{Request, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
 use repolens_server::api;
+use repolens_server::telemetry::metrics::{Metrics, StatusClass};
 use tower::ServiceExt as _;
 
 /// The shipped budget is 30 seconds; asserting against it would mean a
@@ -26,7 +27,17 @@ const TEST_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Sends one request through `router` wrapped in the production layer stack.
 async fn through_the_stack(router: Router, uri: &str) -> (StatusCode, Option<String>, String) {
-    let app = api::apply_layers(router, None, TEST_TIMEOUT);
+    let (status, content_type, body, _metrics) = through_the_stack_recording(router, uri).await;
+    (status, content_type, body)
+}
+
+/// As [`through_the_stack`], returning the registry the stack recorded into.
+async fn through_the_stack_recording(
+    router: Router,
+    uri: &str,
+) -> (StatusCode, Option<String>, String, Metrics) {
+    let metrics = Metrics::new();
+    let app = api::apply_layers(router, None, TEST_TIMEOUT, &metrics);
 
     let response = app
         .oneshot(
@@ -52,6 +63,7 @@ async fn through_the_stack(router: Router, uri: &str) -> (StatusCode, Option<Str
         status,
         content_type,
         String::from_utf8_lossy(&bytes).into_owned(),
+        metrics,
     )
 }
 
@@ -127,6 +139,93 @@ async fn a_handler_that_outlasts_the_budget_answers_with_the_envelope() {
 
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("the body is the envelope");
     assert_eq!(parsed["code"], "REQUEST_TIMED_OUT");
+}
+
+#[tokio::test]
+async fn a_panicking_handler_is_still_counted_as_a_server_error() {
+    // The position of the metrics layer relative to the panic layer decides what
+    // a 5xx count means. Inside it, the unwind would pass straight through the
+    // recording call and the request would disappear from the figures — an error
+    // rate that *falls* as the service breaks. This is that ordering asserted as
+    // a behaviour, because it is invisible in the builder.
+    let router = Router::new().route("/boom", get(boom));
+
+    let (status, _content_type, _body, metrics) =
+        through_the_stack_recording(router, "/boom").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.routes.len(), 1, "one request, one series");
+    let sample = &snapshot.routes[0];
+    assert_eq!(sample.count, 1);
+    assert_eq!(sample.in_status_class(StatusClass::ServerError), 1);
+    assert_eq!(
+        snapshot.in_flight, 0,
+        "the gauge is lowered by a guard, which drops while unwinding; a gauge \
+         that leaks on panic reads as saturation forever"
+    );
+}
+
+#[tokio::test]
+async fn a_timed_out_handler_is_counted_as_the_status_the_caller_saw() {
+    let router = Router::new().route(
+        "/slow",
+        get(|| async {
+            tokio::time::sleep(TEST_TIMEOUT * 20).await;
+            Json(serde_json::json!({ "never": "sent" }))
+        }),
+    );
+
+    let (status, _content_type, _body, metrics) =
+        through_the_stack_recording(router, "/slow").await;
+    assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+
+    let snapshot = metrics.snapshot();
+    let sample = &snapshot.routes[0];
+    assert_eq!(
+        sample.in_status_class(StatusClass::ClientError),
+        1,
+        "408 is what the caller received, so 408 is what is counted; recording \
+         the status the handler intended would describe a response nobody got"
+    );
+}
+
+#[tokio::test]
+async fn a_request_is_in_flight_while_it_is_being_served() {
+    // The gauge is only worth having if it is ever non-zero. Asserted from
+    // inside the handler, which is the one place a request is provably still
+    // being served.
+    let metrics = Metrics::new();
+    let observed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let seen = std::sync::Arc::clone(&observed);
+    let inner = metrics.clone();
+    let router = Router::new().route(
+        "/serving",
+        get(move || async move {
+            seen.store(inner.in_flight(), std::sync::atomic::Ordering::Relaxed);
+            Json(serde_json::json!({ "status": "ok" }))
+        }),
+    );
+
+    let app = api::apply_layers(router, None, TEST_TIMEOUT, &metrics);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/serving")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("router responds");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        observed.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "a request being served must be counted as in flight"
+    );
+    assert_eq!(metrics.in_flight(), 0, "and must not be once it is done");
 }
 
 #[tokio::test]

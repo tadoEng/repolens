@@ -9,6 +9,7 @@ use std::sync::Arc;
 use repolens_github::GitHubRestClient;
 
 use crate::auth::SharedVerifier;
+use crate::telemetry::metrics::Metrics;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
@@ -65,6 +66,17 @@ pub struct AppState {
     /// lets creation **close** in that case rather than silently run
     /// unauthenticated — see `api::authenticated`.
     verifier: Option<SharedVerifier>,
+    /// What this process has observed about itself.
+    ///
+    /// Held here rather than beside the router because there must be exactly
+    /// one: the middleware that records into it and the handler that will read
+    /// it are built at different points, and two registries would show a
+    /// dashboard the half of the traffic it happened to be handed.
+    ///
+    /// Not an `Option`. A registry is always constructible and costs a few
+    /// hundred bytes; modelling it as absent would give a future reader a
+    /// "metrics unavailable" branch describing no reachable configuration.
+    metrics: Metrics,
 }
 
 impl AppState {
@@ -75,6 +87,7 @@ impl AppState {
             pool: Some(pool),
             github: Arc::new(github),
             verifier: None,
+            metrics: Metrics::new(),
         }
     }
 
@@ -104,7 +117,14 @@ impl AppState {
             pool: None,
             github: Arc::new(github),
             verifier: None,
+            metrics: Metrics::new(),
         }
+    }
+
+    /// Borrows this process's metrics registry.
+    #[must_use]
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
     }
 
     /// Borrows the pool, if one was configured.
