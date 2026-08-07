@@ -1,5 +1,5 @@
 import { QUEUED_FIXTURE, type ApiError } from '@repolens/api-client';
-import { afterEach, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { render } from 'vitest-browser-svelte';
 
 import { session, type SessionState } from '$lib/auth/session.svelte';
@@ -49,6 +49,36 @@ const net = vi.hoisted(() => {
 
 /** The session is a tab-wide singleton, so every test has to put it back. */
 const INITIAL_STATE: SessionState = session.state;
+
+/*
+ * Severs the route's mount effect from the real Firebase SDK.
+ *
+ * `+page.svelte` calls `session.initialize()` on mount. That is a no-op only when
+ * `signInConfigured` is false — and it is *true* on any machine with a populated root
+ * `.env.local`, where it loads the SDK and registers `onAuthStateChanged`. That listener
+ * then resolves with no user and writes `{ status: 'signed-out' }` over whatever state a
+ * test had just set, disabling the submit button mid-assertion.
+ *
+ * It lands in whichever test is running when the dynamic import and IndexedDB read finish,
+ * so it presents as an intermittent failure in a different test each time. CI never sees it,
+ * because the Firebase variables are empty there and `initialize()` returns immediately —
+ * which is the worst shape for a flake: reproducible only on a correctly configured
+ * developer machine.
+ *
+ * `idToken` is stubbed for the same reason and it is not optional: it reaches the same
+ * lazily-built auth handle, and that handle is cached on the singleton — so a single
+ * unstubbed call anywhere in this file registers the listener for every test after it.
+ * Stubbing only `initialize` fixed the symptom in one test and left it in another.
+ *
+ * Stubbed here rather than changed in `session.svelte.ts`: overwriting state when the auth
+ * callback fires is exactly right in production. The defect is that a unit test depended on
+ * ambient configuration.
+ */
+beforeEach(() => {
+	vi.spyOn(session, 'initialize').mockResolvedValue();
+	// Overridden by the tests that assert on a specific token.
+	vi.spyOn(session, 'idToken').mockResolvedValue(null);
+});
 
 afterEach(() => {
 	net.state.dispatch = net.real;
