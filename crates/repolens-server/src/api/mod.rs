@@ -423,7 +423,16 @@ pub fn apply_layers(
                     // vertical slice is unreachable from a browser while every
                     // server-side test still passes.
                     .allow_methods([Method::GET, Method::POST])
-                    .allow_headers([header::CONTENT_TYPE]),
+                    // `Authorization` is listed for the same reason `POST` is,
+                    // and it was missed for the same reason: `tower-http`
+                    // answers the preflight with exactly this set. Creating an
+                    // analysis carries a Firebase ID token, so omitting it here
+                    // makes the browser refuse the preflight and never send the
+                    // POST — every server-side test still passes, because the
+                    // browser is what stops it. The preflight test asks for both
+                    // headers precisely so a narrow test cannot hide a narrow
+                    // policy again.
+                    .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]),
             )
         } else {
             // Refusing to start would take the API down over a typo in a

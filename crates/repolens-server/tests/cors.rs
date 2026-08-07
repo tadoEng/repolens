@@ -30,7 +30,13 @@ async fn preflight(uri: &str, method: &str) -> axum::http::HeaderMap {
                 .uri(uri)
                 .header("Origin", ORIGIN)
                 .header("Access-Control-Request-Method", method)
-                .header("Access-Control-Request-Headers", "content-type")
+                // Both, because the real request carries both: a JSON body and
+                // a Firebase ID token. Preflighting only `content-type` is what
+                // let a policy that forbade `authorization` stay green.
+                .header(
+                    "Access-Control-Request-Headers",
+                    "content-type, authorization",
+                )
                 .body(Body::empty())
                 .expect("request builds"),
         )
@@ -43,13 +49,22 @@ async fn preflight(uri: &str, method: &str) -> axum::http::HeaderMap {
 
 /// The permitted methods, lowercased and split.
 fn allowed_methods(headers: &axum::http::HeaderMap) -> Vec<String> {
+    header_list(headers, "access-control-allow-methods")
+}
+
+/// The permitted request headers, uppercased and split.
+fn allowed_headers(headers: &axum::http::HeaderMap) -> Vec<String> {
+    header_list(headers, "access-control-allow-headers")
+}
+
+fn header_list(headers: &axum::http::HeaderMap, name: &str) -> Vec<String> {
     headers
-        .get("access-control-allow-methods")
-        .expect("a preflight response must name the permitted methods")
+        .get(name)
+        .unwrap_or_else(|| panic!("a preflight response must carry {name}"))
         .to_str()
         .expect("the header is ASCII")
         .split(',')
-        .map(|method| method.trim().to_ascii_uppercase())
+        .map(|value| value.trim().to_ascii_uppercase())
         .collect()
 }
 
@@ -74,6 +89,25 @@ async fn the_preflight_permits_creating_an_analysis() {
     assert!(
         methods.iter().any(|method| method == "POST"),
         "POST must be permitted or the frontend cannot create an analysis; got {methods:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_preflight_permits_the_credential_the_frontend_sends() {
+    // The production-only failure this asserts against: the browser preflights
+    // the signed-in POST, sees that `authorization` is not permitted, and never
+    // sends the request. Nothing server-side notices, because nothing
+    // server-side is involved — which is why this is checked here and not
+    // inferred from the handler compiling.
+    let headers = allowed_headers(&preflight("/api/v1/analyses", "POST").await);
+
+    assert!(
+        headers.iter().any(|header| header == "AUTHORIZATION"),
+        "creating an analysis carries a Firebase ID token; without this the          browser never sends the POST. Got {headers:?}"
+    );
+    assert!(
+        headers.iter().any(|header| header == "CONTENT-TYPE"),
+        "the request body is JSON; got {headers:?}"
     );
 }
 

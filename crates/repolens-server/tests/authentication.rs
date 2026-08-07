@@ -67,13 +67,24 @@ fn key() -> &'static TestKey {
 }
 
 /// Firebase ID token claims, as far as this API reads them.
+///
+/// Every field is `Option` with `skip_serializing_if` so a test can mint a token
+/// that **omits** a claim, not merely one that carries a wrong value. Required
+/// and valid are different rules and each needs its own token.
 #[derive(Serialize)]
 struct TestClaims {
-    sub: String,
-    aud: String,
-    iss: String,
-    iat: i64,
-    exp: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sub: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aud: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iss: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iat: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_time: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exp: Option<i64>,
 }
 
 fn now() -> i64 {
@@ -90,11 +101,12 @@ fn mint(claims: &TestClaims, kid: &str) -> String {
 
 fn valid_claims() -> TestClaims {
     TestClaims {
-        sub: "firebase-uid-123".to_owned(),
-        aud: PROJECT.to_owned(),
-        iss: format!("https://securetoken.google.com/{PROJECT}"),
-        iat: now() - 60,
-        exp: now() + 3600,
+        sub: Some("firebase-uid-123".to_owned()),
+        aud: Some(PROJECT.to_owned()),
+        iss: Some(format!("https://securetoken.google.com/{PROJECT}")),
+        iat: Some(now() - 60),
+        auth_time: Some(now() - 120),
+        exp: Some(now() + 3600),
     }
 }
 
@@ -184,7 +196,7 @@ async fn a_token_for_another_project_is_refused() {
     // work here: a token minted by a different project is signed by the same
     // Google keys in production, and only `aud` and `iss` separate them.
     let mut claims = valid_claims();
-    claims.aud = "someone-elses-project".to_owned();
+    claims.aud = Some("someone-elses-project".to_owned());
 
     let (status, body) = create(app_with_auth(), Some(&mint(&claims, KID))).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -194,7 +206,7 @@ async fn a_token_for_another_project_is_refused() {
 #[tokio::test]
 async fn a_token_from_the_wrong_issuer_is_refused() {
     let mut claims = valid_claims();
-    claims.iss = "https://accounts.example.invalid/".to_owned();
+    claims.iss = Some("https://accounts.example.invalid/".to_owned());
 
     let (status, _body) = create(app_with_auth(), Some(&mint(&claims, KID))).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -203,8 +215,9 @@ async fn a_token_from_the_wrong_issuer_is_refused() {
 #[tokio::test]
 async fn an_expired_token_is_refused() {
     let mut claims = valid_claims();
-    claims.iat = now() - 7200;
-    claims.exp = now() - 3600;
+    claims.iat = Some(now() - 7200);
+    claims.auth_time = Some(now() - 7200);
+    claims.exp = Some(now() - 3600);
 
     let (status, body) = create(app_with_auth(), Some(&mint(&claims, KID))).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -349,4 +362,72 @@ async fn an_invalid_repository_url_is_rejected_only_after_authentication() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(parsed["code"], "INVALID_REPOSITORY_URL");
+}
+
+/// The window a token minted "now" would sit in. Well past the 60s leeway the
+/// verifier allows for clock skew, so these are unambiguously future-dated.
+const CLEARLY_FUTURE: i64 = 3600;
+
+#[tokio::test]
+async fn a_token_issued_in_the_future_is_refused() {
+    // Firebase requires `iat` to be in the past, and `jsonwebtoken` does not
+    // check it — `Validation` recognises `exp`, `nbf`, `aud`, `iss` and `sub`
+    // and nothing else. Left to it, this check reads as present and never runs.
+    let mut claims = valid_claims();
+    claims.iat = Some(now() + CLEARLY_FUTURE);
+
+    let (status, body) = create(app_with_auth(), Some(&mint(&claims, KID))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "UNAUTHENTICATED");
+}
+
+#[tokio::test]
+async fn a_token_whose_authentication_is_in_the_future_is_refused() {
+    // `auth_time` answers a different question from `iat`: a refreshed token
+    // carries a new `iat` and the original `auth_time`, so a future value here
+    // is not covered by the check above.
+    let mut claims = valid_claims();
+    claims.auth_time = Some(now() + CLEARLY_FUTURE);
+
+    let (status, body) = create(app_with_auth(), Some(&mint(&claims, KID))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "UNAUTHENTICATED");
+}
+
+#[tokio::test]
+async fn a_token_without_an_issued_at_claim_is_refused() {
+    // Required, not merely validated-when-present. A token that simply omits
+    // the claim must not slip past the range check by having nothing to compare.
+    let mut claims = valid_claims();
+    claims.iat = None;
+
+    let (status, _body) = create(app_with_auth(), Some(&mint(&claims, KID))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_token_without_an_auth_time_claim_is_refused() {
+    let mut claims = valid_claims();
+    claims.auth_time = None;
+
+    let (status, _body) = create(app_with_auth(), Some(&mint(&claims, KID))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_token_issued_within_the_clock_skew_window_is_still_accepted() {
+    // The other direction, and the reason the leeway exists: Google's clock and
+    // this process's clock are not the same clock. Rejecting a token a second
+    // "in the future" would be an intermittent sign-in failure nobody could
+    // reproduce.
+    let mut claims = valid_claims();
+    claims.iat = Some(now() + 5);
+    claims.auth_time = Some(now() + 5);
+
+    let (status, body) = create(app_with_auth(), Some(&mint(&claims, KID))).await;
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a few seconds of skew must not refuse a valid token: {body}"
+    );
 }

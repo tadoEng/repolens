@@ -24,7 +24,12 @@
 //! * signature against that key;
 //! * `aud` equal to the project id;
 //! * `iss` equal to `https://securetoken.google.com/<project id>`;
-//! * `exp` in the future and `iat` not in the future;
+//! * `exp` in the future — enforced by `jsonwebtoken`;
+//! * `iat` and `auth_time` both present and **not** in the future — enforced
+//!   here, because `Validation` does not know those claims. Its
+//!   `set_required_spec_claims` recognises `exp`, `nbf`, `aud`, `iss` and
+//!   `sub` and nothing else, so leaving these to it would have been a check
+//!   that reads as present and never runs;
 //! * `sub` non-empty — it becomes the user identity.
 
 use std::collections::HashMap;
@@ -33,6 +38,7 @@ use std::time::{Duration, Instant};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
+use time::OffsetDateTime;
 use tokio::sync::RwLock;
 
 /// Where Google publishes the public keys that verify ID tokens.
@@ -54,6 +60,14 @@ const KEY_CACHE_TTL: Duration = Duration::from_hours(1);
 
 /// Ceiling on the key-set response. Google's is a few kilobytes.
 const MAX_JWK_BYTES: usize = 64 * 1024;
+
+/// Tolerance for clock difference between Google and this process.
+///
+/// Matches `jsonwebtoken`'s own default leeway, so `exp` and the claims checked
+/// by hand below treat time the same way. Without it a correctly issued token
+/// could be refused for being a second "in the future", which presents as an
+/// intermittent sign-in failure with no reproduction.
+const CLOCK_SKEW_LEEWAY_SECONDS: i64 = 60;
 
 /// Why a token was not accepted.
 ///
@@ -99,10 +113,23 @@ impl AuthError {
 }
 
 /// The claims RepoLens reads. Everything else Firebase sends is ignored.
+///
+/// All three are non-`Option`, which is what makes them **required**: a token
+/// missing any one fails to deserialize and is rejected. `Validation` cannot
+/// require `iat` or `auth_time` — it does not model them — so absence has to be
+/// enforced by the shape of this struct rather than by configuration.
 #[derive(Debug, Deserialize)]
 struct Claims {
     /// Firebase user id. Becomes [`AuthenticatedUser::uid`].
     sub: String,
+    /// When the token was issued. Must not be in the future.
+    iat: i64,
+    /// When the user actually authenticated. Must not be in the future.
+    ///
+    /// Distinct from `iat`: a refreshed token carries a *new* `iat` and the
+    /// *original* `auth_time`, so the two answer different questions and a
+    /// future value in either is a token that was not honestly minted.
+    auth_time: i64,
 }
 
 /// One RSA key from Google's JWK set.
@@ -218,6 +245,19 @@ impl FirebaseVerifier {
         )?;
 
         if decoded.claims.sub.is_empty() {
+            return Err(AuthError::Invalid);
+        }
+
+        // `iat` and `auth_time` must be in the past. Checked here because
+        // `jsonwebtoken` validates `exp` and `nbf` and stops there.
+        //
+        // The same leeway `Validation` applies to `exp` is applied here, and for
+        // the same reason: the two clocks are not the same clock, and rejecting
+        // a token whose issuer is a second ahead of us would be a flaky sign-in
+        // that nobody could reproduce.
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let ceiling = now.saturating_add(CLOCK_SKEW_LEEWAY_SECONDS);
+        if decoded.claims.iat > ceiling || decoded.claims.auth_time > ceiling {
             return Err(AuthError::Invalid);
         }
 
