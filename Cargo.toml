@@ -69,6 +69,21 @@ serde_json = "1"
 flate2 = "1"
 tar = "0.4"
 
+# Pinned exactly, unlike every other dependency here.
+#
+# The version policy above reserves exact pins for the handful of things that
+# change deterministic report output, and names Tokei as one. It is not a
+# library we call for convenience: its language detection *is* the definition of
+# what counts as Rust, and a minor release that reclassifies one extension
+# silently changes every report. The version is persisted in the result so two
+# reports that disagree can say why.
+#
+# `default-features = false` drops the `cli` feature, which exists to build the
+# `tokei` binary. Issue #12 requires the counter to be a library call and never
+# `Command::new("tokei")`, so the binary and its argument parser are weight the
+# container does not need.
+tokei = { version = "=14.0.0", default-features = false }
+
 # RAII temporary directories. The cleanup guarantee is the point: `TempDir`
 # removes its tree on drop, and drop runs while unwinding, so a panic mid-count
 # does not leave an extracted repository behind on a memory-backed volume.
