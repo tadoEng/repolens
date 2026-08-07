@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
         }
     } else {
         tracing::warn!(
-            "FIREBASE_PROJECT_ID is not set, so analysis creation is closed. Reads remain              anonymous."
+            "FIREBASE_PROJECT_ID is not set, so analysis creation is closed. Reads remain anonymous."
         );
         state
     };
