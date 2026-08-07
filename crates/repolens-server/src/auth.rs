@@ -49,14 +49,23 @@ use tokio::sync::RwLock;
 const GOOGLE_JWK_URL: &str =
     "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
 
-/// How long a fetched key set is reused before being refetched.
+/// Fallback lifetime when Google's response carries no usable `max-age`.
 ///
-/// Google rotates these keys and serves a `Cache-Control` max-age, but a fixed
-/// conservative ceiling is enough here and has one fewer failure mode than
-/// parsing the header. Rotation is not abrupt: retired keys keep verifying
-/// outstanding tokens for their lifetime, so a stale set fails closed by
-/// missing a `kid` rather than by accepting anything.
-const KEY_CACHE_TTL: Duration = Duration::from_hours(1);
+/// Rotation is not abrupt — retired keys keep verifying outstanding tokens for
+/// their lifetime — so a slightly stale set fails closed by missing a `kid`
+/// rather than by accepting anything.
+const DEFAULT_KEY_CACHE_TTL: Duration = Duration::from_hours(1);
+
+/// Floor on the cached lifetime.
+///
+/// A `max-age` of zero or a few seconds would turn every verification into a
+/// fetch, which is the same denial-of-service the cache exists to prevent —
+/// only triggered by Google rather than by a caller.
+const MIN_KEY_CACHE_TTL: Duration = Duration::from_mins(5);
+
+/// Ceiling on the cached lifetime, so an absurd `max-age` cannot pin a
+/// retired key set indefinitely.
+const MAX_KEY_CACHE_TTL: Duration = Duration::from_hours(24);
 
 /// Ceiling on the key-set response. Google's is a few kilobytes.
 const MAX_JWK_BYTES: usize = 64 * 1024;
@@ -156,24 +165,36 @@ pub struct AuthenticatedUser {
     pub uid: String,
 }
 
-/// Cached decoding keys and when they were fetched.
+/// Cached decoding keys and when they stop being trusted.
+///
+/// An expiry rather than a fetch instant, because the lifetime is Google's to
+/// state: it is derived from the `Cache-Control: max-age` served with the key
+/// set, bounded by [`MIN_KEY_CACHE_TTL`] and [`MAX_KEY_CACHE_TTL`].
 struct CachedKeys {
     keys: HashMap<String, DecodingKey>,
-    fetched_at: Instant,
+    expires_at: Instant,
+}
+
+impl CachedKeys {
+    fn is_fresh(&self) -> bool {
+        Instant::now() < self.expires_at
+    }
 }
 
 /// Verifies Firebase ID tokens for one project.
 pub struct FirebaseVerifier {
     project_id: String,
+    /// Where the key set is fetched from. A field rather than a constant so a
+    /// test can point it at a mock and count the requests that actually leave.
+    jwk_url: String,
     http: reqwest::Client,
     cache: RwLock<Option<CachedKeys>>,
-    /// Fixed key set, used by tests instead of the network.
+    /// Held across a refresh so concurrent misses collapse into one fetch.
     ///
-    /// `None` in every deployed configuration. Its presence is what lets the
-    /// verification rules be tested against tokens this process mints itself,
-    /// rather than against a recorded token that would expire and take the
-    /// suite with it.
-    fixed_keys: Option<HashMap<String, DecodingKey>>,
+    /// Separate from the `RwLock` on purpose: the read lock must not be held
+    /// across an await, and a write lock held for the duration of an HTTP
+    /// request would block every reader on the network.
+    refresh: tokio::sync::Mutex<()>,
 }
 
 impl FirebaseVerifier {
@@ -183,26 +204,70 @@ impl FirebaseVerifier {
     ///
     /// Returns an error if the HTTP client cannot be constructed.
     pub fn new(project_id: impl Into<String>) -> Result<Self, reqwest::Error> {
+        Self::with_jwk_url(project_id, GOOGLE_JWK_URL)
+    }
+
+    /// Builds a verifier that fetches its keys from `jwk_url`.
+    ///
+    /// Public so a test can serve a key set it controls, rotate it, and count
+    /// the requests. `https_only` is relaxed here because a local mock speaks
+    /// plain HTTP; [`new`](Self::new) is what deployments call and it keeps the
+    /// restriction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be constructed.
+    pub fn with_jwk_url(
+        project_id: impl Into<String>,
+        jwk_url: impl Into<String>,
+    ) -> Result<Self, reqwest::Error> {
+        let url = jwk_url.into();
+        let https_only = url.starts_with("https://");
         Ok(Self {
             project_id: project_id.into(),
+            jwk_url: url,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
-                .https_only(true)
+                .https_only(https_only)
                 .build()?,
             cache: RwLock::new(None),
-            fixed_keys: None,
+            refresh: tokio::sync::Mutex::new(()),
         })
     }
 
-    /// Builds a verifier over a fixed key set. Tests only.
+    /// Builds a verifier over a fixed key set that never expires.
+    ///
+    /// Seeds the ordinary cache rather than living in a separate field, so the
+    /// tests that use it exercise the real lookup path — including the rule
+    /// that a fresh cache answers an unknown `kid` by itself. A verifier built
+    /// this way never reaches the network, because the cache never expires.
     #[must_use]
     pub fn with_keys(project_id: impl Into<String>, keys: HashMap<String, DecodingKey>) -> Self {
-        Self {
-            project_id: project_id.into(),
-            http: reqwest::Client::new(),
-            cache: RwLock::new(None),
-            fixed_keys: Some(keys),
-        }
+        let verifier = Self::with_jwk_url(project_id, GOOGLE_JWK_URL)
+            .expect("the default client is always constructible");
+        *verifier
+            .cache
+            .try_write()
+            .expect("a freshly built verifier is uncontended") = Some(CachedKeys {
+            keys,
+            expires_at: Instant::now() + MAX_KEY_CACHE_TTL,
+        });
+        verifier
+    }
+
+    /// How much longer the cached key set stays trusted, if one is cached.
+    ///
+    /// Exists so a test can prove the lifetime is **Google's** rather than one
+    /// this process invented. Every other observable — whether a refetch
+    /// happens — is indistinguishable inside a test, because the floor on the
+    /// cached lifetime is five minutes and no suite should sleep that long.
+    /// Without this, replacing the served `max-age` with a fixed default breaks
+    /// no assertion, which is exactly what a tamper check found.
+    pub async fn cache_lifetime(&self) -> Option<Duration> {
+        let cache = self.cache.read().await;
+        cache
+            .as_ref()
+            .map(|cached| cached.expires_at.saturating_duration_since(Instant::now()))
     }
 
     /// The project this verifier accepts tokens for.
@@ -268,55 +333,78 @@ impl FirebaseVerifier {
 
     /// Returns the decoding key for `kid`, refreshing the set if needed.
     async fn decoding_key(&self, kid: &str) -> Result<DecodingKey, AuthError> {
-        if let Some(fixed) = &self.fixed_keys {
-            return fixed.get(kid).cloned().ok_or(AuthError::Malformed);
+        // A fresh cache is the whole answer, including when it says no.
+        //
+        // This used to fall through to a fetch when the cache was fresh but the
+        // `kid` was unknown, which made the network reachable from an
+        // unauthenticated request: any syntactically valid JWT with a new
+        // random `kid` forced one outbound HTTPS call, and a stream of them
+        // forced a stream of calls. An unknown `kid` against keys Google
+        // published minutes ago is a bad token, not evidence of rotation, so it
+        // is now rejected without leaving the process.
+        if let Some(key) = self.cached_key(kid).await? {
+            return Ok(key);
         }
 
-        // Fast path: a fresh cached set that already has the key.
-        {
-            let cache = self.cache.read().await;
-            if let Some(cached) = cache.as_ref()
-                && cached.fetched_at.elapsed() < KEY_CACHE_TTL
-                && let Some(key) = cached.keys.get(kid)
-            {
-                return Ok(key.clone());
-            }
+        // Only a missing or expired cache reaches here. One refresh at a time:
+        // without this, N concurrent verifications after an expiry all fetch,
+        // which is a stampede against the same endpoint the check above exists
+        // to protect.
+        let _refreshing = self.refresh.lock().await;
+
+        // Re-check under the lock. Whoever held it before us has very likely
+        // just refreshed, and serving their result is the point of waiting.
+        if let Some(key) = self.cached_key(kid).await? {
+            return Ok(key);
         }
 
-        // Refetch. An unknown `kid` on a fresh set is a bad token, but an
-        // unknown `kid` on a *stale* set is very likely rotation, and telling
-        // those apart is worth one request.
-        let fetched = self.fetch_keys().await?;
-        let key = fetched.get(kid).cloned();
+        let (keys, ttl) = self.fetch_keys().await?;
+        let key = keys.get(kid).cloned();
 
         *self.cache.write().await = Some(CachedKeys {
-            keys: fetched,
-            fetched_at: Instant::now(),
+            keys,
+            expires_at: Instant::now() + ttl,
         });
 
         key.ok_or(AuthError::Malformed)
     }
 
+    /// Looks `kid` up in the cache, if the cache is still trusted.
+    ///
+    /// Returns `Ok(None)` only when there is nothing usable to consult — no
+    /// cache, or an expired one. A **fresh** cache that lacks the key returns
+    /// `Err(Malformed)`, which is what keeps an unknown `kid` off the network.
+    async fn cached_key(&self, kid: &str) -> Result<Option<DecodingKey>, AuthError> {
+        let cache = self.cache.read().await;
+        let Some(cached) = cache.as_ref() else {
+            return Ok(None);
+        };
+        if !cached.is_fresh() {
+            return Ok(None);
+        }
+        cached
+            .keys
+            .get(kid)
+            .cloned()
+            .map(Some)
+            .ok_or(AuthError::Malformed)
+    }
+
     /// Fetches and parses Google's current key set.
-    async fn fetch_keys(&self) -> Result<HashMap<String, DecodingKey>, AuthError> {
-        let response = self
-            .http
-            .get(GOOGLE_JWK_URL)
-            .send()
-            .await
-            .map_err(|error| {
-                // Category only. A `reqwest` error renders the URL, and this
-                // one runs on every cold verification.
-                tracing::warn!(
-                    transport = if error.is_timeout() {
-                        "timeout"
-                    } else {
-                        "request"
-                    },
-                    "could not fetch Google's signing keys"
-                );
-                AuthError::KeysUnavailable
-            })?;
+    async fn fetch_keys(&self) -> Result<(HashMap<String, DecodingKey>, Duration), AuthError> {
+        let response = self.http.get(&self.jwk_url).send().await.map_err(|error| {
+            // Category only. A `reqwest` error renders the URL, and this
+            // one runs on every cold verification.
+            tracing::warn!(
+                transport = if error.is_timeout() {
+                    "timeout"
+                } else {
+                    "request"
+                },
+                "could not fetch Google's signing keys"
+            );
+            AuthError::KeysUnavailable
+        })?;
 
         if !response.status().is_success() {
             tracing::warn!(
@@ -325,6 +413,11 @@ impl FirebaseVerifier {
             );
             return Err(AuthError::KeysUnavailable);
         }
+
+        // Read before the body is consumed. Google states how long its key set
+        // may be reused; honouring that is what keeps a rotation visible
+        // instead of pinned behind an interval we invented.
+        let ttl = max_age(response.headers());
 
         let body = response
             .bytes()
@@ -352,8 +445,37 @@ impl FirebaseVerifier {
             return Err(AuthError::KeysUnavailable);
         }
 
-        Ok(keys)
+        Ok((keys, ttl))
     }
+}
+
+/// The `Cache-Control: max-age` of a key-set response, clamped.
+///
+/// Clamped rather than trusted: a zero or near-zero `max-age` would make every
+/// verification fetch — the same exhaustion the cache prevents, arriving from
+/// upstream instead of from a caller — and an enormous one would pin a retired
+/// key set. An absent or unparseable header falls back to
+/// [`DEFAULT_KEY_CACHE_TTL`].
+fn max_age(headers: &reqwest::header::HeaderMap) -> Duration {
+    let served = headers
+        .get(reqwest::header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .split(',')
+                .filter_map(|directive| {
+                    directive
+                        .trim()
+                        .strip_prefix("max-age=")
+                        .or_else(|| directive.trim().strip_prefix("s-maxage="))
+                })
+                .find_map(|seconds| seconds.trim().parse::<u64>().ok())
+        })
+        .map(Duration::from_secs);
+
+    served.map_or(DEFAULT_KEY_CACHE_TTL, |ttl| {
+        ttl.clamp(MIN_KEY_CACHE_TTL, MAX_KEY_CACHE_TTL)
+    })
 }
 
 impl std::fmt::Debug for FirebaseVerifier {

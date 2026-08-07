@@ -67,3 +67,8 @@ workspace = true
 # copy-paste.
 rsa = "0.9"
 rand = "0.8"
+# Serves a key set `tests/signing_keys.rs` controls, so request counts and key
+# rotation are observed rather than reasoned about.
+wiremock = "0.6"
+# Encodes the RSA modulus and exponent into the JWK form the verifier parses.
+base64 = "0.22"
