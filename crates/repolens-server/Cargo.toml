@@ -31,9 +31,12 @@ tokio = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 
+flate2 = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
 time = { workspace = true }
 uuid = { workspace = true }
 
@@ -65,6 +68,10 @@ workspace = true
 # that exists to catch the real thing. A key that is never written to disk
 # cannot be mistaken for a credential by a scanner, a reviewer, or a future
 # copy-paste.
+# Hostile archive paths are generated rather than listed. A hand-written set of
+# traversal cases pins the ones somebody thought of, which is the set an
+# attacker is least interested in.
+proptest = "1"
 rsa = "0.9"
 rand = "0.8"
 # Serves a key set `tests/signing_keys.rs` controls, so request counts and key

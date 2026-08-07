@@ -18,6 +18,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod contract;
+pub mod infrastructure;
 pub mod pipeline;
 pub mod state;
 pub mod store;

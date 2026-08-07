@@ -28,10 +28,10 @@ repository = "https://github.com/tadoEng/repolens"
 #
 # Dependencies arrive with the stage that needs them, never "for later".
 # `reqwest` came with ingestion (#4) and `jsonwebtoken` with authenticated
-# creation (#13). `tokei`, `tar` and `flate2` belong to archive-based
-# composition (#12) and are still absent; so is `google-cloud-auth`, because
-# verifying a Firebase ID token needs only Google's *public* signing keys and
-# the project id, not a service-account credential.
+# creation (#13). `tar` and `flate2` arrive here with archive extraction (#12);
+# `tokei` follows with the counting half of it. `google-cloud-auth` is still
+# absent, because verifying a Firebase ID token needs only Google's *public*
+# signing keys and the project id, not a service-account credential.
 [workspace.dependencies]
 repolens-core = { path = "crates/repolens-core" }
 repolens-github = { path = "crates/repolens-github" }
@@ -56,6 +56,23 @@ tower-http = { version = "0.7", features = [
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Archive extraction for composition (#12).
+#
+# `flate2` stays on its default `miniz_oxide` backend — pure Rust, so the
+# container needs no C toolchain and the build has one less thing that can
+# differ between a developer's machine and the deployed image.
+#
+# `tar` is used through `Archive::entries()` and never `unpack()`: that one
+# call writes whatever the tarball says, which is the control every check in
+# `infrastructure::composition` exists to impose.
+flate2 = "1"
+tar = "0.4"
+
+# RAII temporary directories. The cleanup guarantee is the point: `TempDir`
+# removes its tree on drop, and drop runs while unwinding, so a panic mid-count
+# does not leave an extracted repository behind on a memory-backed volume.
+tempfile = "3"
 
 # Loads .env.local for local runs so a developer does not have to remember to
 # source it before every `cargo run`. In a deployed environment no such file
