@@ -137,5 +137,63 @@ test('a thrown value that is not an object is described rather than crashing', (
 
 	// And the diagnostic still says something rather than logging an empty tail.
 	expect(warn).toHaveBeenCalledTimes(3);
-	expect(String(warn.mock.calls[0]?.[0])).toContain('(none)');
+	expect(String(warn.mock.calls[0]?.[0])).toContain('unknown');
+});
+
+test('a code that is not shaped like a Firebase code is never echoed', () => {
+	const warn = captureWarnings();
+
+	/*
+	 * `cause` is `unknown` — whatever the SDK, a dependency, or a hostile page threw. Its
+	 * `code` is therefore untrusted data that merely happens to be named like an identifier,
+	 * and this console line is pasted into issues and screenshots. Echoing whatever arrived
+	 * on that field would make the diagnostic a disclosure channel for anything a caller can
+	 * get into a rejection.
+	 */
+	const secretShaped = 'ghp_0123456789abcdefghijklmnopqrstuvwxyz0123';
+	const message = describeSignInFailure({ code: secretShaped });
+
+	expect(message).toBe('Sign-in did not complete. Try again.');
+	const logged = String(warn.mock.calls[0]?.[0]);
+	expect(logged).not.toContain(secretShaped);
+	expect(logged).toContain('unknown');
+});
+
+test('an over-long code is rejected rather than logged in part', () => {
+	const warn = captureWarnings();
+
+	// A bounded shape, not a bounded length: 300 characters is not a Firebase code however it
+	// starts, and logging a prefix would still be logging whatever arrived.
+	describeSignInFailure({ code: `auth/${'a'.repeat(300)}` });
+
+	const logged = String(warn.mock.calls[0]?.[0]);
+	expect(logged).toContain('unknown');
+	expect(logged).not.toContain('aaaaaaaaaa');
+});
+
+test('a code that is not a string neither reaches the log nor crashes the handler', () => {
+	const warn = captureWarnings();
+
+	/*
+	 * `String(cause.code)` would coerce every one of these, and the last would throw — turning
+	 * a failed sign-in into a blank page from inside the code whose only job is to explain the
+	 * failure. Nothing about a `catch` guarantees `code` is a string.
+	 */
+	const hostile = {
+		code: {
+			toString() {
+				throw new Error('boom');
+			}
+		}
+	};
+	const causes = [{ code: 42 }, { code: null }, { code: ['auth/popup-blocked'] }, hostile];
+
+	for (const cause of causes) {
+		expect(describeSignInFailure(cause)).toBe('Sign-in did not complete. Try again.');
+	}
+
+	expect(warn).toHaveBeenCalledTimes(causes.length);
+	for (const call of warn.mock.calls) {
+		expect(String(call[0])).toContain('unknown');
+	}
 });

@@ -167,6 +167,42 @@ class Session {
 }
 
 /**
+ * The shape of every Firebase auth error code.
+ *
+ * Bounded on purpose. `cause` is `unknown` — it is whatever the SDK, a
+ * dependency, or a hostile page threw — so its `code` is untrusted data, not a
+ * machine identifier we may assume anything about. Anything outside this shape
+ * is logged as a fixed word rather than echoed.
+ */
+const FIREBASE_ERROR_CODE = /^auth\/[a-z0-9-]{1,64}$/;
+
+/**
+ * The thrown value's `code`, when it actually has a string one.
+ *
+ * `String(value)` is deliberately not used. It invokes `toString()` on an
+ * arbitrary object, which can throw — turning a failed sign-in into a crash in
+ * the handler meant to explain it — and can return anything at all, including
+ * something long or credential-shaped.
+ */
+function errorCode(cause: unknown): string {
+	if (typeof cause !== 'object' || cause === null || !('code' in cause)) return '';
+	const raw = (cause as { code: unknown }).code;
+	return typeof raw === 'string' ? raw : '';
+}
+
+/**
+ * What may be written to the console for an unmapped failure.
+ *
+ * A recognised Firebase code, or the fixed string `unknown`. The diagnostic
+ * exists so the next unmapped code is findable in a browser, and that is worth
+ * exactly one bounded token — never an arbitrary string that reached us through
+ * a `catch`.
+ */
+function loggableCode(code: string): string {
+	return FIREBASE_ERROR_CODE.test(code) ? code : 'unknown';
+}
+
+/**
  * Turns a Firebase error into something worth showing.
  *
  * Cancelling a popup is not a failure and must not be reported as one — it is the single
@@ -176,10 +212,7 @@ class Session {
  * CI has no Firebase configuration, so a test driven through the popup would be vacuous there.
  */
 export function describeSignInFailure(cause: unknown): string | null {
-	const code =
-		typeof cause === 'object' && cause !== null && 'code' in cause
-			? String((cause as { code: unknown }).code)
-			: '';
+	const code = errorCode(cause);
 
 	switch (code) {
 		case 'auth/popup-closed-by-user':
@@ -219,8 +252,13 @@ export function describeSignInFailure(cause: unknown): string | null {
 			 *
 			 * The code and nothing else: a Firebase error also carries the request that
 			 * produced it, and a console is not the place to put that.
+			 *
+			 * And only a code *shaped* like one. `cause` is `unknown`, so its `code` is
+			 * untrusted data that happens to be named like an identifier — an arbitrary
+			 * or credential-shaped value must not be echoed just because it arrived on
+			 * that field.
 			 */
-			console.warn(`[repolens] sign-in failed with an unmapped code: ${code || '(none)'}`);
+			console.warn(`[repolens] sign-in failed with an unmapped code: ${loggableCode(code)}`);
 			return 'Sign-in did not complete. Try again.';
 	}
 }
