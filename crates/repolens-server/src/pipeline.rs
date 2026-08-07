@@ -28,7 +28,7 @@ use crate::contract::analysis::{AnalysisState, RepositoryIdentity};
 use crate::contract::error::{ApiError, ErrorCode};
 use crate::contract::report::{
     Confidence, Evidence, EvidenceKind, Finding, FindingCategory, FindingState, Limitation,
-    OverviewStatement, Report, Severity,
+    LineRange, OverviewStatement, Report, Severity,
 };
 use crate::store;
 
@@ -198,7 +198,44 @@ where
         .map(|entry| entry.path.clone())
         .collect();
 
-    let outcomes = ruleset::evaluate(&paths, tree.truncated);
+    // Read a bounded set of files, so rules can say what a repository is built
+    // with rather than only which files it has.
+    //
+    // `select_paths` has existed since #4 and nothing called it: every report
+    // until now cost one tree request and could claim only presence. The
+    // selection is a pure function of the tree, so two runs at one commit read
+    // the same files in the same order — which is what keeps a content-backed
+    // report as reproducible as a path-backed one.
+    //
+    // A failure here is **not** fatal. Contents make findings stronger; losing
+    // them costs confidence, not the report. The rules are told collection did
+    // not happen, and every content rule then answers UNABLE_TO_VERIFY rather
+    // than mistaking an unread file for an absent feature.
+    let selection = repolens_github::select_paths(&tree);
+    let (files, contents_collected) = match source
+        .fetch_selected_blobs(coordinate, &commit.sha, &selection.paths)
+        .await
+    {
+        Ok(blobs) => (decode(&blobs), true),
+        Err(error) => {
+            tracing::warn!(
+                analysis = %id,
+                error = %error,
+                "could not read file contents; content rules will report unverified"
+            );
+            (Vec::new(), false)
+        }
+    };
+
+    let input = repolens_core::RuleInput {
+        repository: coordinate,
+        commit: &commit.sha,
+        paths: &paths,
+        files: &files,
+        tree_truncated: tree.truncated,
+        contents_collected,
+    };
+    let outcomes = ruleset::evaluate(&input);
 
     advance(pool, id, AnalysisState::BuildingReport, None).await;
 
@@ -219,6 +256,30 @@ where
              temporary.",
         )
     })
+}
+
+/// Turns retrieved blobs into the text form rules read.
+///
+/// Undecodable bytes are dropped rather than lossily converted. A binary file
+/// rendered as replacement characters can match a pattern by accident, and a
+/// rule that fired on mojibake would cite an excerpt no reader could recognise
+/// — worse than not having read the file, because it looks like evidence.
+fn decode(blobs: &[repolens_github::BlobContent]) -> Vec<repolens_core::FileContent> {
+    blobs
+        .iter()
+        .filter_map(|blob| {
+            let text = String::from_utf8(blob.bytes.clone()).ok()?;
+            Some(repolens_core::FileContent {
+                path: blob.path.clone(),
+                text,
+                digest: blob.content_digest.clone(),
+                // The boundary caps each blob, and a rule that finds nothing in
+                // a file cut short has established nothing. Carried so
+                // `content_verdict` can say so.
+                truncated: false,
+            })
+        })
+        .collect()
 }
 
 /// Records a transition, logging rather than failing if it cannot.
@@ -422,18 +483,26 @@ fn finding(outcome: &ruleset::RuleOutcome) -> Finding {
         title: title.to_owned(),
         explanation: explanation.to_owned(),
         evidence: outcome
-            .evidence_paths
+            .evidence
             .iter()
-            .map(|path| Evidence {
-                kind: EvidenceKind::FilePresence,
-                path: Some(path.clone()),
-                // Paths only: nothing was read, so there is nothing to excerpt
-                // and nothing to digest. Inventing either would be the
-                // fabrication this pipeline exists to prevent.
-                excerpt: None,
+            .map(|item| Evidence {
+                // A quoted line is a file *excerpt*; a bare path is only
+                // presence. The kinds are not interchangeable — a reader who
+                // sees FILE_EXCERPT expects something to read.
+                kind: if item.excerpt.is_some() {
+                    EvidenceKind::FileExcerpt
+                } else {
+                    EvidenceKind::FilePresence
+                },
+                path: Some(item.path.clone()),
+                // Present exactly when the rule read the file. A path-only
+                // finding carries neither: nothing was read, so an excerpt or
+                // a digest would be the fabrication this pipeline exists to
+                // prevent.
+                excerpt: item.excerpt.clone(),
                 truncated: false,
-                digest: None,
-                line_range: None,
+                digest: item.digest.clone(),
+                line_range: item.line_range.map(|(start, end)| LineRange { start, end }),
             })
             .collect(),
         limitations: Vec::new(),
@@ -487,6 +556,21 @@ fn describe(rule_id: &str) -> (&'static str, &'static str, FindingCategory) {
              that they run — both need more than a path.",
             FindingCategory::Testing,
         ),
+        "framework.axum" => (
+            "Built on axum",
+            "The Cargo manifest declares axum, so the HTTP surface is built on it. Read from              the dependency line quoted below rather than inferred from a directory name.",
+            FindingCategory::Technology,
+        ),
+        "framework.sveltekit" => (
+            "Built on SvelteKit",
+            "The npm manifest declares @sveltejs/kit. This states which framework the              frontend uses, not how it is deployed — an adapter choice needs its own rule.",
+            FindingCategory::Technology,
+        ),
+        "database.sqlx" => (
+            "Database access through SQLx",
+            "The Cargo manifest declares sqlx. Committed migrations say a schema is versioned;              this says what reaches it.",
+            FindingCategory::Technology,
+        ),
         _ => (
             "Unrecognised rule",
             "This rule produced a result but has no description in this build. It is reported \
@@ -501,12 +585,30 @@ fn describe(rule_id: &str) -> (&'static str, &'static str, FindingCategory) {
 mod tests {
     use super::*;
 
+    /// A path-only rule input, for tests that do not exercise content rules.
+    ///
+    /// `contents_collected: false` is the honest setting: these tests hand the
+    /// analyzer no files, so every content rule answers `UNABLE_TO_VERIFY` —
+    /// which is exactly what a run that read nothing should produce.
+    fn path_input(paths: &[String]) -> repolens_core::RuleInput<'static> {
+        repolens_core::RuleInput {
+            repository: Box::leak(Box::new(RepositoryCoordinate::new("owner", "name"))),
+            commit: Box::leak(Box::new(
+                repolens_core::CommitSha::parse(&"a".repeat(40)).expect("a literal digest"),
+            )),
+            paths: Box::leak(paths.to_vec().into_boxed_slice()),
+            files: &[],
+            tree_truncated: false,
+            contents_collected: false,
+        }
+    }
+
     #[test]
     fn every_seed_rule_has_a_description() {
         // A rule without one still reports, but under a generic title that tells
         // a reader nothing. This makes adding a rule and forgetting the text a
         // test failure rather than a quietly worse report.
-        for outcome in ruleset::evaluate(&[], false) {
+        for outcome in ruleset::evaluate(&path_input(&[])) {
             let (title, _, _) = describe(outcome.rule_id);
             assert_ne!(
                 title, "Unrecognised rule",
@@ -520,7 +622,7 @@ mod tests {
     fn finding_ids_are_stable_across_runs() {
         // Two analyses of the same commit must produce the same report. A random
         // id would make every rerun differ in a way no reader could explain.
-        let outcomes = ruleset::evaluate(&["Cargo.toml".to_owned()], false);
+        let outcomes = ruleset::evaluate(&path_input(&["Cargo.toml".to_owned()]));
         let first: Vec<_> = outcomes.iter().map(|o| finding(o).id).collect();
         let second: Vec<_> = outcomes.iter().map(|o| finding(o).id).collect();
         assert_eq!(first, second);
@@ -558,7 +660,7 @@ mod tests {
             &RepositoryCoordinate::new("rust-lang", "crates.io"),
             &commit,
             &tree,
-            &ruleset::evaluate(&[], false),
+            &ruleset::evaluate(&path_input(&[])),
         );
 
         assert_eq!(report.commit_sha, COMMIT);
@@ -678,11 +780,16 @@ mod tests {
 
         async fn fetch_selected_blobs(
             &self,
-            _coordinate: &RepositoryCoordinate,
+            coordinate: &RepositoryCoordinate,
             _commit: &repolens_core::CommitSha,
             _paths: &[String],
         ) -> Result<Vec<repolens_github::BlobContent>, GitHubSourceError> {
-            unreachable!("the seed ruleset reads paths only")
+            // Recorded like the others: content collection is a request against
+            // a specific repository, so it has to use the canonical coordinate
+            // too. Returns nothing, which these tests treat as a run that read
+            // no files — content rules then report unverified.
+            self.seen.lock().unwrap().push(coordinate.clone());
+            Ok(Vec::new())
         }
 
         async fn download_archive(
@@ -930,7 +1037,7 @@ mod tests {
             &canonical,
             &commit,
             &tree,
-            &ruleset::evaluate(&[], false),
+            &ruleset::evaluate(&path_input(&[])),
         );
 
         assert_eq!(report.repository.owner, "new-owner");
@@ -940,7 +1047,7 @@ mod tests {
     #[test]
     fn a_path_only_finding_carries_no_invented_evidence() {
         // Nothing was read, so an excerpt or a digest here would be fabricated.
-        let outcomes = ruleset::evaluate(&["Cargo.toml".to_owned()], false);
+        let outcomes = ruleset::evaluate(&path_input(&["Cargo.toml".to_owned()]));
         let detected = outcomes
             .iter()
             .find(|o| o.outcome == ruleset::Outcome::Detected)
