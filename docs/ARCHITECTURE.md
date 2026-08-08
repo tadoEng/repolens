@@ -65,14 +65,15 @@ tested.
 ### `crates/repolens-server` — everything that touches the world
 
 The axum API and its DTOs, PostgreSQL adapters, the durable worker, Firebase ID
-token verification, the Cloud Run Jobs execution trigger, and
-`infrastructure::composition` — hardened archive extraction, the Tokei adapter,
-and the exclusion policy.
+token verification, `infrastructure::composition` — hardened archive extraction,
+the Tokei adapter, and the exclusion policy — and the trigger that starts a
+worker, which was designed as a Cloud Run Job execution and is an open question
+again since the move off Cloud Run.
 
 That list is the crate's charter, not an inventory of its contents. The API, the
-`analysis-v1` DTOs, the three binaries, and Firebase ID token verification exist
-today; the rest arrives with the issue that needs it, and belongs here rather
-than in a fourth crate when it does.
+`analysis-v1` DTOs, the three binaries, Firebase ID token verification, and
+`infrastructure::composition` exist today; the rest arrives with the issue that
+needs it, and belongs here rather than in a fourth crate when it does.
 
 ## Forbidden dependency directions
 
@@ -132,19 +133,23 @@ the counted-file manifest, and the normalized result.
 
 ## The three runtime roles
 
-Three binaries, one container image. Cloud Run overrides the entrypoint per
-resource, so the Service and the Job share a single build and a single Artifact
-Registry repository.
+Three binaries, one container image, with the entrypoint chosen per resource.
 
 **Cloud Run is the platform this split was designed against. Render is where the
-API is deployed, and Cloud Run is not coming back.**
+API is deployed, and Cloud Run is not coming back.** Under Cloud Run the
+per-resource entrypoint was what let a Service and a Job share one build and one
+Artifact Registry repository; that argument is history, and the shape it bought
+— one image, three roles — is not.
 
 The reason is the thesis itself: Google Cloud requires a billing account with a
 card before anything runs, including inside its free tier. RepoLens exists partly
 to answer whether this stack runs on genuinely free infrastructure, so a card
 requirement disqualifies the platform rather than inconveniencing it. Render's
-free tier needs no card. Every Cloud Run reference below and in the crate
-documentation therefore describes the *design's* original target, not the host;
+free tier needs no card. Every Cloud Run reference that remains — below, and in
+the crate documentation, where
+[`crates/repolens-server/src/contract/analysis.rs`](../crates/repolens-server/src/contract/analysis.rs)
+still explains `ExecutionMetadata` in terms of a Cloud Run Job execution —
+describes the *design's* original target and not the host;
 [`DEPLOYMENT.md`](DEPLOYMENT.md) records the deployment as it actually is.
 
 Most of the split survives the move unchanged — three roles, one image, an
@@ -159,9 +164,12 @@ things do not, and both belong to #9 and #7 rather than to this section:
   Render's equivalents — Background Workers and Cron Jobs — are, as far as this
   has been checked, paid-only. If that holds, #7 cannot be "a Job claims a
   lease"; it has to be "the web service claims a lease", which changes the
-  shutdown and lease-renewal story the run-once design was chosen to avoid.
-  **This is unverified and is exactly what #9 is for.** It is written down here
-  because discovering it while implementing #7 would be discovering it too late.
+  shutdown and lease-renewal story the run-once design was chosen to avoid. A
+  third option is on #7 — an external free scheduler calling the API to run one
+  claim cycle — which would keep the split. **None of the three is settled, and
+  the Render pricing question is unverified: that is exactly what #9 is for.**
+  It is written down here because discovering it while implementing #7 would be
+  discovering it too late.
 
 | Binary    | Role                                                                                                                       |
 | --------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -169,26 +177,29 @@ things do not, and both belong to #9 and #7 rather than to this section:
 | `worker`  | Claims one queued analysis, runs it, persists the result, exits. **Always run-once.**                                        |
 | `migrate` | Applies migrations compiled in via `sqlx::migrate!`, over the direct database endpoint. Runs to completion and exits.         |
 
-There is no argument parser. A Cloud Run Job starts one execution and exits, so
-`worker` needs no `--once` flag, and with no flag to parse there is no reason to
-depend on a CLI crate. There is deliberately no loop mode either, not even
-behind an environment variable: a worker that can be a daemon under some
+There is no argument parser. The design assumed a runner that starts one
+execution and exits — a Cloud Run Job — so `worker` needs no `--once` flag, and
+with no flag to parse there is no reason to depend on a CLI crate. What starts
+that execution now is open (#9); that it runs once is the part the lease design
+rests on, and it has not moved. There is deliberately no loop mode either, not
+even behind an environment variable: a worker that can be a daemon under some
 configuration has two sets of shutdown and lease-renewal semantics, and the
 second would only ever be exercised on a developer's machine — the worst place
 to discover a lease bug. Local iteration repeats the *process*, which is the
-code path Cloud Run actually runs:
+code path a run-once worker takes:
 
 ```sh
 while cargo run --bin worker; do sleep 5; done
 ```
 
-An always-on polling worker would require `min-instances >= 1`, which bills
-continuously and would falsify the free-stack thesis RepoLens exists to test.
-Only the *activation trigger* changes: the durable state machine —
+An always-on polling worker would have needed Cloud Run's `min-instances >= 1`,
+which bills continuously and would falsify the free-stack thesis RepoLens exists
+to test — and the objection carries to any host that charges for an idle
+process. Only the *activation trigger* changes: the durable state machine —
 `SELECT ... FOR UPDATE SKIP LOCKED` claims, explicit leases, abandoned-lease
 recovery, bounded retries, idempotent effects — is unchanged, and lease recovery
-matters *more* under Jobs, since an execution can be killed by a job timeout or
-by memory exhaustion during extraction, stranding a lease.
+matters *more* rather than less, since whatever runs the worker can be killed by
+a timeout or by memory exhaustion during extraction, stranding a lease.
 
 Two database endpoints, not one:
 
@@ -211,9 +222,10 @@ Measured against a real Neon project, not assumed:
   `sslmode=verify-full` is confirmed to work against Neon, and the server warns
   at startup when a non-local URL lacks it.
 - **A suspended compute costs seconds on the first connection.** Neon
-  scale-to-zero suspends after idle, and that resume stacks on top of a Cloud
-  Run cold start, so the first request after quiet pays both. The progress UI
-  has to tolerate it without looking broken.
+  scale-to-zero suspends after idle, and that resume stacks on top of whatever
+  cold start the API host has — a free Render service spins down too, per
+  [`DEPLOYMENT.md`](DEPLOYMENT.md) — so the first request after quiet pays both.
+  The progress UI has to tolerate it without looking broken.
 
 ## The contract pipeline
 
@@ -298,8 +310,9 @@ Two facts it refuses to conflate:
 
 ## The reproducibility key
 
-A report is reproducible with respect to every value below, all of which it
-carries:
+A report is reproducible with respect to every value below. Five of the eight
+are published today; the other three are not, and the section after the list
+says which is which, because the difference is the whole point of having a key.
 
 ```text
 repository coordinate
@@ -313,9 +326,9 @@ exclusion-policy version
 ```
 
 Two runs are expected to agree only when all of them match. Any one changing is
-a legitimate reason for the report to differ — which is precisely why they are
-published: without them, a reader cannot tell "the repository changed" from
-"RepoLens changed".
+a legitimate reason for the report to differ, which is why the point of the key
+is to be *published*: a reader who cannot see these values cannot tell "the
+repository changed" from "RepoLens changed".
 
 The membership test is narrow: **does changing this value change the report?**
 The repository coordinate is included because two repositories can share a
@@ -328,6 +341,51 @@ rather than establish it.
 
 `TreeSha` is a distinct type from `CommitSha` even though both are 40-character
 hex digests, so that transposing them cannot compile.
+
+### What a report carries today, and what it does not
+
+Five of the eight. `Report` in
+[`crates/repolens-server/src/contract/report.rs`](../crates/repolens-server/src/contract/report.rs)
+publishes the repository coordinate, `commit_sha`, `tree_sha`,
+`analyzer_version` and `ruleset_version`, and
+[`web/src/lib/components/report/ReportHeader.svelte`](../web/src/lib/components/report/ReportHeader.svelte)
+renders all five. That is the whole of what a reader can use to tell two reports
+apart — and one of the five has never moved: `ANALYZER_VERSION` is
+`env!("CARGO_PKG_VERSION")`, and the workspace version has been `0.1.0` since
+the workspace was created, while `RULESET_VERSION` has gone 1 → 4. A change to
+report assembly therefore changes no version anyone can see.
+
+The other three are absent for two different reasons, and the difference
+matters:
+
+- **Evidence source API + version.** `GITHUB_REST_API_VERSION` in
+  [`crates/repolens-github/src/lib.rs`](../crates/repolens-github/src/lib.rs) is
+  sent on every request and published in no response. There is no field for it.
+- **Composition counter + version, and exclusion-policy version.** These *are*
+  in the contract, on `LineCountSummary`, but they hang off `composition`, and
+  `build_report` in
+  [`crates/repolens-server/src/pipeline.rs`](../crates/repolens-server/src/pipeline.rs)
+  sets `composition: None` on every report it builds — line counting is not
+  wired into the pipeline yet (#12). The fields exist and have never carried a
+  value.
+
+`ReproducibilityKey` in
+[`crates/repolens-core/src/reproducibility.rs`](../crates/repolens-core/src/reproducibility.rs)
+is the type that would state all eight at once. It is exported from that crate's
+`lib.rs` and constructed nowhere outside its own unit tests. The definition is
+not wrong — it is the ambition written down early, and it is unwired.
+
+So the honest form of the determinism claim right now is: two reports of the
+same repository and commit, under the same ruleset, are expected to agree, and a
+reader can check those inputs. A disagreement traceable only to a GitHub API
+version bump or a counter change is currently invisible, and would present as
+determinism failing rather than as an input having moved. Publishing the key is
+scoped to #28, whose design comment puts it first on the grounds that it needs
+no database change. That same comment names a version the list above is missing
+outright — the file-selection policy in
+[`crates/repolens-github/src/policy.rs`](../crates/repolens-github/src/policy.rs),
+which decides which files are read and carries no version at all, so raising a
+selection limit changes a report while leaving every key component equal.
 
 These values are the reason the version-pinning policy is split. Ordinary
 dependencies use normal compatible requirements (`axum = "0.8"`), because

@@ -256,9 +256,12 @@ the merge up, which no other check in this list would catch.
    one is checked on the report.
 8. The report renders at `/reports/{id}`.
 9. `composition` in the report is `null`, and the page renders it as an explicit
-   unknown rather than as zeros or an empty section. Line counting is issue #12
-   and does not exist yet, so `null` is the correct and honest answer here — a
-   rendered `0` would be the dishonest one.
+   unknown rather than as zeros or an empty section. The counter and the
+   exclusion policy exist under
+   `crates/repolens-server/src/infrastructure/composition/`, but `build_report`
+   in `crates/repolens-server/src/pipeline.rs` still sets `composition: None` on
+   every report it builds, so `null` is the correct and honest answer here — a
+   rendered `0` would be the dishonest one. Issue #12 finishes the wiring.
 10. Reloading the report page re-reads it from PostgreSQL and renders the same
     content — the report is persisted, not held in browser state.
 11. A signed-out browser (or a private window) can open the same report URL and

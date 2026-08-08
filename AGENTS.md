@@ -5,8 +5,14 @@ produces a deterministic, evidence-backed report.
 
 Two properties settle most arguments here:
 
-- **Determinism.** The same inputs produce the same report. When two reports
-  disagree, the published reproducibility key says which input changed.
+- **Determinism.** The same inputs produce the same report. A report publishes
+  the repository coordinate, commit SHA, tree SHA, analyzer version and ruleset
+  version, and those five are what a reader has today to tell two reports apart.
+  `ReproducibilityKey` names three more inputs — evidence-source version,
+  composition counter, exclusion-policy version — that no report carries, and
+  nothing constructs that type. So a report differing only for one of those
+  reasons cannot yet say so. Issue #28 publishes the key; until it lands, do not
+  write that the key is published.
 - **Honesty about limits.** A truncated tree or an abandoned line count is a
   result, not an error to swallow. Never turn unknown into zero, empty, or
   success.

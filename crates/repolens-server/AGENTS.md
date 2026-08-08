@@ -23,11 +23,11 @@ guarding the shape of the database instead of the shape of the contract.
 ## The three binaries
 
 `src/bin/server.rs`, `src/bin/worker.rs`, and `src/bin/migrate.rs` compile into
-one image; Cloud Run overrides the entrypoint per resource. There is no argument
-parser and no loop mode — `worker` claims one analysis, runs it, persists, and
-exits. A worker that can also be a daemon has two sets of shutdown and
-lease-renewal semantics, and the second would only ever run on a developer's
-machine, the worst place to discover a lease bug.
+one image, entrypoint chosen per resource — a Cloud Run design, and Cloud Run is
+not the host. There is no argument parser and no loop mode: `worker` claims one
+analysis, runs it, persists, and exits. A worker that can also be a daemon has
+two sets of shutdown and lease-renewal semantics, and the second would only run
+on a developer's machine, the worst place to discover a lease bug.
 
 Because an execution can be killed by a job timeout or by memory exhaustion
 during extraction, **abandoned-lease recovery is mandatory and every worker

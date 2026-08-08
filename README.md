@@ -36,7 +36,8 @@ The first release is deliberately narrow:
 - PostgreSQL-backed worker
 - OpenAPI-generated TypeScript client
 - Cloudflare frontend hosting
-- Google Cloud Run API/worker
+- Render API hosting — Cloud Run was the original target and is not coming back;
+  where the `worker` binary runs is still open
 - Neon Postgres
 - GitHub App later, personal development token initially
 
