@@ -275,9 +275,14 @@
 		<div class="composition__view">
 			<ScrollRegion label="Code lines by role">
 				<table class="composition__table">
+					<!--
+						No backticks in here. This is a `<caption>`, not Markdown: they would render as
+						literal characters and be read aloud as punctuation. Prose that names a role
+						uses the same wording the row itself shows.
+					-->
 					<caption>
 						Code lines by role. Structural evidence, not a judgement: generated code is named as
-						generated so it is not counted as hand-written work. `Unclassified` appears only when it
+						generated so it is not counted as hand-written work. Unclassified appears only when it
 						is above zero, and when it does it is counted against the same total as every other row
 						— the shares are not rebased over the roles that were recognised.
 					</caption>
