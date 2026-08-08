@@ -21,8 +21,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::classification::{self, CLASSIFICATION_POLICY_VERSION};
-use super::counter::{COUNTER_NAME, CountedRepository};
+use repolens_core::{CompositionCounter, ReproducibilityKey};
+
+use super::classification;
+use super::counter::CountedRepository;
 use crate::contract::report::{
     AreaLineCount, CodeRole, CompositionExclusion, LanguageLineCount, LargestSourceFile,
     LargestSourceFiles, LineCountSummary, RoleLineCount,
@@ -51,38 +53,45 @@ const fn rank_of(role: CodeRole) -> usize {
 
 /// What one counted repository publishes as its composition section.
 ///
+/// Every version here is read out of the [`ReproducibilityKey`] rather than
+/// from the constants that fed it. The key is the single authority on what
+/// decided this report's output, and a section that named its own policy
+/// versions would be a second assembly of the same provenance -- which cannot
+/// disagree with the key until the day it does.
+///
 /// Total counts come from the language table rather than from the manifest,
 /// because the manifest carries code lines only. Comment and blank lines are
-/// real parts of a file and a total that silently omitted them would be a
+/// real parts of a file, and a total that silently omitted them would be a
 /// smaller, wronger number wearing the same name.
 #[must_use]
-pub fn summarize(counted: &CountedRepository) -> LineCountSummary {
-    let languages = language_rows(counted);
+pub fn summarize(
+    key: &ReproducibilityKey,
+    counter: &CompositionCounter,
+    repository: &CountedRepository,
+) -> LineCountSummary {
+    let languages = language_rows(repository);
 
     let code_lines = languages.iter().map(|row| row.code_lines).sum();
     let comment_lines = languages.iter().map(|row| row.comment_lines).sum();
     let blank_lines = languages.iter().map(|row| row.blank_lines).sum();
 
     LineCountSummary {
-        counter: COUNTER_NAME.to_owned(),
-        counter_version: counted.tokei_version.to_owned(),
-        exclusion_policy_version: counted.exclusion_policy_version.to_owned(),
-        // Not carried on `CountedRepository`, because counting never consults
-        // it. Everything below that needs a role or an area is decided here, so
-        // this is where the version that decided it comes from.
-        classification_policy_version: CLASSIFICATION_POLICY_VERSION.to_owned(),
-        total_files: counted.composition.counted_files,
+        counter: counter.counter.clone(),
+        counter_version: counter.version.clone(),
+        exclusion_policy_version: key.exclusion_policy_version.clone(),
+        classification_policy_version: key.classification_policy_version.clone(),
+        total_files: repository.composition.counted_files,
         // Physical lines: what a reader sees on opening the file.
         total_lines: code_lines + comment_lines + blank_lines,
         code_lines,
         comment_lines,
         blank_lines,
         languages,
-        areas: area_rows(counted),
-        exclusions: exclusion_rows(counted),
-        roles: role_rows(counted),
-        largest_files: largest_files(counted),
-        unclassified_files: counted
+        areas: area_rows(repository),
+        exclusions: exclusion_rows(repository),
+        roles: role_rows(repository),
+        largest_files: largest_files(repository),
+        unclassified_files: repository
             .manifest
             .iter()
             .filter(|file| role_of(&file.path) == CodeRole::Unclassified)
@@ -233,9 +242,38 @@ mod tests {
         CompositionExclusion as DomainExclusion, LanguageComposition, RepositoryComposition,
     };
 
+    use super::super::classification::CLASSIFICATION_POLICY_VERSION;
     use super::super::counter::{COUNTER_NAME, CountedFile, TOKEI_VERSION};
+    use super::super::exclusion::EXCLUSION_POLICY_VERSION;
     use super::*;
     use crate::contract::report::MAX_LARGEST_FILES;
+
+    use repolens_core::{CommitSha, RepositoryCoordinate, TreeSha};
+
+    /// The key a counted run produces, so the section is projected from the
+    /// same authority production uses rather than from constants beside it.
+    fn key() -> ReproducibilityKey {
+        ReproducibilityKey {
+            repository: RepositoryCoordinate::new("rust-lang", "crates.io"),
+            commit_sha: CommitSha::parse(&"a".repeat(40)).expect("a literal digest"),
+            tree_sha: TreeSha::parse(&"b".repeat(40)).expect("a literal digest"),
+            source: repolens_github::evidence_source(),
+            analyzer_version: "1".to_owned(),
+            ruleset_version: "1".to_owned(),
+            composition_counter: Some(counter()),
+            exclusion_policy_version: EXCLUSION_POLICY_VERSION.to_owned(),
+            classification_policy_version: CLASSIFICATION_POLICY_VERSION.to_owned(),
+            selection_policy_version: "1".to_owned(),
+        }
+    }
+
+    fn counter() -> CompositionCounter {
+        CompositionCounter::new(COUNTER_NAME, TOKEI_VERSION)
+    }
+
+    fn summary_of(repository: &CountedRepository) -> LineCountSummary {
+        summarize(&key(), &counter(), repository)
+    }
 
     fn counted(
         manifest: Vec<CountedFile>,
@@ -284,7 +322,7 @@ mod tests {
         // would see on opening the files. A total that quietly meant "code
         // only" would be a smaller, wronger number wearing the same name, and
         // `code_lines` already answers the other question.
-        let summary = summarize(&counted(
+        let summary = summary_of(&counted(
             vec![file("src/main.rs", "Rust", 60)],
             vec![language("Rust", 1, 60, 30, 10)],
         ));
@@ -300,7 +338,7 @@ mod tests {
         // The counter stores languages in name order, which is a fine way to
         // hold them and a poor way to read them: the question this section
         // answers is what the repository is mostly made of.
-        let summary = summarize(&counted(
+        let summary = summary_of(&counted(
             vec![
                 file("web/app.ts", "TypeScript", 900),
                 file("crates/a/src/lib.rs", "Rust", 100),
@@ -335,7 +373,7 @@ mod tests {
         // Two reports must put the same rows in the same places, or comparing
         // them means reading both legends first. Production leads even when it
         // is by far the smallest.
-        let summary = summarize(&counted(
+        let summary = summary_of(&counted(
             vec![
                 file("web/src/generated/schema.ts", "TypeScript", 5_000),
                 file("crates/a/tests/it.rs", "Rust", 400),
@@ -367,7 +405,7 @@ mod tests {
             .collect();
         manifest.push(file("src/biggest.rs", "Rust", 999));
 
-        let summary = summarize(&counted(manifest, vec![language("Rust", 16, 2_499, 0, 0)]));
+        let summary = summary_of(&counted(manifest, vec![language("Rust", 16, 2_499, 0, 0)]));
         let rows = summary.largest_files.as_slice();
 
         assert_eq!(
@@ -386,7 +424,7 @@ mod tests {
     fn a_large_generated_file_is_labelled_rather_than_left_to_look_hand_written() {
         // The most common way this list misleads: the biggest file in a
         // repository is very often one nobody wrote.
-        let summary = summarize(&counted(
+        let summary = summary_of(&counted(
             vec![file("web/src/generated/schema.ts", "TypeScript", 5_000)],
             vec![language("TypeScript", 1, 5_000, 0, 0)],
         ));
@@ -402,7 +440,7 @@ mod tests {
         // A repository that is entirely excluded content is a real outcome and
         // its answer is zero. Nothing here may divide by a total or index a
         // first row.
-        let summary = summarize(&counted(Vec::new(), Vec::new()));
+        let summary = summary_of(&counted(Vec::new(), Vec::new()));
 
         assert_eq!(summary.total_files, 0);
         assert_eq!(summary.total_lines, 0);
@@ -417,7 +455,7 @@ mod tests {
         // Three policies decide this section and they move independently. The
         // classification version comes from here rather than from the count,
         // because counting never consults it.
-        let summary = summarize(&counted(
+        let summary = summary_of(&counted(
             vec![file("src/main.rs", "Rust", 1)],
             vec![language("Rust", 1, 1, 0, 0)],
         ));
@@ -443,7 +481,7 @@ mod tests {
             bytes: 4 * 1024 * 1024,
         }];
 
-        let summary = summarize(&repository);
+        let summary = summary_of(&repository);
 
         assert_eq!(summary.exclusions.len(), 1);
         assert_eq!(summary.exclusions[0].matched_rule, "vendored.node_modules");

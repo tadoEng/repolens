@@ -31,9 +31,11 @@ use crate::contract::analysis::{AnalysisState, RepositoryIdentity};
 use crate::contract::error::{ApiError, ErrorCode};
 use crate::contract::report::{
     Confidence, Evidence, EvidenceKind, Finding, FindingCategory, FindingState, Limitation,
-    LineRange, OverviewStatement, Report, Severity,
+    LineCountSummary, LineRange, OverviewStatement, Report, Severity,
 };
+use crate::infrastructure::composition;
 use crate::store;
+use repolens_core::{CompositionCounter, ReproducibilityKey};
 
 /// Version of the analyzer producing these reports.
 ///
@@ -231,16 +233,27 @@ where
     };
     let outcomes = ruleset::evaluate(&input);
 
+    // Composition runs after the ruleset, deliberately. Findings are already
+    // computed by this point, so a ceiling here costs the report its counts and
+    // nothing else -- which is the outcome `composition: null` exists to
+    // describe.
+    let composed =
+        composition::compose(source, coordinate, &commit.sha, &std::env::temp_dir()).await;
+
     advance(pool, id, AnalysisState::BuildingReport, None).await;
+
+    // Assembled once, here, from the semantic inputs. Everything the report
+    // publishes about *what decided it* is read back out of this value.
+    let key = reproducibility_key(coordinate, &commit, &composed);
 
     let report = build_report(
         id,
-        coordinate,
-        &commit,
+        &key,
         &tree,
         contents.collected,
         &contents.skipped,
         &outcomes,
+        &composed,
     );
 
     store::complete(pool, id, &report).await.map_err(|error| {
@@ -508,12 +521,12 @@ fn translate(error: GitHubSourceError) -> ApiError {
 /// Turns rule outcomes into a report.
 fn build_report(
     analysis_id: Uuid,
-    coordinate: &RepositoryCoordinate,
-    commit: &repolens_github::ResolvedCommit,
+    key: &ReproducibilityKey,
     tree: &repolens_github::RepositoryTree,
     contents_collected: bool,
     skipped: &[repolens_github::SkippedPath],
     outcomes: &[ruleset::RuleOutcome],
+    composed: &composition::Composed,
 ) -> Report {
     let findings: Vec<Finding> = outcomes.iter().map(finding).collect();
 
@@ -556,15 +569,19 @@ fn build_report(
 
     limitations.extend(skip_limitations(skipped));
 
+    limitations.extend(composition_limitation(composed));
+
     let overview = overview_of(outcomes);
+
+    let composition = composition_section(key, composed);
 
     Report {
         analysis_id,
         repository: RepositoryIdentity {
-            owner: coordinate.owner.clone(),
-            name: coordinate.name.clone(),
+            owner: key.repository.owner.clone(),
+            name: key.repository.name.clone(),
         },
-        commit_sha: commit.sha.as_str().to_owned(),
+        commit_sha: key.commit_sha.as_str().to_owned(),
         // From the commit object, deliberately not from `tree.sha`.
         //
         // GitHub's tree endpoint echoes back whichever SHA it was asked for. The
@@ -576,21 +593,98 @@ fn build_report(
         // and `47ce74b3…` when asked by tree, for byte-identical entries.
         // `TreeSha` → `String` happens here and only here: the wire DTO is the
         // one place the typed identity has to be flattened.
-        tree_sha: commit.tree_sha.as_str().to_owned(),
-        // Asked of the ingestion crate rather than spelled here. The pipeline
-        // knows it is reading GitHub, but it does not know which API version
-        // the requests carried, and a report that names the wrong one is a
-        // false claim nothing downstream can catch.
-        evidence_source: Some(repolens_github::evidence_source().into()),
-        analyzer_version: ANALYZER_VERSION.to_owned(),
-        ruleset_version: ruleset::RULESET_VERSION.to_owned(),
+        tree_sha: key.tree_sha.as_str().to_owned(),
+        evidence_source: Some(key.source.clone().into()),
+        analyzer_version: key.analyzer_version.clone(),
+        ruleset_version: key.ruleset_version.clone(),
         completed_at: OffsetDateTime::now_utc(),
         overview,
         findings,
-        // No line counts: composition needs the archive path, which is #12.
-        // Null is the designed state for that, not zero.
-        composition: None,
+        composition,
         limitations,
+    }
+}
+
+/// Everything that determines this report's output, assembled once.
+///
+/// The key stopped being inert here. It was previously a type nothing
+/// constructed, while the report assembled the same provenance independently --
+/// two spellings of one set of facts, which cannot disagree until they do. The
+/// report and the composition section are now both projections of this value,
+/// so a version that moves moves in one place.
+///
+/// `composition_counter` is the one field decided by the outcome rather than by
+/// the inputs: a run that produced no counts had no counter, and saying so is
+/// the difference between "counted by tokei 14" and "not counted".
+fn reproducibility_key(
+    coordinate: &RepositoryCoordinate,
+    commit: &repolens_github::ResolvedCommit,
+    composed: &composition::Composed,
+) -> ReproducibilityKey {
+    ReproducibilityKey {
+        repository: coordinate.clone(),
+        commit_sha: commit.sha.clone(),
+        tree_sha: commit.tree_sha.clone(),
+        // Asked of the ingestion crate rather than spelled here. The pipeline
+        // knows it is reading GitHub, but not which API version the requests
+        // carried, and a report naming the wrong one is a false claim nothing
+        // downstream can catch.
+        source: repolens_github::evidence_source(),
+        analyzer_version: ANALYZER_VERSION.to_owned(),
+        ruleset_version: ruleset::RULESET_VERSION.to_owned(),
+        composition_counter: match composed {
+            composition::Composed::Counted(counted) => Some(CompositionCounter::new(
+                composition::counter::COUNTER_NAME,
+                counted.tokei_version,
+            )),
+            composition::Composed::Limited(_) | composition::Composed::Unavailable => None,
+        },
+        exclusion_policy_version: composition::exclusion::EXCLUSION_POLICY_VERSION.to_owned(),
+        classification_policy_version: composition::classification::CLASSIFICATION_POLICY_VERSION
+            .to_owned(),
+        selection_policy_version: repolens_github::SELECTION_POLICY_VERSION.to_owned(),
+    }
+}
+
+/// The composition section, projected from the key and the count.
+///
+/// Total rather than unwrapping: the key is built from the same outcome one
+/// line above, so a counted run always carries a counter. Should that ever stop
+/// being true, this reports no composition rather than panicking or publishing
+/// a section whose provenance disagrees with the key it was keyed by.
+fn composition_section(
+    key: &ReproducibilityKey,
+    composed: &composition::Composed,
+) -> Option<LineCountSummary> {
+    match composed {
+        composition::Composed::Counted(counted) => key
+            .composition_counter
+            .as_ref()
+            .map(|counter| composition::summary::summarize(key, counter, counted)),
+        composition::Composed::Limited(_) | composition::Composed::Unavailable => None,
+    }
+}
+
+/// What a breached ceiling, or an archive nobody could read, says in the report.
+///
+/// A limitation rather than an error, and it names the ceiling and the observed
+/// value: "we could not count this" is far less useful than "the archive held
+/// more entries than the walk accepts, 200000, and it holds 431902".
+fn composition_limitation(composed: &composition::Composed) -> Option<Limitation> {
+    match composed {
+        composition::Composed::Counted(_) => None,
+        composition::Composed::Limited(breach) => Some(Limitation {
+            code: breach.limit_name.clone(),
+            explanation: format!(
+                "Line counting stopped at a configured ceiling, so no counts were produced.                  {} is {}, and this analysis saw {}. The limit is ours, not a judgement about                  the repository, and its absence here is not a claim that the repository has                  no code.",
+                breach.limit_name, breach.limit_value, breach.observed_value
+            ),
+        }),
+        composition::Composed::Unavailable => Some(Limitation {
+            code: "COMPOSITION_NOT_COLLECTED".to_owned(),
+            explanation: "The commit archive could not be retrieved or read, so no line counts                           were produced. This is a property of this attempt rather than of the                           repository, and another run may succeed."
+                .to_owned(),
+        }),
     }
 }
 
@@ -1052,16 +1146,33 @@ mod tests {
 
     const CARGO_WITH_AXUM: &str = "[dependencies]\naxum = \"0.8\"\n";
 
+    /// The key a test run produces, with no composition attempted.
+    ///
+    /// Tests that care about counts pass their own `Composed`; everything else
+    /// wants a report whose provenance is real and whose composition is the
+    /// designed absence.
+    fn a_key(
+        coordinate: &RepositoryCoordinate,
+        commit: &repolens_github::ResolvedCommit,
+        composed: &composition::Composed,
+    ) -> ReproducibilityKey {
+        reproducibility_key(coordinate, commit, composed)
+    }
+
     /// A report over `outcomes`, from a run that did or did not read contents.
     fn report_over(contents_collected: bool, outcomes: &[ruleset::RuleOutcome]) -> Report {
         build_report(
             Uuid::nil(),
-            &RepositoryCoordinate::new("owner", "name"),
-            &a_commit(),
+            &a_key(
+                &RepositoryCoordinate::new("owner", "name"),
+                &a_commit(),
+                &composition::Composed::Unavailable,
+            ),
             &empty_tree(),
             contents_collected,
             &[],
             outcomes,
+            &composition::Composed::Unavailable,
         )
     }
 
@@ -1241,8 +1352,11 @@ mod tests {
          */
         let report = build_report(
             Uuid::nil(),
-            &RepositoryCoordinate::new("owner", "name"),
-            &a_commit(),
+            &a_key(
+                &RepositoryCoordinate::new("owner", "name"),
+                &a_commit(),
+                &composition::Composed::Unavailable,
+            ),
             &empty_tree(),
             true,
             &[skipped(
@@ -1253,6 +1367,7 @@ mod tests {
                 },
             )],
             &ruleset::evaluate(&path_input(&["Cargo.toml".to_owned()])),
+            &composition::Composed::Unavailable,
         );
 
         let limitation = report
@@ -1286,12 +1401,16 @@ mod tests {
 
         let report = build_report(
             Uuid::nil(),
-            &RepositoryCoordinate::new("owner", "name"),
-            &a_commit(),
+            &a_key(
+                &RepositoryCoordinate::new("owner", "name"),
+                &a_commit(),
+                &composition::Composed::Unavailable,
+            ),
             &empty_tree(),
             true,
             &many,
             &ruleset::evaluate(&path_input(&[])),
+            &composition::Composed::Unavailable,
         );
 
         let codes: Vec<&str> = limitation_codes(&report);
@@ -1332,12 +1451,16 @@ mod tests {
         let render = |ledger: &[repolens_github::SkippedPath]| {
             build_report(
                 Uuid::nil(),
-                &RepositoryCoordinate::new("owner", "name"),
-                &a_commit(),
+                &a_key(
+                    &RepositoryCoordinate::new("owner", "name"),
+                    &a_commit(),
+                    &composition::Composed::Unavailable,
+                ),
                 &empty_tree(),
                 true,
                 ledger,
                 &ruleset::evaluate(&path_input(&[])),
+                &composition::Composed::Unavailable,
             )
             .limitations
         };
@@ -1377,8 +1500,11 @@ mod tests {
         let outcomes = ruleset::evaluate(&undecodable_input(&paths, &[], &paths));
         let report = build_report(
             Uuid::nil(),
-            &RepositoryCoordinate::new("owner", "name"),
-            &a_commit(),
+            &a_key(
+                &RepositoryCoordinate::new("owner", "name"),
+                &a_commit(),
+                &composition::Composed::Unavailable,
+            ),
             &empty_tree(),
             true,
             &[skipped(
@@ -1386,6 +1512,7 @@ mod tests {
                 repolens_github::SkipReason::Undecodable,
             )],
             &outcomes,
+            &composition::Composed::Unavailable,
         );
 
         let axum = finding_of(&report, "framework.axum");
@@ -1621,12 +1748,16 @@ mod tests {
 
         let report = build_report(
             Uuid::nil(),
-            &RepositoryCoordinate::new("rust-lang", "crates.io"),
-            &commit,
+            &a_key(
+                &RepositoryCoordinate::new("rust-lang", "crates.io"),
+                &commit,
+                &composition::Composed::Unavailable,
+            ),
             &tree,
             false,
             &[],
             &ruleset::evaluate(&path_input(&[])),
+            &composition::Composed::Unavailable,
         );
 
         assert_eq!(report.commit_sha, COMMIT);
@@ -1665,12 +1796,16 @@ mod tests {
 
         let report = build_report(
             Uuid::nil(),
-            &RepositoryCoordinate::new("rust-lang", "crates.io"),
-            &commit,
+            &a_key(
+                &RepositoryCoordinate::new("rust-lang", "crates.io"),
+                &commit,
+                &composition::Composed::Unavailable,
+            ),
             &tree,
             false,
             &[],
             &ruleset::evaluate(&path_input(&[])),
+            &composition::Composed::Unavailable,
         );
 
         let source = report
@@ -1811,7 +1946,17 @@ mod tests {
             _max_compressed_bytes: u64,
             _destination: &std::path::Path,
         ) -> Result<repolens_github::ArchiveDownload, GitHubSourceError> {
-            unreachable!("composition is #12")
+            // A source that cannot supply an archive. These tests are about
+            // coordinates and failure recording, and composition is proved
+            // against a real tarball in `tests/composition_pipeline.rs` --
+            // where a fake archive is a fake archive rather than a second,
+            // weaker definition of what extraction accepts.
+            //
+            // The pipeline must survive this rather than fail the analysis: the
+            // findings are already computed when composition runs.
+            Err(GitHubSourceError::Io {
+                operation: "no archive in this test double",
+            })
         }
     }
 
@@ -2046,12 +2191,12 @@ mod tests {
 
         let report = build_report(
             Uuid::nil(),
-            &canonical,
-            &commit,
+            &a_key(&canonical, &commit, &composition::Composed::Unavailable),
             &tree,
             false,
             &[],
             &ruleset::evaluate(&path_input(&[])),
+            &composition::Composed::Unavailable,
         );
 
         assert_eq!(report.repository.owner, "new-owner");

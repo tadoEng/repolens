@@ -624,13 +624,17 @@ const REPRODUCIBLE_LIMITATIONS: [&str; 12] = [
 /// that on its own — but to tell a reader *why* a report is ineligible. An
 /// unrecognised code is also ineligible, and saying so honestly ("this build
 /// has not classified it") is different from claiming to know it is transient.
-const RUNTIME_DEPENDENT_LIMITATIONS: [&str; 7] = [
+const RUNTIME_DEPENDENT_LIMITATIONS: [&str; 8] = [
     // A retrieval that failed this time and may succeed next time. This one
     // predates composition: the pipeline deliberately continues without
     // contents rather than failing the analysis, so a completed report already
     // had a transient path before any wall-clock ceiling existed.
     "CONTENTS_NOT_COLLECTED",
     "FILE_NOT_RETRIEVED",
+    // The same shape one layer over: the commit archive could not be retrieved
+    // or read, so no counting happened. Distinct from every ceiling below,
+    // which stopped a run that *was* under way and can say by how much.
+    "COMPOSITION_NOT_COLLECTED",
     // Host conditions.
     "ARCHIVE_DURATION_LIMIT",
     "EXTRACTION_STORAGE_LIMIT",

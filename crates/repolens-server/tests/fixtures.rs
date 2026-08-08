@@ -282,11 +282,14 @@ fn composition() -> LineCountSummary {
                 role: CodeRole::Production,
             },
             LargestSourceFile {
-                path: "packages/api-client/src/schema.ts".to_owned(),
+                path: "packages/api-client/src/generated/schema.ts".to_owned(),
                 language: "TypeScript".to_owned(),
                 code_lines: 1_980,
-                // Generated: without the role, this would read as the second
-                // largest hand-written file in the repository.
+                // Generated, and the path is one the classification policy
+                // genuinely reads that way -- a `generated` segment. An
+                // illustrative path the policy would call production, wearing
+                // a GENERATED label, would make this fixture contradict the
+                // rules it is supposed to demonstrate.
                 role: CodeRole::Generated,
             },
         ])
