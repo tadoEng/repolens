@@ -297,6 +297,16 @@ export interface components {
          */
         EvidenceKind: "FILE_PRESENCE" | "FILE_EXCERPT" | "DEPENDENCY_ENTRY" | "WORKFLOW_DEFINITION" | "STATISTIC" | "REPOSITORY_METADATA";
         /**
+         * @description Which interface an analysis read its evidence through.
+         *
+         *     A closed enumeration, not a free string. This is published vocabulary that a
+         *     client switches on, so a value invented at a call site would silently extend
+         *     a public set — and the frontend's variant gate exists to make exactly that a
+         *     build failure rather than an unlabelled string on screen.
+         * @enum {string}
+         */
+        EvidenceProvider: "GITHUB_REST";
+        /**
          * @description The retrieval interface an analysis read its evidence through.
          *
          *     A wire mirror of [`repolens_core::EvidenceSource`], for the same reason
@@ -305,17 +315,18 @@ export interface components {
          *     Converted at this boundary rather than restated, so the two cannot drift
          *     into naming different sources.
          *
-         *     Two fields rather than one string because the pair answers two different
-         *     questions. GitHub isolates breaking changes into dated REST versions, so the
-         *     same commit read through two of them can yield different fields and
-         *     therefore different findings; and a future non-GitHub source is then a new
-         *     `api` value rather than a new field.
+         *     Two fields rather than one string because they answer different questions
+         *     and are decided by different things. *Whose interface* is a choice this
+         *     analyzer makes and a client may branch on, so it is an enum; *which version
+         *     of it* is a value the ingestion boundary pins, and GitHub isolates breaking
+         *     changes into dated versions, so the same commit read through two of them can
+         *     yield different fields and therefore different findings.
          */
         EvidenceSource: {
-            /** @description Identifier for the retrieval interface, e.g. `github-rest`. */
-            api: string;
             /** @description Version of that interface, e.g. `2026-03-10`. */
-            version: string;
+            api_version: string;
+            /** @description Interface the evidence was retrieved through. */
+            provider: components["schemas"]["EvidenceProvider"];
         };
         /** @description Scheduling facts about an analysis. */
         ExecutionMetadata: {

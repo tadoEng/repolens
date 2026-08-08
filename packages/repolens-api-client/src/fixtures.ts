@@ -49,8 +49,8 @@ export const COMPLETED_REPORT_FIXTURE = {
 		commit_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
 		tree_sha: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
 		evidence_source: {
-			api: "github-rest",
-			version: "2026-03-10"
+			provider: "GITHUB_REST",
+			api_version: "2026-03-10"
 		},
 		analyzer_version: "0.1.0",
 		ruleset_version: "1",
@@ -645,8 +645,8 @@ export const LOC_UNAVAILABLE_FIXTURE = {
 		commit_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
 		tree_sha: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
 		evidence_source: {
-			api: "github-rest",
-			version: "2026-03-10"
+			provider: "GITHUB_REST",
+			api_version: "2026-03-10"
 		},
 		analyzer_version: "0.1.0",
 		ruleset_version: "1",

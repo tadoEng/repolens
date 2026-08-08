@@ -38,6 +38,7 @@ export type CodeRole = Schemas['CodeRole'];
 export type Confidence = Schemas['Confidence'];
 export type ErrorCode = Schemas['ErrorCode'];
 export type EvidenceKind = Schemas['EvidenceKind'];
+export type EvidenceProvider = Schemas['EvidenceProvider'];
 export type FindingCategory = Schemas['FindingCategory'];
 export type FindingState = Schemas['FindingState'];
 export type LargestSourceFile = Schemas['LargestSourceFile'];

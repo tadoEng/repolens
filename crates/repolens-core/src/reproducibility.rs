@@ -49,6 +49,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::repository::{CommitSha, RepositoryCoordinate, TreeSha};
 
+/// Which interface an analysis read its evidence through.
+///
+/// A closed set rather than a free string, because this is published vocabulary:
+/// a consumer switches on it, and a value invented at a call site would be a new
+/// member of a public enumeration that nothing agreed to. A future non-GitHub
+/// source (a local directory, an uploaded archive) is a new variant here — a
+/// deliberate, reviewable act — rather than a new field on the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EvidenceProvider {
+    /// GitHub's REST API.
+    GithubRest,
+}
+
 /// The evidence source an analysis was built from, and its interface version.
 ///
 /// GitHub isolates breaking changes into dated REST versions, so the same
@@ -56,23 +70,23 @@ use crate::repository::{CommitSha, RepositoryCoordinate, TreeSha};
 /// and therefore different findings. Recording the version makes that
 /// difference explainable rather than mysterious.
 ///
-/// Modelled as a struct rather than a bare string so a future non-GitHub source
-/// (a local directory, an uploaded archive) is a new `api` value instead of a
-/// breaking change to the key.
+/// Two parts rather than one string because they answer different questions and
+/// are decided by different things: *whose interface* is a choice this analyzer
+/// makes, and *which version of it* is a value the ingestion boundary pins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceSource {
-    /// Identifier for the retrieval interface, e.g. `github-rest`.
-    pub api: String,
+    /// Interface the evidence was retrieved through.
+    pub provider: EvidenceProvider,
     /// Version of that interface, e.g. `2026-03-10`.
-    pub version: String,
+    pub api_version: String,
 }
 
 impl EvidenceSource {
     /// Builds an evidence source from its two parts.
-    pub fn new(api: impl Into<String>, version: impl Into<String>) -> Self {
+    pub fn new(provider: EvidenceProvider, api_version: impl Into<String>) -> Self {
         Self {
-            api: api.into(),
-            version: version.into(),
+            provider,
+            api_version: api_version.into(),
         }
     }
 }
@@ -162,7 +176,7 @@ mod tests {
             repository: RepositoryCoordinate::new("rust-lang", "crates.io"),
             commit_sha: CommitSha::parse("0584a2df65968a4e9e6859ef46bbed430408a3f1").unwrap(),
             tree_sha: TreeSha::parse("4b825dc642cb6eb9a060e54bf8d69288fbee4904").unwrap(),
-            source: EvidenceSource::new("github-rest", "2026-03-10"),
+            source: EvidenceSource::new(EvidenceProvider::GithubRest, "2026-03-10"),
             analyzer_version: "0.1.0".into(),
             ruleset_version: "1".into(),
             composition_counter: Some(CompositionCounter::new("tokei", "14.0.0")),
@@ -259,7 +273,7 @@ mod tests {
         assert_ne!(base, tree);
 
         let mut source = base.clone();
-        source.source = EvidenceSource::new("github-rest", "2022-11-28");
+        source.source = EvidenceSource::new(EvidenceProvider::GithubRest, "2022-11-28");
         assert_ne!(base, source);
 
         let mut analyzer = base.clone();

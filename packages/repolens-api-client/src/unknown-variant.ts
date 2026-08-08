@@ -36,6 +36,7 @@ import type {
 	CodeRole,
 	ErrorCode,
 	EvidenceKind,
+	EvidenceProvider,
 	FindingCategory,
 	FindingState,
 	ProbeStatus,
@@ -144,6 +145,12 @@ export const EVIDENCE_KIND_LABELS: Readonly<Record<EvidenceKind, string>> = {
 	REPOSITORY_METADATA: 'Repository metadata'
 };
 
+export const EVIDENCE_PROVIDER_LABELS: Readonly<Record<EvidenceProvider, string>> = {
+	// The product name a reader recognises, not the wire token. `GITHUB_REST` is
+	// vocabulary for a client to switch on; nobody calls it that out loud.
+	GITHUB_REST: 'GitHub REST'
+};
+
 export const FINDING_CATEGORY_LABELS: Readonly<Record<FindingCategory, string>> = {
 	TECHNOLOGY: 'Technology',
 	ARCHITECTURE: 'Architecture',
@@ -221,6 +228,10 @@ export function describeEvidenceKind(raw: string): VariantDescriptor<EvidenceKin
 	return describeVariant(EVIDENCE_KIND_LABELS, raw);
 }
 
+export function describeEvidenceProvider(raw: string): VariantDescriptor<EvidenceProvider> {
+	return describeVariant(EVIDENCE_PROVIDER_LABELS, raw);
+}
+
 export function describeFindingCategory(raw: string): VariantDescriptor<FindingCategory> {
 	return describeVariant(FINDING_CATEGORY_LABELS, raw);
 }
@@ -257,6 +268,7 @@ export const HANDLED_VARIANTS: Readonly<Record<string, readonly string[]>> = {
 	Confidence: Object.keys(CONFIDENCE_LABELS),
 	ErrorCode: Object.keys(ERROR_CODE_LABELS),
 	EvidenceKind: Object.keys(EVIDENCE_KIND_LABELS),
+	EvidenceProvider: Object.keys(EVIDENCE_PROVIDER_LABELS),
 	FindingCategory: Object.keys(FINDING_CATEGORY_LABELS),
 	FindingState: Object.keys(FINDING_STATE_LABELS),
 	ProbeStatus: Object.keys(PROBE_STATUS_LABELS),

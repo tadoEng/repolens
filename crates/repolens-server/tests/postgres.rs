@@ -23,7 +23,9 @@ use repolens_core::RepositoryCoordinate;
 use repolens_server::contract::analysis::AnalysisState;
 use repolens_server::contract::analysis::RepositoryIdentity;
 use repolens_server::contract::error::{ApiError, ErrorCode};
-use repolens_server::contract::report::{Confidence, EvidenceSource, OverviewStatement, Report};
+use repolens_server::contract::report::{
+    Confidence, EvidenceProvider, EvidenceSource, OverviewStatement, Report,
+};
 use repolens_server::pipeline::Resolved;
 use repolens_server::store;
 use sqlx::postgres::PgPoolOptions;
@@ -95,8 +97,8 @@ fn report_for(id: Uuid, coordinate: &RepositoryCoordinate) -> Report {
         commit_sha: "a".repeat(40),
         tree_sha: "b".repeat(40),
         evidence_source: Some(EvidenceSource {
-            api: "github-rest".to_owned(),
-            version: "2026-03-10".to_owned(),
+            provider: EvidenceProvider::GithubRest,
+            api_version: "2026-03-10".to_owned(),
         }),
         analyzer_version: "0.1.0".to_owned(),
         ruleset_version: "2".to_owned(),

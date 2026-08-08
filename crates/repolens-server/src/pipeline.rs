@@ -1676,9 +1676,12 @@ mod tests {
         let source = report
             .evidence_source
             .expect("a report built by this analyzer always records where it read from");
-        assert_eq!(source.api, repolens_github::EVIDENCE_API);
         assert_eq!(
-            source.version,
+            source.provider,
+            crate::contract::report::EvidenceProvider::from(repolens_github::EVIDENCE_PROVIDER)
+        );
+        assert_eq!(
+            source.api_version,
             repolens_github::GITHUB_REST_API_VERSION,
             "the published version must be the one sent as X-GitHub-Api-Version"
         );

@@ -25,9 +25,9 @@ use repolens_server::contract::analysis::{
 use repolens_server::contract::error::{ApiError, ErrorCode};
 use repolens_server::contract::report::{
     AreaLineCount, CodeRole, CompositionExclusion, Confidence, Evidence, EvidenceKind,
-    EvidenceSource, Finding, FindingCategory, FindingState, LanguageLineCount, LargestSourceFile,
-    LargestSourceFiles, Limitation, LineCountSummary, LineRange, OverviewStatement, Report,
-    RoleLineCount, Severity,
+    EvidenceProvider, EvidenceSource, Finding, FindingCategory, FindingState, LanguageLineCount,
+    LargestSourceFile, LargestSourceFiles, Limitation, LineCountSummary, LineRange,
+    OverviewStatement, Report, RoleLineCount, Severity,
 };
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -302,8 +302,8 @@ fn report(composition: Option<LineCountSummary>, limitations: Vec<Limitation>) -
         commit_sha: COMMIT_SHA.to_owned(),
         tree_sha: TREE_SHA.to_owned(),
         evidence_source: Some(EvidenceSource {
-            api: "github-rest".to_owned(),
-            version: "2026-03-10".to_owned(),
+            provider: EvidenceProvider::GithubRest,
+            api_version: "2026-03-10".to_owned(),
         }),
         analyzer_version: "0.1.0".to_owned(),
         ruleset_version: "1".to_owned(),

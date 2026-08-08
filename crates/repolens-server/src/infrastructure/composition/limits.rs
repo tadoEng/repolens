@@ -100,7 +100,9 @@ pub mod names {
 
 #[cfg(test)]
 mod tests {
-    use crate::contract::report::{ComparisonEligibility, Limitation, Report, minimal_report};
+    use crate::contract::report::{
+        ComparisonEligibility, IneligibilityReason, Limitation, Report, minimal_report,
+    };
 
     /// Every limit name, paired with whether crossing it is decided by the
     /// repository or by something else.
@@ -182,8 +184,10 @@ mod tests {
             if !reproducible {
                 assert!(
                     matches!(
-                        eligibility,
-                        ComparisonEligibility::Ineligible { code: ref named, .. } if named == code
+                        &eligibility,
+                        ComparisonEligibility::Ineligible(
+                            IneligibilityReason::RuntimeDependent { code: named }
+                        ) if named == code
                     ),
                     "an ineligible report must name the limitation that made it so, got {eligibility:?}"
                 );

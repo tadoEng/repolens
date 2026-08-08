@@ -22,13 +22,20 @@
 	import CopyableSha from '$lib/components/primitives/CopyableSha.svelte';
 	import ExternalCommitLink from '$lib/components/primitives/ExternalCommitLink.svelte';
 	import { timestamp } from '$lib/contract/format';
-	import type { Report } from '@repolens/api-client';
+	import { describeEvidenceProvider, type Report } from '@repolens/api-client';
 
 	interface Props {
 		report: Report;
 	}
 
 	let { report }: Props = $props();
+
+	// Through the shared descriptor rather than a local map, so a provider the
+	// contract gains and this build has never seen renders as a labelled unknown
+	// instead of a raw wire token.
+	const provider = $derived(
+		report.evidence_source ? describeEvidenceProvider(report.evidence_source.provider) : null
+	);
 </script>
 
 <div class="report-header">
@@ -57,8 +64,8 @@
 		<div class="report-header__fact">
 			<dt>Evidence source</dt>
 			<dd>
-				{#if report.evidence_source}
-					{report.evidence_source.api} version {report.evidence_source.version}
+				{#if report.evidence_source && provider}
+					{provider.label} · API {report.evidence_source.api_version}
 				{:else}
 					<span class="report-header__unrecorded"
 						>Not recorded — this report predates the field</span

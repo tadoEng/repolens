@@ -45,7 +45,9 @@ pub use rest::{GitHubClientConfig, GitHubRestClient};
 use std::future::Future;
 use std::path::Path;
 
-use repolens_core::{CommitSha, ContentDigest, EvidenceSource, RepositoryCoordinate, TreeSha};
+use repolens_core::{
+    CommitSha, ContentDigest, EvidenceProvider, EvidenceSource, RepositoryCoordinate, TreeSha,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -62,12 +64,12 @@ use time::OffsetDateTime;
 /// ships, so this is a deliberate upgrade, never an incidental one.
 pub const GITHUB_REST_API_VERSION: &str = "2026-03-10";
 
-/// Identifier for this retrieval interface, as reports publish it.
+/// Which published interface this crate is.
 ///
 /// Names the *interface*, not the vendor: a local directory or an uploaded
-/// archive would be a different value here rather than a different field, which
-/// is the shape [`EvidenceSource`] was built for.
-pub const EVIDENCE_API: &str = "github-rest";
+/// archive would be a different variant rather than a different field, which is
+/// the shape [`EvidenceSource`] was built for.
+pub const EVIDENCE_PROVIDER: EvidenceProvider = EvidenceProvider::GithubRest;
 
 /// How evidence retrieved through this crate identifies itself.
 ///
@@ -78,7 +80,7 @@ pub const EVIDENCE_API: &str = "github-rest";
 /// the requests were never sent with.
 #[must_use]
 pub fn evidence_source() -> EvidenceSource {
-    EvidenceSource::new(EVIDENCE_API, GITHUB_REST_API_VERSION)
+    EvidenceSource::new(EVIDENCE_PROVIDER, GITHUB_REST_API_VERSION)
 }
 
 /// Repository metadata needed before an analysis can start.
@@ -493,7 +495,7 @@ mod tests {
         // nothing downstream could detect it.
         let source = super::evidence_source();
 
-        assert_eq!(source.api, super::EVIDENCE_API);
-        assert_eq!(source.version, GITHUB_REST_API_VERSION);
+        assert_eq!(source.provider, super::EVIDENCE_PROVIDER);
+        assert_eq!(source.api_version, GITHUB_REST_API_VERSION);
     }
 }

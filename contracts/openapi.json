@@ -662,21 +662,28 @@
           "REPOSITORY_METADATA"
         ]
       },
+      "EvidenceProvider": {
+        "type": "string",
+        "description": "Which interface an analysis read its evidence through.\n\nA closed enumeration, not a free string. This is published vocabulary that a\nclient switches on, so a value invented at a call site would silently extend\na public set — and the frontend's variant gate exists to make exactly that a\nbuild failure rather than an unlabelled string on screen.",
+        "enum": [
+          "GITHUB_REST"
+        ]
+      },
       "EvidenceSource": {
         "type": "object",
-        "description": "The retrieval interface an analysis read its evidence through.\n\nA wire mirror of [`repolens_core::EvidenceSource`], for the same reason\n[`RepositoryIdentity`] mirrors `RepositoryCoordinate`: the domain crate is\ndeliberately free of presentation dependencies, and `ToSchema` is one.\nConverted at this boundary rather than restated, so the two cannot drift\ninto naming different sources.\n\nTwo fields rather than one string because the pair answers two different\nquestions. GitHub isolates breaking changes into dated REST versions, so the\nsame commit read through two of them can yield different fields and\ntherefore different findings; and a future non-GitHub source is then a new\n`api` value rather than a new field.",
+        "description": "The retrieval interface an analysis read its evidence through.\n\nA wire mirror of [`repolens_core::EvidenceSource`], for the same reason\n[`RepositoryIdentity`] mirrors `RepositoryCoordinate`: the domain crate is\ndeliberately free of presentation dependencies, and `ToSchema` is one.\nConverted at this boundary rather than restated, so the two cannot drift\ninto naming different sources.\n\nTwo fields rather than one string because they answer different questions\nand are decided by different things. *Whose interface* is a choice this\nanalyzer makes and a client may branch on, so it is an enum; *which version\nof it* is a value the ingestion boundary pins, and GitHub isolates breaking\nchanges into dated versions, so the same commit read through two of them can\nyield different fields and therefore different findings.",
         "required": [
-          "api",
-          "version"
+          "provider",
+          "api_version"
         ],
         "properties": {
-          "api": {
-            "type": "string",
-            "description": "Identifier for the retrieval interface, e.g. `github-rest`."
-          },
-          "version": {
+          "api_version": {
             "type": "string",
             "description": "Version of that interface, e.g. `2026-03-10`."
+          },
+          "provider": {
+            "$ref": "#/components/schemas/EvidenceProvider",
+            "description": "Interface the evidence was retrieved through."
           }
         }
       },

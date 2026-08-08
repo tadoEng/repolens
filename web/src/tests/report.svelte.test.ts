@@ -1,5 +1,6 @@
 import {
 	COMPLETED_REPORT_FIXTURE,
+	EVIDENCE_PROVIDER_LABELS,
 	EVIDENCE_SOURCE_ABSENT_FIXTURE,
 	HANDLED_VARIANTS,
 	LOC_UNAVAILABLE_FIXTURE,
@@ -106,8 +107,11 @@ test('the report header names the API the evidence was read through', async () =
 	const text = screen.container.textContent ?? '';
 
 	expect(text).toContain('Evidence source');
-	expect(text).toContain(source!.api);
-	expect(text).toContain(source!.version);
+	// The label a reader recognises, not the wire token: `GITHUB_REST` is vocabulary for a
+	// client to switch on, and nobody calls it that out loud.
+	expect(text).toContain(EVIDENCE_PROVIDER_LABELS[source!.provider]);
+	expect(text).not.toContain(source!.provider);
+	expect(text).toContain(source!.api_version);
 });
 
 test('a report that never recorded its evidence source says so rather than hiding the row', async () => {
