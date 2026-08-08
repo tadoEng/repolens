@@ -1,4 +1,13 @@
-//! Tracing setup, shared by all three binaries.
+//! Tracing setup shared by all three binaries, and the in-process metrics the
+//! API records about itself.
+//!
+//! The two live together because they answer the same question from opposite
+//! ends: a log line says what happened to one request, a metric says what is
+//! happening to all of them. Neither leaves the process on its own.
+
+pub mod http;
+pub mod metrics;
+pub mod process;
 
 use tracing_subscriber::EnvFilter;
 

@@ -28,6 +28,8 @@ mod failure;
 use crate::contract;
 use crate::contract::error::ApiError;
 use crate::state::{AppState, BUILD_SHA};
+use crate::telemetry;
+use crate::telemetry::metrics::Metrics;
 
 /// Ceiling on request bodies. Every current and planned endpoint takes either
 /// nothing or one repository URL, so this is generous rather than tight.
@@ -371,6 +373,11 @@ pub fn build(
     state: AppState,
     cors_allowed_origin: Option<&str>,
 ) -> (Router, utoipa::openapi::OpenApi) {
+    // Taken before the state is moved into the router. The layer and any future
+    // handler that reads the figures then share one registry, which is the whole
+    // reason the registry lives on the state rather than being made here.
+    let metrics = state.metrics().clone();
+
     let (router, openapi) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(liveness))
         .routes(routes!(system_probe))
@@ -379,7 +386,7 @@ pub fn build(
         .split_for_parts();
 
     (
-        apply_layers(router, cors_allowed_origin, REQUEST_TIMEOUT),
+        apply_layers(router, cors_allowed_origin, REQUEST_TIMEOUT, &metrics),
         openapi,
     )
 }
@@ -399,10 +406,16 @@ pub fn build(
 /// `request_timeout` is a parameter for the same reason: asserting the timeout
 /// behaviour against the shipped 30 seconds would mean a 30-second test.
 /// [`build`] passes the production budget; nothing else should.
+///
+/// `metrics` is a parameter so a test can hold the same registry the stack
+/// records into and read it afterwards. Building one in here would leave the
+/// numbers unreachable from outside the router, which is the state this stack
+/// was in before the layer existed.
 pub fn apply_layers(
     router: Router,
     cors_allowed_origin: Option<&str>,
     request_timeout: Duration,
+    metrics: &Metrics,
 ) -> Router {
     // A statically hosted frontend calling this API is cross-origin, so the
     // browser blocks every request without this. Applied only when an exact
@@ -449,14 +462,28 @@ pub fn apply_layers(
         router
     };
 
-    // Order is inner-to-outer: body limit, timeout, panic capture, tracing. It
-    // is asserted by driving a real router, never by reading this builder.
+    // Order is inner-to-outer: body limit, timeout, panic capture, metrics,
+    // tracing. It is asserted by driving a real router, never by reading this
+    // builder.
     //
     // `envelope_timeouts` sits directly outside the timeout layer and nowhere
     // else. A timeout response is built by that layer without passing through
     // any extractor, so it is the one failure that has to be rewritten on the
     // way out rather than intercepted where it is produced; mounting the
     // rewrite here keeps its blast radius to exactly that layer.
+    //
+    // The metrics layer sits *outside* the panic layer, which is the position
+    // that decides what a `5xx` count means. Inside it, a panicking handler
+    // would unwind straight through the recording call and the request would
+    // vanish from the figures — leaving a dashboard whose error rate falls as
+    // the service breaks. Outside it, the panic has already become a `500`
+    // response and is counted as one. A timeout is counted for the same reason,
+    // as the `408` the layer below produced.
+    //
+    // Every layer here is applied through `Router::layer`, so all of them run
+    // after routing. That is what makes `MatchedPath` reachable from the
+    // recording middleware, and it is the difference between a bounded label set
+    // and one an anonymous caller writes.
     router
         .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT_BYTES))
         .layer(TimeoutLayer::with_status_code(
@@ -465,6 +492,10 @@ pub fn apply_layers(
         ))
         .layer(axum::middleware::map_response(failure::envelope_timeouts))
         .layer(CatchPanicLayer::custom(failure::PanicEnvelope))
+        .layer(axum::middleware::from_fn_with_state(
+            metrics.clone(),
+            telemetry::http::record,
+        ))
         .layer(TraceLayer::new_for_http())
 }
 
