@@ -25,8 +25,8 @@ pub mod rule;
 pub mod ruleset;
 
 pub use composition::{
-    CompositionLimitBreach, CompositionOutcome, LanguageComposition, RepositoryComposition,
-    RepositoryCompositionCounter,
+    CompositionExclusion, CompositionLimitBreach, CompositionOutcome, LanguageComposition,
+    RepositoryComposition, RepositoryCompositionCounter,
 };
 pub use digest::{ContentDigest, ContentDigestError};
 pub use evidence_input::{ContentVerdict, FileContent, RuleEvidence, Unverifiable};
