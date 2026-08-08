@@ -37,7 +37,8 @@ mod policy;
 mod rest;
 
 pub use policy::{
-    BlobSelection, FileSelection, SELECTION_POLICY_VERSION, SkipReason, SkippedPath, select_paths,
+    BlobSelection, FileSelection, SELECTION_POLICY_VERSION, SkipReason, SkippedPath,
+    describe_selection_policy, select_paths,
 };
 pub use rest::{GitHubClientConfig, GitHubRestClient};
 

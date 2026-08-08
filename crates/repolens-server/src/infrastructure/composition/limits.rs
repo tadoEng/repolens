@@ -82,7 +82,7 @@ pub mod names {
 
 #[cfg(test)]
 mod tests {
-    use crate::contract::report::{ComparisonEligibility, Limitation, Report};
+    use crate::contract::report::{ComparisonEligibility, Limitation, Report, minimal_report};
 
     /// Every limit name, paired with whether crossing it is decided by the
     /// repository or by the machine.
@@ -92,20 +92,24 @@ mod tests {
     /// answered when the ceiling is introduced rather than inferred later by
     /// whoever is debugging two reports that disagree.
     const CLASSIFIED: [(&str, bool); 6] = [
-        // Properties of the archive under a fixed versioned ceiling. An archive
-        // that holds more than the entry limit holds more than it every time.
-        (super::names::COMPRESSED_STREAM, true),
+        // Measured against archive *content* under a fixed ceiling. An archive
+        // holding more than the entry limit holds more than it every time.
         (super::names::DECOMPRESSED_STREAM, true),
         (super::names::ENTRY_COUNT, true),
-        (super::names::FILE_BYTES, true),
-        // Properties of the host. The same archive on a quieter machine, or one
-        // with a less contended volume, need not trip either of these.
+        // Measured against the compressed stream, whose byte length GitHub does
+        // not guarantee is stable for a fixed commit — so an archive sitting
+        // near this ceiling can legitimately fall either side of it.
+        (super::names::COMPRESSED_STREAM, false),
+        // Properties of the host.
         (super::names::DURATION, false),
         (super::names::EXTRACTION_STORAGE, false),
+        // Ends the run rather than skipping the file, and the entry's declared
+        // size is a property of the archive.
+        (super::names::FILE_BYTES, true),
     ];
 
     fn report_limited_by(code: &str) -> Report {
-        let mut report = crate::contract::report::minimal_report();
+        let mut report = minimal_report();
         report.limitations = vec![Limitation {
             code: code.to_owned(),
             explanation: "fixture".to_owned(),
@@ -115,10 +119,6 @@ mod tests {
 
     #[test]
     fn every_limit_name_is_classified_as_reproducible_or_not() {
-        // Guards the inventory itself: a name added to `names` with no row in
-        // CLASSIFIED would otherwise default to "reproducible" by silence,
-        // because `comparison_eligibility` only knows the codes it was told
-        // about. Silence is the wrong default for a determinism claim.
         let named = [
             super::names::COMPRESSED_STREAM,
             super::names::DECOMPRESSED_STREAM,
@@ -131,8 +131,7 @@ mod tests {
         for name in named {
             assert!(
                 CLASSIFIED.iter().any(|(code, _)| *code == name),
-                "{name} has no reproducibility classification; decide whether \
-                 crossing it is a property of the repository or of the host"
+                "{name} has no reproducibility classification; decide whether                  crossing it is a property of the repository or of the host"
             );
         }
         assert_eq!(CLASSIFIED.len(), named.len(), "CLASSIFIED has a stale row");
@@ -148,16 +147,15 @@ mod tests {
             assert_eq!(
                 eligibility.is_eligible(),
                 reproducible,
-                "{code}: infrastructure and contract disagree about whether this \
-                 outcome may be compared between runs"
+                "{code}: infrastructure and contract disagree about whether this                  outcome may be compared between runs"
             );
             if !reproducible {
-                assert_eq!(
-                    eligibility,
-                    ComparisonEligibility::Ineligible {
-                        code: code.to_owned()
-                    },
-                    "an ineligible report must name the limitation that made it so"
+                assert!(
+                    matches!(
+                        eligibility,
+                        ComparisonEligibility::Ineligible { code: ref named, .. } if named == code
+                    ),
+                    "an ineligible report must name the limitation that made it so, got {eligibility:?}"
                 );
             }
         }

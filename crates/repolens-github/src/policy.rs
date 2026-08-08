@@ -32,6 +32,38 @@ use crate::{BlobContent, RepositoryTree, TreeEntryKind};
 /// files are read plainly does.
 pub const SELECTION_POLICY_VERSION: &str = "1";
 
+/// The selection policy, rendered from the values that decide it.
+///
+/// The same device the exclusion and classification policies use, and for the
+/// same reason: a version constant asserting "bump me when the policy changes"
+/// is a request, not a mechanism. Nothing stopped a new source extension from
+/// changing which files are read on a real repository while
+/// [`SELECTION_POLICY_VERSION`] stayed at `1`, every test stayed green, and the
+/// reproducibility key stayed identical — two reports drawn from different
+/// evidence, claiming to be comparable.
+///
+/// Rendered from the arrays and budgets themselves rather than restated, so it
+/// cannot describe a policy other than the one applied. Order is included
+/// because it is policy here: it decides who gets the last slot when the
+/// selection budget runs out.
+#[must_use]
+pub fn describe_selection_policy() -> String {
+    use std::fmt::Write as _;
+
+    let mut rendered = String::new();
+    let _ = writeln!(rendered, "selection-policy {SELECTION_POLICY_VERSION}");
+    // Writing to a `String` cannot fail; results are discarded rather than
+    // unwrapped so this stays infallible.
+    let _ = writeln!(rendered, "named {}", NAMED_FILE_PATTERNS.join(" "));
+    let _ = writeln!(rendered, "manifests {}", MANIFEST_FILENAMES.join(" "));
+    let _ = writeln!(rendered, "extensions {}", SOURCE_EXTENSIONS.join(" "));
+    let _ = writeln!(rendered, "excluded-dirs {}", EXCLUDED_DIRECTORIES.join(" "));
+    let _ = writeln!(rendered, "max-selected {}", limits::MAX_SELECTED_FILES);
+    let _ = writeln!(rendered, "max-file-bytes {}", limits::MAX_FILE_BYTES);
+    let _ = writeln!(rendered, "max-total-bytes {}", limits::MAX_TOTAL_FILE_BYTES);
+    rendered
+}
+
 /// Files named directly by issue #4, in the order the issue lists them.
 ///
 /// Order is policy, not presentation: it decides who gets the last slot when
@@ -460,6 +492,35 @@ fn matches_pattern(pattern: &str, path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The selection policy exactly as version 1 defines it.
+    ///
+    /// Regenerate deliberately, never by pasting whatever the test printed:
+    /// a changed policy under an unchanged version is precisely the defect this
+    /// gate exists to catch, and updating the snapshot without bumping
+    /// [`SELECTION_POLICY_VERSION`] reintroduces it while turning the test
+    /// green.
+    const POLICY_SNAPSHOT: &str = "selection-policy 1
+named README* LICENSE* Cargo.toml Cargo.lock package.json pnpm-workspace.yaml svelte.config.* vite.config.* Dockerfile* diesel.toml .github/workflows/* docs/ARCHITECTURE* AGENTS.md CONTRIBUTING* SECURITY*
+manifests Cargo.toml package.json
+extensions c cc cpp cs go h hpp java js jsx kt php py rb rs sql svelte swift ts tsx
+excluded-dirs .git dist generated node_modules target third_party vendor
+max-selected 64
+max-file-bytes 1048576
+max-total-bytes 8388608
+";
+
+    #[test]
+    fn the_selection_policy_matches_the_version_it_is_published_under() {
+        assert_eq!(
+            super::describe_selection_policy(),
+            POLICY_SNAPSHOT,
+            "
+the selection policy changed. Update POLICY_SNAPSHOT *and* bump              SELECTION_POLICY_VERSION (currently {}) — selection decides which files              every finding is drawn from, so a changed policy under an unchanged version              lets two runs of one commit report different evidence while claiming to be              comparable.
+",
+            super::SELECTION_POLICY_VERSION
+        );
+    }
+
     use super::{
         FileSelection, SkipReason, is_implementation_candidate, matches_pattern, select_paths,
     };
