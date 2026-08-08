@@ -141,18 +141,48 @@ const RULES: &[Rule] = &[
         role: CodeRole::Tooling,
         matcher: Match::Segment(".github"),
     },
+    // Production, claimed positively and last.
+    //
+    // This rule exists because the residual became `Unclassified`. Without it
+    // every ordinary implementation file falls through to "we recognised
+    // nothing", and a report that classifies almost nothing is useless in the
+    // opposite direction from one that over-claims.
+    //
+    // `src/` is the convention Cargo and every JavaScript bundler share, and it
+    // is the one directory whose meaning is near-universal. It sits last so the
+    // narrower claims win: `web/src/tests/x.ts` is a test that happens to live
+    // under `src/`, and `crates/x/src/generated/y.rs` is generated.
+    //
+    // Anything outside a `src/` tree — a root manifest, a migration, a
+    // workflow — stays `Unclassified`, which is accurate. Those files are real
+    // and counted; what the policy declines to say is which of the contract's
+    // four roles they play.
+    Rule {
+        role: CodeRole::Production,
+        matcher: Match::Segment("src"),
+    },
 ];
 
 /// The role this path plays.
 ///
-/// [`CodeRole::Production`] is the residual: it is what a path is called when
-/// no rule claims it, not a positive finding about the file.
+/// The residual is [`CodeRole::Unclassified`], **not** `Production`.
+///
+/// An earlier revision returned `Production` here and called it "the label that
+/// asserts least". It is not: the contract defines `Production` as *ordinary
+/// implementation code*, which is a claim about the file, while the residual
+/// case is a statement about the analyzer — the policy recognised nothing.
+/// Collapsing the two makes the published production share read as far more
+/// certain than the classifier is, and the report is about to draw a
+/// percentage from it.
+///
+/// This is the same conflation the ruleset refuses one level up, where
+/// `MISSING` means "looked for and absent" and never "nobody opened the file".
 #[must_use]
 pub fn role_of(path: &Path) -> CodeRole {
     RULES
         .iter()
         .find(|rule| rule.matcher.matches(path))
-        .map_or(CodeRole::Production, |rule| rule.role)
+        .map_or(RESIDUAL_ROLE, |rule| rule.role)
 }
 
 /// The area a path belongs to — its first segment, or the repository root.
@@ -168,19 +198,45 @@ pub fn area_of(path: &Path) -> String {
         // A first segment with something after it is a directory.
         (Some(first), Some(_)) => format!("{}/", first.to_string_lossy()),
         // One component: a file sitting at the repository root.
-        _ => "(root)".to_owned(),
+        _ => ROOT_AREA.to_owned(),
     }
 }
 
 /// The policy's semantics, rendered for the drift gate.
+///
+/// Covers the **area** rule and the **residual** as well as the role rules.
+/// An earlier revision rendered only the rule list, which left two decisions
+/// that change published numbers outside the gate: `area_of` could switch from
+/// the first path segment to something else, and the residual could move
+/// between roles, both without failing a test or bumping the version.
 #[must_use]
 pub fn describe_policy() -> String {
     let mut rendered = format!("classification-policy {CLASSIFICATION_POLICY_VERSION}\n");
     for rule in RULES {
-        let _ = writeln!(rendered, "{:?} {}", rule.role, rule.matcher.expression());
+        let _ = writeln!(
+            rendered,
+            "role {:?} {}",
+            rule.role,
+            rule.matcher.expression()
+        );
     }
+    let _ = writeln!(rendered, "residual {RESIDUAL_ROLE:?}");
+    let _ = writeln!(rendered, "area {AREA_RULE}");
+    let _ = writeln!(rendered, "area-root {ROOT_AREA}");
     rendered
 }
+
+/// What a path is called when no rule claims it.
+///
+/// Named rather than inlined so [`describe_policy`] can state it and the drift
+/// gate can catch it moving.
+const RESIDUAL_ROLE: CodeRole = CodeRole::Unclassified;
+
+/// How [`area_of`] decides, in one line, for the drift gate.
+const AREA_RULE: &str = "first path segment";
+
+/// The area a file directly at the repository root belongs to.
+const ROOT_AREA: &str = "(root)";
 
 /// A repository-relative path with forward slashes, whatever the platform.
 fn normalise(path: &Path) -> String {
@@ -207,17 +263,21 @@ mod tests {
     /// test code.
     const POLICY_SNAPSHOT: &str = "\
 classification-policy 1
-Generated contracts/openapi.json
-Generated **/generated/**
-Test **/tests/**
-Test **/__tests__/**
-Test **/e2e/**
-Test *.test.*
-Test *.spec.*
-Tooling **/scripts/**
-Tooling **/examples/**
-Tooling **/benches/**
-Tooling **/.github/**
+role Generated contracts/openapi.json
+role Generated **/generated/**
+role Test **/tests/**
+role Test **/__tests__/**
+role Test **/e2e/**
+role Test *.test.*
+role Test *.spec.*
+role Tooling **/scripts/**
+role Tooling **/examples/**
+role Tooling **/benches/**
+role Tooling **/.github/**
+role Production **/src/**
+residual Unclassified
+area first path segment
+area-root (root)
 ";
 
     #[test]
@@ -276,17 +336,20 @@ Tooling **/.github/**
     fn a_directory_that_merely_contains_a_keyword_is_still_production() {
         // Segment matching, not substring: `testing-library` and `scriptorium`
         // are ordinary directory names.
-        for path in [
-            "testing-library/src/index.ts",
-            "src/scriptorium/main.rs",
-            "examples-archive/old.rs",
-        ] {
+        for path in ["testing-library/src/index.ts", "src/scriptorium/main.rs"] {
             assert_eq!(
                 role_of(Path::new(path)),
                 CodeRole::Production,
                 "{path} was misclassified"
             );
         }
+        // Outside a `src/` tree there is no positive claim to make, so the
+        // honest answer is that the policy does not know — not that this is a
+        // tooling directory because its name resembles one.
+        assert_eq!(
+            role_of(Path::new("examples-archive/old.rs")),
+            CodeRole::Unclassified
+        );
     }
 
     #[test]
@@ -313,13 +376,45 @@ Tooling **/.github/**
     }
 
     #[test]
-    fn production_is_the_residual_rather_than_a_finding() {
-        // A path nothing recognises is production. That is deliberate: it is
-        // the label that asserts least, so an unrecognised layout degrades to
-        // "ordinary code" instead of to a confident wrong category.
-        assert_eq!(
-            role_of(Path::new("some/unfamiliar/layout/thing.kt")),
-            CodeRole::Production
-        );
+    fn an_unrecognised_layout_is_unclassified_rather_than_production() {
+        /*
+         * The correction that reshaped this policy.
+         *
+         * An earlier revision returned `Production` here and called it "the
+         * label that asserts least". It is not: the contract defines
+         * `Production` as *ordinary implementation code*, a claim about the
+         * file, while this case is a statement about the analyzer — no rule
+         * recognised the path. Folding the second into the first makes the
+         * published production share read as far more certain than the
+         * classifier is, and the report draws a percentage from it.
+         *
+         * Same conflation the ruleset refuses one level up, where `MISSING`
+         * means "looked for and absent" and never "nobody opened the file".
+         */
+        for path in [
+            "some/unfamiliar/layout/thing.kt",
+            "migrations/0002_analyses.sql",
+            "Cargo.toml",
+        ] {
+            assert_eq!(
+                role_of(Path::new(path)),
+                CodeRole::Unclassified,
+                "{path} was given a role the policy cannot justify"
+            );
+        }
+    }
+
+    #[test]
+    fn production_is_claimed_positively_rather_than_left_over() {
+        // The other half of the same change. Making the residual
+        // `Unclassified` without this rule would leave every ordinary
+        // implementation file unclassified too — useless in the opposite
+        // direction from over-claiming.
+        for path in [
+            "crates/repolens-core/src/ruleset.rs",
+            "web/src/lib/auth/session.svelte.ts",
+        ] {
+            assert_eq!(role_of(Path::new(path)), CodeRole::Production, "{path}");
+        }
     }
 }

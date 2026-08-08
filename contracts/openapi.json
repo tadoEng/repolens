@@ -514,7 +514,8 @@
           "PRODUCTION",
           "TEST",
           "GENERATED",
-          "TOOLING"
+          "TOOLING",
+          "UNCLASSIFIED"
         ]
       },
       "CompositionExclusion": {
@@ -887,6 +888,7 @@
           "counter",
           "counter_version",
           "exclusion_policy_version",
+          "classification_policy_version",
           "total_files",
           "total_lines",
           "code_lines",
@@ -912,6 +914,10 @@
             "format": "int64",
             "description": "Blank lines.",
             "minimum": 0
+          },
+          "classification_policy_version": {
+            "type": "string",
+            "description": "Version of the policy that decided each file's role and area.\n\nSeparate from the exclusion policy because the two answer different\nquestions — what was left out, and what the rest *is* — and either can\nchange without the other. Both are needed before two composition\nresults may be compared: a changed classifier moves the production\nshare without any file changing."
           },
           "code_lines": {
             "type": "integer",

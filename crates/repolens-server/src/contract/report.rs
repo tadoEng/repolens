@@ -268,6 +268,18 @@ pub enum CodeRole {
     Generated,
     /// Examples, benchmarks, and developer tooling.
     Tooling,
+    /// The classifier recognised nothing about this path.
+    ///
+    /// Not a category of code — a statement about the analyzer. Roles are
+    /// decided from paths alone, and a repository laid out in a way the policy
+    /// has no rule for is one this product cannot classify rather than one that
+    /// is full of ordinary implementation code.
+    ///
+    /// Folding these into [`CodeRole::Production`] is what an earlier revision
+    /// did, and it makes the production share read as far more certain than the
+    /// classifier is. That is the same conflation as reporting `MISSING` for a
+    /// file nobody opened, one level up.
+    Unclassified,
 }
 
 /// Line counts for one role.
@@ -387,6 +399,14 @@ pub struct LineCountSummary {
     pub counter_version: String,
     /// Version of the exclusion policy applied.
     pub exclusion_policy_version: String,
+    /// Version of the policy that decided each file's role and area.
+    ///
+    /// Separate from the exclusion policy because the two answer different
+    /// questions — what was left out, and what the rest *is* — and either can
+    /// change without the other. Both are needed before two composition
+    /// results may be compared: a changed classifier moves the production
+    /// share without any file changing.
+    pub classification_policy_version: String,
     /// Files counted.
     pub total_files: u64,
     /// All physical lines.

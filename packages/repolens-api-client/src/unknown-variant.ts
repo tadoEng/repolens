@@ -162,7 +162,13 @@ export const CODE_ROLE_LABELS: Readonly<Record<CodeRole, string>> = {
 	// code as hand-written work overstates effort and understates how much of the
 	// repository is derived.
 	GENERATED: 'Generated',
-	TOOLING: 'Tooling'
+	TOOLING: 'Tooling',
+	// A statement about the analyzer, not a kind of code. Roles are decided from paths
+	// alone, so a repository laid out in a way the policy has no rule for is one this
+	// product cannot classify — not one full of ordinary implementation code. Reading
+	// "Unclassified" as a quiet synonym for production is exactly the over-claim the
+	// separate label exists to prevent.
+	UNCLASSIFIED: 'Unclassified'
 };
 
 export const FINDING_STATE_LABELS: Readonly<Record<FindingState, string>> = {

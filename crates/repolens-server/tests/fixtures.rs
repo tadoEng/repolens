@@ -215,6 +215,7 @@ fn composition() -> LineCountSummary {
         counter: "tokei".to_owned(),
         counter_version: "14.0.0".to_owned(),
         exclusion_policy_version: "1".to_owned(),
+        classification_policy_version: "1".to_owned(),
         total_files: 842,
         total_lines: 91_204,
         code_lines: 78_310,

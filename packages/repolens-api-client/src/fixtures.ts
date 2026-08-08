@@ -134,6 +134,7 @@ export const COMPLETED_REPORT_FIXTURE = {
 			counter: "tokei",
 			counter_version: "14.0.0",
 			exclusion_policy_version: "1",
+			classification_policy_version: "1",
 			total_files: 842,
 			total_lines: 91204,
 			code_lines: 78310,
