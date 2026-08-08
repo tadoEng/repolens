@@ -15,6 +15,23 @@ use serde::{Deserialize, Serialize};
 use crate::limits;
 use crate::{BlobContent, RepositoryTree, TreeEntryKind};
 
+/// Version of this selection policy, part of the reproducibility key.
+///
+/// Bump on any change to *which* files are chosen or *in what order*: the named
+/// patterns, the nested-manifest rules, the source extensions, the excluded
+/// directories, the per-file and total budgets, and the ordering that decides
+/// who gets the last slot when a budget runs out.
+///
+/// The module documentation above has always said that two analyses of one
+/// commit must choose the same files "or the reproducibility key becomes a
+/// claim the collector cannot honour". Until this constant existed, that
+/// sentence described an intention rather than a mechanism — selection could
+/// change, every version in the key could stay put, and two reports drawn from
+/// different evidence would claim to be comparable. The key's own membership
+/// test is *does changing this value change the report?*, and changing which
+/// files are read plainly does.
+pub const SELECTION_POLICY_VERSION: &str = "1";
+
 /// Files named directly by issue #4, in the order the issue lists them.
 ///
 /// Order is policy, not presentation: it decides who gets the last slot when

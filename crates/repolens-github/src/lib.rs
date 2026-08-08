@@ -36,7 +36,9 @@ mod payload;
 mod policy;
 mod rest;
 
-pub use policy::{BlobSelection, FileSelection, SkipReason, SkippedPath, select_paths};
+pub use policy::{
+    BlobSelection, FileSelection, SELECTION_POLICY_VERSION, SkipReason, SkippedPath, select_paths,
+};
 pub use rest::{GitHubClientConfig, GitHubRestClient};
 
 use std::future::Future;
