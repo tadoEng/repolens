@@ -207,9 +207,18 @@
 	</ReportSection>
 
 	<ReportSection id="composition" title="Composition">
+		<!--
+			Commit and tree are handed down rather than looked up, because the section leads with
+			the reproducibility key: counter and policy version alone say how the count was made,
+			not what it was made of. They also appear in `ReportHeader` six sections above — the
+			duplication is the point, since Composition is the part people screenshot and a figure
+			separated from its key is the one that gets misquoted.
+		-->
 		<CompositionSection
 			composition={load.report.composition}
 			limitations={load.report.limitations}
+			commitSha={load.report.commit_sha}
+			treeSha={load.report.tree_sha}
 		/>
 	</ReportSection>
 

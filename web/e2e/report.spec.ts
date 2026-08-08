@@ -33,10 +33,12 @@ test.describe('a completed report', () => {
 		await expect(page.getByRole('heading', { level: 1 })).toHaveText('Architecture report');
 		await expect(page.getByText('rust-lang/crates.io').first()).toBeVisible();
 
-		// The exact analyzed commit, short on screen and complete in `title`.
-		await expect(page.locator(`[title="${REPORT.commit_sha}"]`)).toHaveText(
-			REPORT.commit_sha.slice(0, 7)
-		);
+		// The exact analyzed commit, short on screen and complete in `title`. Scoped to the
+		// report header because Composition now leads with the same reproducibility key —
+		// deliberately, so a screenshot of that section carries what makes it checkable.
+		await expect(
+			page.locator('.report-header').locator(`[title="${REPORT.commit_sha}"]`)
+		).toHaveText(REPORT.commit_sha.slice(0, 7));
 
 		// Analyzer and ruleset versions are first-class, not a footnote.
 		await expect(page.getByText(`version ${REPORT.analyzer_version}`)).toBeVisible();
@@ -183,6 +185,67 @@ test.describe('a completed report', () => {
 		// The exclusion ledger survives alongside them; it is required in addition to the
 		// five views, never in place of largest files.
 		await expect(composition.getByText('Excluded: 126', { exact: false })).toBeVisible();
+	});
+
+	test('composition leads with the reproducibility key, not with the chart', async ({ page }) => {
+		await page.goto(REPORT_URL);
+		await expect(page.getByRole('heading', { name: 'Composition' })).toBeVisible();
+
+		const composition = page.locator('section[aria-labelledby="composition"]');
+		const key = composition.locator('.composition__key');
+
+		/*
+		 * Four values, and all four have to be there: commit and tree say what was counted,
+		 * counter version and policy version say how. Any three of them describe a number
+		 * nobody else can reproduce, which is the difference between evidence and a claim.
+		 */
+		await expect(key.locator(`[title="${REPORT.commit_sha}"]`)).toHaveText(
+			REPORT.commit_sha.slice(0, 7)
+		);
+		await expect(key.locator(`[title="${REPORT.tree_sha}"]`)).toHaveText(
+			REPORT.tree_sha.slice(0, 7)
+		);
+		await expect(key).toContainText(REPORT.composition?.counter ?? '');
+		await expect(key).toContainText(REPORT.composition?.counter_version ?? '');
+		await expect(key).toContainText(`version ${REPORT.composition?.exclusion_policy_version}`);
+
+		// And it reads before the first table, because the ask was totals-then-detail and a
+		// key that arrives after the numbers it qualifies has already failed to qualify them.
+		const order = await composition.evaluate((section) => {
+			const nodes = [...section.querySelectorAll('.composition__key, table')];
+			return nodes.map((node) => (node.tagName === 'TABLE' ? 'table' : 'key'));
+		});
+		expect(order[0]).toBe('key');
+	});
+
+	test('every LOC bar is drawn against a visible track', async ({ page }) => {
+		await page.goto(REPORT_URL);
+		await expect(page.getByRole('heading', { name: 'Composition' })).toBeVisible();
+
+		/*
+		 * A bar states a part. Without the unfilled rail behind it there is nothing on screen
+		 * saying what the whole would be, so a 4% row and a 62% row are two lengths a reader
+		 * has to calibrate by eye against the column edge. The track is the other half of the
+		 * reading, and it is drawn from a token rather than implied.
+		 */
+		const measured = await page
+			.locator('.metric-cell')
+			.first()
+			.evaluate((node) => {
+				const fill = getComputedStyle(node, '::before');
+				const track = getComputedStyle(node, '::after');
+				return {
+					fill: Number.parseFloat(fill.inlineSize),
+					track: Number.parseFloat(track.inlineSize),
+					fillColor: fill.backgroundColor,
+					trackColor: track.backgroundColor
+				};
+			});
+
+		expect(measured.track).toBeGreaterThan(measured.fill);
+		expect(measured.fill).toBeGreaterThan(0);
+		// Two different steps: a track painted in the fill's colour states 100% everywhere.
+		expect(measured.trackColor).not.toBe(measured.fillColor);
 	});
 
 	test('has exactly one h1 and skips no heading levels', async ({ page }) => {

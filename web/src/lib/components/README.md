@@ -65,6 +65,17 @@ Each of these exists because the obvious alternative ships a specific defect.
   that _contains_ the number clips a 0.4% language's own label, and an inline `style`
   attribute is blocked by our `style-src 'self'` policy (via `style-src-attr`), which would
   leave every bar at zero width in production only. `e2e/report.spec.ts` asserts both.
+- **A bar has a lane and a track, and neither is decoration.** The fill sits _beneath_ the
+  number rather than behind it, because a fill that ends inside the digits cuts them in half
+  at every proportion that is not near 0 or 1. The `::after` track states what 100% would be,
+  so a 4% row is read against the same rail as a 62% one. Both are asserted, and the two
+  steps come from `--chart-fill` / `--chart-track` — measured against the surface, never
+  eyeballed, with the reasoning in `tokens.css`.
+- **Composition leads with the reproducibility key.** Commit, tree, counter version and
+  exclusion-policy version open the section, before the totals and long before the tables.
+  Those four are what make a count arguable rather than merely quotable, and the commit and
+  tree deliberately repeat `ReportHeader` — a figure separated from its key is the one that
+  gets misquoted.
 - **`CodeRole` is rendered wherever a file is listed.** A 1,980-line generated client at the
   top of the largest-files list is not the same fact as a 1,980-line hand-written module, and
   omitting the column is the most common way that list misleads. Every role is styled

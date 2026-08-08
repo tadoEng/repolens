@@ -77,6 +77,39 @@
   --status-unable-to-verify-border: #ddcda6;
 
   /* ---------------------------------------------------------------------- */
+  /* Chart marks — the LOC bars, and nothing else                            */
+  /* ---------------------------------------------------------------------- */
+  /*
+	 * Two values, because a proportion needs a whole as well as a part. The track
+	 * states what 100% would be, so a 4% row is read against the same rail as a
+	 * 62% one instead of against nothing at all — which is what the bars did while
+	 * they were drawn in `--surface-2` at 1.16:1 and were, in practice, invisible.
+	 *
+	 * Deliberately not `--accent`. The accent means link, focus, or the one primary
+	 * action, and a bar is none of those. These sit on the accent's own hue at a
+	 * step chosen for a *mark* against the surface rather than for text, so the
+	 * section stays one hue family without spending the accent on decoration.
+	 *
+	 * The steps are measured, not eyeballed. Both fills clear every computable check
+	 * a chart mark has to hold — lightness band, chroma floor, and 3:1 against the
+	 * surface — at 4.21:1 on light and 5.32:1 on dark, and they sit 3.0:1 and 3.5:1
+	 * off their own track, which is what makes part and whole separable rather than
+	 * merely different. The dark fill's chroma was raised to 0.11 for that reason:
+	 * at 0.085 it was under the floor below which a hue stops reading as a hue.
+	 *
+	 * The track is deliberately quieter than a step of a *sequential ramp* is allowed
+	 * to be. It is not a data step — nothing is encoded in it — it is the unfilled
+	 * part of a meter, and pushing it to the 2:1 a ramp's light end must hold would
+	 * cost the separation from the fill that the whole reading depends on.
+	 */
+  --chart-track: #cdddea;
+  --chart-fill: #3f81b1;
+
+  /* Thin, because the bar is a reading aid under a number and not the subject of
+	 * the page. One value, so the two places that draw a bar cannot drift apart. */
+  --chart-bar-size: 6px;
+
+  /* ---------------------------------------------------------------------- */
   /* Typography                                                              */
   /* ---------------------------------------------------------------------- */
   /*
@@ -187,6 +220,11 @@
     --accent: #6faed9;
     --accent-hover: #8ec3e6;
     --accent-contrast: #0d1013;
+
+    /* Its own steps, not the light ones dimmed: a mark on a near-black surface
+	   needs to rise off it, where the light mark needs to sit down onto white. */
+    --chart-track: #273843;
+    --chart-fill: #4091c4;
 
     --status-detected-bg: #16241c;
     --status-detected-fg: #8fcfa8;

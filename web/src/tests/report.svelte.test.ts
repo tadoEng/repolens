@@ -5,6 +5,7 @@ import {
 	type Finding,
 	type LargestSourceFile,
 	type LineCountSummary,
+	type Report,
 	type RoleLineCount
 } from '@repolens/api-client';
 import { createRawSnippet } from 'svelte';
@@ -48,6 +49,28 @@ const COMPOSITION = REPORT.composition;
 function renderCategory(findings: Finding[], emptyLabel = 'this category') {
 	return render(CategoryFindings, {
 		props: { findings, expanded: new SvelteSet<string>(), emptyLabel }
+	});
+}
+
+/**
+ * The composition section wired as the route wires it.
+ *
+ * The commit and tree SHAs come from the report rather than from `LineCountSummary`, so the
+ * section takes them as props: they are half of the reproducibility key its header states.
+ * Read from the fixture here for the same reason as everywhere else in this file — a literal
+ * would be a second copy of the contract.
+ */
+function renderComposition(
+	composition: LineCountSummary | null,
+	report: Pick<Report, 'limitations' | 'commit_sha' | 'tree_sha'> = REPORT
+) {
+	return render(CompositionSection, {
+		props: {
+			composition,
+			limitations: report.limitations,
+			commitSha: report.commit_sha,
+			treeSha: report.tree_sha
+		}
 	});
 }
 
@@ -320,9 +343,7 @@ test('a null composition renders UNABLE_TO_VERIFY with the report-level limitati
 	// every assertion below pass while testing something else entirely.
 	expect(report.composition).toBeNull();
 
-	const screen = await render(CompositionSection, {
-		props: { composition: report.composition, limitations: report.limitations }
-	});
+	const screen = await renderComposition(report.composition, report);
 
 	const text = screen.container.textContent ?? '';
 
@@ -339,9 +360,7 @@ test('a null composition renders UNABLE_TO_VERIFY with the report-level limitati
 });
 
 test('the composition disclaimer is in-section, not a footnote', async () => {
-	const screen = await render(CompositionSection, {
-		props: { composition: COMPOSITION, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(COMPOSITION);
 
 	const disclaimer = screen.getByText(
 		'RepoLens measures repository composition, not productivity or code quality.'
@@ -354,9 +373,7 @@ test('the composition disclaimer is in-section, not a footnote', async () => {
 });
 
 test('the role table carries an embedded share bar beside the percentage', async () => {
-	const screen = await render(CompositionSection, {
-		props: { composition: COMPOSITION, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(COMPOSITION);
 
 	// One bar cell per role row, and it is not one of the comparative charts.
 	const shares = [...screen.container.querySelectorAll('.composition__share')];
@@ -398,9 +415,7 @@ test('a sub-one-percent role keeps a readable percentage', async () => {
 		]
 	};
 
-	const screen = await render(CompositionSection, {
-		props: { composition: tiny, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(tiny);
 
 	const values = [...screen.container.querySelectorAll('.composition__share-value')].map(
 		(node) => node.textContent?.trim() ?? ''
@@ -411,9 +426,7 @@ test('a sub-one-percent role keeps a readable percentage', async () => {
 });
 
 test('exactly two views draw bars, and they are the two comparative ones', async () => {
-	const screen = await render(CompositionSection, {
-		props: { composition: COMPOSITION, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(COMPOSITION);
 
 	// The exclusion table lives inside a closed disclosure; open it so every table is in
 	// the DOM and the count means what it says.
@@ -453,9 +466,7 @@ test('the role table renders production, test and generated from the contract', 
 	// Guards the fixture: an empty `roles` array would make every assertion below vacuous.
 	expect(COMPOSITION.roles.length).toBeGreaterThan(0);
 
-	const screen = await render(CompositionSection, {
-		props: { composition: COMPOSITION, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(COMPOSITION);
 
 	const table = [...screen.container.querySelectorAll('table')].find((candidate) =>
 		candidate.querySelector('caption')?.textContent?.includes('Code lines by role')
@@ -485,9 +496,7 @@ test('the largest-file list names each role, so generated code is not read as ha
 	// without a GENERATED row the assertion would pass while proving nothing.
 	expect(generated, 'the fixture must contain a GENERATED largest file').toBeDefined();
 
-	const screen = await render(CompositionSection, {
-		props: { composition: COMPOSITION, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(COMPOSITION);
 
 	const table = [...screen.container.querySelectorAll('table')].find((candidate) =>
 		candidate.querySelector('caption')?.textContent?.includes('largest source files')
@@ -532,9 +541,7 @@ test('an unrecognised role is named rather than dropped or crashed on', async ()
 		largest_files: [...COMPOSITION.largest_files, file]
 	};
 
-	const screen = await render(CompositionSection, {
-		props: { composition: future, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(future);
 	const text = screen.container.textContent ?? '';
 
 	// Named, in a fallback that cannot be mistaken for a role this build understands.
@@ -549,9 +556,7 @@ test('a role breakdown that leaves code unattributed says so, without inventing 
 		roles: [{ role: 'PRODUCTION', files: 604, code_lines: 63400 }]
 	};
 
-	const screen = await render(CompositionSection, {
-		props: { composition: partial, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(partial);
 	const text = (screen.container.textContent ?? '').replace(/\s+/g, ' ');
 
 	expect(text).toContain('The listed roles account for 63,400 of 78,310 counted code lines');
@@ -575,18 +580,14 @@ test('a breakdown summing to more than its own total is reported, not clamped aw
 		]
 	};
 
-	const screen = await render(CompositionSection, {
-		props: { composition: impossible, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(impossible);
 	const text = (screen.container.textContent ?? '').replace(/\s+/g, ' ');
 
 	expect(text).toContain('does not add up');
 	expect(text).toContain('The per-area rows total 103,600 code lines, more than the 78,310');
 
 	// And a consistent response says nothing of the sort.
-	const clean = await render(CompositionSection, {
-		props: { composition: COMPOSITION, limitations: REPORT.limitations }
-	});
+	const clean = await renderComposition(COMPOSITION);
 	expect(clean.container.textContent).not.toContain('does not add up');
 });
 
@@ -604,9 +605,7 @@ test('the bar is a background layer and cannot size the text of a sub-1% languag
 		]
 	};
 
-	const screen = await render(CompositionSection, {
-		props: { composition: tiny, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(tiny);
 
 	const row = [...screen.container.querySelectorAll('tr')].find((candidate) =>
 		candidate.querySelector('th')?.textContent?.includes('Nix')
@@ -632,12 +631,48 @@ test('the bar is a background layer and cannot size the text of a sub-1% languag
 	const value = cell.querySelector('span') as HTMLElement;
 	expect(value.getBoundingClientRect().width).toBeGreaterThan(8);
 	expect(cell.scrollWidth).toBeLessThanOrEqual(cell.clientWidth + 1);
+
+	/*
+	 * ...and it does not run through the digits. The bar sits in its own lane beneath the
+	 * value rather than behind it, which is what stops a fill ending mid-number — `10,|670`
+	 * at 14% — and is the whole reason the bar is a rule and not a highlighted cell.
+	 *
+	 * Measured as two boxes that must not meet, rather than as a padding value: the padding
+	 * is the mechanism, and asserting on the mechanism would keep passing if the bar were
+	 * moved back over the text by some other means.
+	 */
+	const cellStyle = getComputedStyle(cell);
+	const box = cell.getBoundingClientRect();
+	// The bar's containing block is the cell's padding box, so the border comes off first.
+	const paddingBoxBottom = box.bottom - Number.parseFloat(cellStyle.borderBottomWidth);
+	const barBottom = paddingBoxBottom - Number.parseFloat(bar.bottom);
+	const barTop = barBottom - Number.parseFloat(bar.blockSize);
+
+	expect(barTop).toBeGreaterThan(0);
+	expect(value.getBoundingClientRect().bottom).toBeLessThanOrEqual(barTop);
+});
+
+test('the bars are drawn against a visible track, so a part has a whole', async () => {
+	const screen = await renderComposition(COMPOSITION);
+
+	const cell = screen.container.querySelector('.metric-cell') as HTMLElement;
+	const fill = getComputedStyle(cell, '::before');
+	const track = getComputedStyle(cell, '::after');
+
+	// A bar with no rail behind it is a length the reader has to calibrate by eye against
+	// the column edge. The track states what 100% would be, in its own step.
+	expect(track.content).not.toBe('none');
+	expect(Number.parseFloat(track.inlineSize)).toBeGreaterThan(Number.parseFloat(fill.inlineSize));
+	expect(track.backgroundColor).not.toBe(fill.backgroundColor);
+
+	// The role table's share bar is the same mechanism, so the two cannot drift apart.
+	const share = screen.container.querySelector('.composition__share') as HTMLElement;
+	expect(getComputedStyle(share, '::after').backgroundColor).toBe(track.backgroundColor);
+	expect(getComputedStyle(share, '::before').backgroundColor).toBe(fill.backgroundColor);
 });
 
 test('a breakdown that does not sum to the total surfaces the shortfall', async () => {
-	const screen = await render(CompositionSection, {
-		props: { composition: COMPOSITION, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(COMPOSITION);
 
 	// Rust + TypeScript is 67,640 of 78,310 code lines. Scaling proportions to the listed
 	// rows would report Rust at 71% instead of 62% — a number the reader cannot check.
@@ -652,9 +687,7 @@ test('a breakdown that does not sum to the total surfaces the shortfall', async 
 });
 
 test('the exclusion ledger reports counted, excluded and unable to classify', async () => {
-	const screen = await render(CompositionSection, {
-		props: { composition: COMPOSITION, limitations: REPORT.limitations }
-	});
+	const screen = await renderComposition(COMPOSITION);
 
 	const ledger = screen.container.querySelector('.composition__ledger') as HTMLElement;
 	const text = ledger.textContent ?? '';
