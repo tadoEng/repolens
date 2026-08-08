@@ -454,6 +454,58 @@ pub struct OverviewStatement {
     pub confidence: Confidence,
 }
 
+/// Which interface an analysis read its evidence through.
+///
+/// A closed enumeration, not a free string. This is published vocabulary that a
+/// client switches on, so a value invented at a call site would silently extend
+/// a public set — and the frontend's variant gate exists to make exactly that a
+/// build failure rather than an unlabelled string on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EvidenceProvider {
+    /// GitHub's REST API.
+    GithubRest,
+}
+
+/// The retrieval interface an analysis read its evidence through.
+///
+/// A wire mirror of [`repolens_core::EvidenceSource`], for the same reason
+/// [`RepositoryIdentity`] mirrors `RepositoryCoordinate`: the domain crate is
+/// deliberately free of presentation dependencies, and `ToSchema` is one.
+/// Converted at this boundary rather than restated, so the two cannot drift
+/// into naming different sources.
+///
+/// Two fields rather than one string because they answer different questions
+/// and are decided by different things. *Whose interface* is a choice this
+/// analyzer makes and a client may branch on, so it is an enum; *which version
+/// of it* is a value the ingestion boundary pins, and GitHub isolates breaking
+/// changes into dated versions, so the same commit read through two of them can
+/// yield different fields and therefore different findings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct EvidenceSource {
+    /// Interface the evidence was retrieved through.
+    pub provider: EvidenceProvider,
+    /// Version of that interface, e.g. `2026-03-10`.
+    pub api_version: String,
+}
+
+impl From<repolens_core::EvidenceProvider> for EvidenceProvider {
+    fn from(provider: repolens_core::EvidenceProvider) -> Self {
+        match provider {
+            repolens_core::EvidenceProvider::GithubRest => Self::GithubRest,
+        }
+    }
+}
+
+impl From<repolens_core::EvidenceSource> for EvidenceSource {
+    fn from(source: repolens_core::EvidenceSource) -> Self {
+        Self {
+            provider: source.provider.into(),
+            api_version: source.api_version,
+        }
+    }
+}
+
 /// A complete report for one repository at one commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Report {
@@ -467,6 +519,20 @@ pub struct Report {
     /// Root tree the collectors walked. Part of the reproducibility key, since
     /// two commits sharing a tree yield identical evidence.
     pub tree_sha: String,
+    /// Retrieval interface and version the evidence came through.
+    ///
+    /// **Null only when the report predates this field.** Every report written
+    /// by this build carries one; a document already in the store does not, and
+    /// backfilling it would mean rewriting a report to say something it never
+    /// recorded — which the `reports` table forbids in as many words, and which
+    /// would be inference dressed as evidence. The pinned API version has in
+    /// fact never changed, and that is exactly what makes the inference
+    /// tempting and still not a thing the document says.
+    ///
+    /// Required-but-nullable, like `composition`, so a consumer has to handle
+    /// the absence rather than discover it.
+    #[schema(required)]
+    pub evidence_source: Option<EvidenceSource>,
     /// Analyzer version that produced this report. First-class, not a footnote.
     pub analyzer_version: String,
     /// Ruleset version evaluated. First-class, not a footnote.
@@ -588,15 +654,32 @@ const RUNTIME_DEPENDENT_LIMITATIONS: [&str; 7] = [
 ];
 
 /// Why a report may not be compared byte for byte with another.
+///
+/// Each variant carries what makes it a reason. A single shared `code` field
+/// would have to be absent for the one case that has no limitation behind it,
+/// and a type permitting `code: None` on a limitation-derived reason describes a
+/// state that cannot happen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IneligibilityReason {
-    /// A condition this build knows to depend on something other than the
+    /// A limitation this build knows to depend on something other than the
     /// repository: the machine, the network, or the archive representation the
     /// evidence arrived in.
-    RuntimeDependent,
+    RuntimeDependent {
+        /// The limitation code.
+        code: String,
+    },
     /// A limitation code this build does not classify. Ineligible by default:
     /// an unknown condition is not evidence of reproducibility.
-    Unclassified,
+    Unclassified {
+        /// The unrecognised limitation code.
+        code: String,
+    },
+    /// A semantic input to the reproducibility key that this report never
+    /// recorded, so two payloads cannot be shown to share it.
+    UnrecordedKeyInput {
+        /// Report field that is null.
+        field: &'static str,
+    },
 }
 
 /// Whether two reports sharing a reproducibility key may be compared byte for
@@ -612,14 +695,9 @@ pub enum ComparisonEligibility {
     /// Every limitation is a property of the repository under fixed versioned
     /// limits, so another run with the same key must produce the same payload.
     Eligible,
-    /// Something in this report was not decided by the repository alone.
-    Ineligible {
-        /// The limitation code that made it so.
-        code: String,
-        /// Whether this build recognises that code as transient, or simply does
-        /// not classify it.
-        reason: IneligibilityReason,
-    },
+    /// Something in this report was not decided by the repository alone, or the
+    /// report does not record enough to say that it was.
+    Ineligible(IneligibilityReason),
 }
 
 impl ComparisonEligibility {
@@ -651,6 +729,25 @@ impl Report {
     /// repository did not decide.
     #[must_use]
     pub fn comparison_eligibility(&self) -> ComparisonEligibility {
+        // Checked before the limitations, because it is a different question and
+        // a stronger one. The limitation scan asks whether anything that
+        // *happened* during the run was decided by something other than the
+        // repository. This asks whether the report says enough to know what it
+        // was asked to do at all: `evidence_source` is a semantic input to the
+        // reproducibility key, and two payloads that cannot be shown to share
+        // one cannot be compared for having produced the same thing.
+        //
+        // The reports this catches are real and already stored: they were
+        // written before the analyzer published where it read from. Their
+        // limitations are all ordinary and bounded, so a scan of codes alone
+        // calls them eligible — which is a claim of determinism resting on an
+        // input nobody recorded.
+        if self.evidence_source.is_none() {
+            return ComparisonEligibility::Ineligible(IneligibilityReason::UnrecordedKeyInput {
+                field: "evidence_source",
+            });
+        }
+
         let finding_limitations = self
             .findings
             .iter()
@@ -661,15 +758,14 @@ impl Report {
             .chain(finding_limitations)
             .find(|limitation| !REPRODUCIBLE_LIMITATIONS.contains(&limitation.code.as_str()))
             .map_or(ComparisonEligibility::Eligible, |limitation| {
-                let reason = if RUNTIME_DEPENDENT_LIMITATIONS.contains(&limitation.code.as_str()) {
-                    IneligibilityReason::RuntimeDependent
-                } else {
-                    IneligibilityReason::Unclassified
-                };
-                ComparisonEligibility::Ineligible {
-                    code: limitation.code.clone(),
-                    reason,
-                }
+                let code = limitation.code.clone();
+                ComparisonEligibility::Ineligible(
+                    if RUNTIME_DEPENDENT_LIMITATIONS.contains(&limitation.code.as_str()) {
+                        IneligibilityReason::RuntimeDependent { code }
+                    } else {
+                        IneligibilityReason::Unclassified { code }
+                    },
+                )
             })
     }
 
@@ -735,6 +831,10 @@ pub(crate) fn minimal_report() -> Report {
         },
         commit_sha: "0".repeat(40),
         tree_sha: "1".repeat(40),
+        evidence_source: Some(EvidenceSource {
+            provider: EvidenceProvider::GithubRest,
+            api_version: "2026-03-10".into(),
+        }),
         analyzer_version: "1".into(),
         ruleset_version: "1".into(),
         completed_at: OffsetDateTime::UNIX_EPOCH,
@@ -779,10 +879,9 @@ mod tests {
         assert!(!eligibility.is_eligible());
         assert_eq!(
             eligibility,
-            ComparisonEligibility::Ineligible {
+            ComparisonEligibility::Ineligible(IneligibilityReason::RuntimeDependent {
                 code: "CONTENTS_NOT_COLLECTED".to_owned(),
-                reason: IneligibilityReason::RuntimeDependent,
-            }
+            })
         );
     }
 
@@ -795,10 +894,9 @@ mod tests {
 
         assert_eq!(
             eligibility,
-            ComparisonEligibility::Ineligible {
+            ComparisonEligibility::Ineligible(IneligibilityReason::Unclassified {
                 code: "SOMETHING_ADDED_LATER".to_owned(),
-                reason: IneligibilityReason::Unclassified,
-            },
+            }),
             "an unrecognised limitation must not silently mean reproducible"
         );
     }
@@ -849,10 +947,9 @@ mod tests {
         ] {
             assert_eq!(
                 limited(&[code]).comparison_eligibility(),
-                ComparisonEligibility::Ineligible {
+                ComparisonEligibility::Ineligible(IneligibilityReason::RuntimeDependent {
                     code: code.to_owned(),
-                    reason: IneligibilityReason::RuntimeDependent,
-                },
+                }),
                 "{code} is measured before admission, against the archive rather than the \
                  repository"
             );
@@ -972,30 +1069,87 @@ mod tests {
         assert!(parsed.is_err(), "an over-long list must be rejected");
     }
 
+    /// A document shaped like the ones already in `reports.document`: written
+    /// before `evidence_source` existed, so the key is **absent** rather than
+    /// null.
+    ///
+    /// Built by removing the key from a generated document rather than by
+    /// hand-writing JSON, for the reason the fixtures are generated too: a
+    /// literal here would be a second definition of the report shape, and it
+    /// would keep passing after the rest of the contract moved underneath it.
+    fn legacy_document() -> serde_json::Value {
+        let mut document = serde_json::to_value(minimal_report()).expect("a report serializes");
+        let removed = document
+            .as_object_mut()
+            .expect("a report is a JSON object")
+            .remove("evidence_source");
+
+        assert!(
+            removed.is_some(),
+            "the field must exist to be removed, or this fixture proves nothing"
+        );
+        document
+    }
+
     #[test]
-    fn a_null_composition_is_serialized_rather_than_omitted() {
-        // `UNABLE_TO_VERIFY` composition must be visible to the client as an
-        // explicit null, not an absent key it can overlook.
-        let report = Report {
-            analysis_id: Uuid::nil(),
-            repository: RepositoryIdentity {
-                owner: "o".into(),
-                name: "n".into(),
-            },
-            commit_sha: "0".repeat(40),
-            tree_sha: "1".repeat(40),
-            analyzer_version: "0.1.0".into(),
-            ruleset_version: "1".into(),
-            completed_at: OffsetDateTime::UNIX_EPOCH,
-            overview: vec![],
-            findings: vec![],
-            composition: None,
-            limitations: vec![],
-        };
+    fn a_report_stored_before_the_field_existed_still_loads() {
+        /*
+         * The case the nullable field is *for*, and the one a `None -> null`
+         * test does not reach. `load_report` runs `serde_json::from_value` over
+         * whatever was written years ago; if an absent key were a
+         * deserialization error rather than `None`, every historical report
+         * would answer 500 and the nullability would be decoration.
+         *
+         * Asserted rather than assumed from serde's treatment of `Option`,
+         * because that behaviour is a property of the derive rather than
+         * something this contract states, and a future `deny_unknown_fields` or
+         * a hand-written impl would change it silently.
+         */
+        let report: Report =
+            serde_json::from_value(legacy_document()).expect("a stored report must still load");
+
+        assert_eq!(report.evidence_source, None);
+    }
+
+    #[test]
+    fn a_report_that_never_recorded_its_source_is_not_comparable() {
+        // Fail closed, and for a different reason than any limitation code.
+        // Nothing *went wrong* in this run: its limitations are ordinary and
+        // bounded, so a scan of codes alone calls it eligible. What is missing
+        // is a semantic input to the key — two payloads that cannot be shown to
+        // have been read through the same API cannot be compared for having
+        // produced the same thing.
+        let report: Report = serde_json::from_value(legacy_document()).expect("a stored report");
+        assert!(report.limitations.is_empty(), "no limitation explains this");
+
+        assert_eq!(
+            report.comparison_eligibility(),
+            ComparisonEligibility::Ineligible(IneligibilityReason::UnrecordedKeyInput {
+                field: "evidence_source",
+            }),
+            "a report that never said what it read through cannot claim to match another"
+        );
+    }
+
+    #[test]
+    fn a_null_required_field_is_serialized_rather_than_omitted() {
+        // Both nullable fields carry the same contract: `UNABLE_TO_VERIFY`
+        // composition and a report written before the evidence source was
+        // published must reach the client as explicit nulls, not as absent keys
+        // it can overlook. An omitted key is indistinguishable from a client
+        // that forgot to read one.
+        let mut report = minimal_report();
+        report.composition = None;
+        report.evidence_source = None;
 
         let json = serde_json::to_value(&report).unwrap();
-        assert!(json.get("composition").is_some());
-        assert!(json["composition"].is_null());
+        for field in ["composition", "evidence_source"] {
+            assert!(
+                json.get(field).is_some_and(serde_json::Value::is_null),
+                "{field} must serialize as an explicit null, got {:?}",
+                json.get(field)
+            );
+        }
     }
 
     /// A report with every analytical field fixed, so only the execution
@@ -1003,19 +1157,8 @@ mod tests {
     fn report_with_execution(analysis_id: Uuid, completed_at: OffsetDateTime) -> Report {
         Report {
             analysis_id,
-            repository: RepositoryIdentity {
-                owner: "rust-lang".into(),
-                name: "crates.io".into(),
-            },
-            commit_sha: "0".repeat(40),
-            tree_sha: "1".repeat(40),
-            analyzer_version: "0.1.0".into(),
-            ruleset_version: "1".into(),
             completed_at,
-            overview: vec![],
-            findings: vec![],
-            composition: None,
-            limitations: vec![],
+            ..minimal_report()
         }
     }
 
@@ -1069,15 +1212,42 @@ mod tests {
         // The reproducibility key itself must survive. A payload that dropped
         // these would compare equal for two genuinely different analyses, which
         // is a worse failure than comparing unequal for the same one.
+        //
+        // `evidence_source` belongs to this list and not the one above, and the
+        // distinction is the whole reason the list exists: it records what the
+        // analysis was asked to read through, not what this execution happened
+        // to be. Two reports drawn through different API versions are two
+        // different analyses, and a payload that dropped the field would call
+        // them the same one.
         for field in [
             "repository",
             "commit_sha",
             "tree_sha",
+            "evidence_source",
             "analyzer_version",
             "ruleset_version",
         ] {
             assert!(object.contains_key(field), "{field} must be compared");
         }
+    }
+
+    #[test]
+    fn a_changed_evidence_source_changes_the_payload() {
+        // Containment is not enough on its own: a field present but constant
+        // would satisfy the check above while still failing to distinguish two
+        // analyses. This is the direction that proves the value participates.
+        let baseline = report_with_execution(Uuid::nil(), OffsetDateTime::UNIX_EPOCH);
+        let mut rewound = report_with_execution(Uuid::nil(), OffsetDateTime::UNIX_EPOCH);
+        rewound.evidence_source = Some(EvidenceSource {
+            provider: EvidenceProvider::GithubRest,
+            api_version: "2022-11-28".into(),
+        });
+
+        assert_ne!(
+            baseline.analytical_payload().unwrap(),
+            rewound.analytical_payload().unwrap(),
+            "the same commit read through a different API version is a different analysis"
+        );
     }
 
     #[test]

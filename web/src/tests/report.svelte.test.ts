@@ -1,5 +1,7 @@
 import {
 	COMPLETED_REPORT_FIXTURE,
+	EVIDENCE_PROVIDER_LABELS,
+	EVIDENCE_SOURCE_ABSENT_FIXTURE,
 	HANDLED_VARIANTS,
 	LOC_UNAVAILABLE_FIXTURE,
 	type Finding,
@@ -92,6 +94,43 @@ test('the report header carries commit, tree, analyzer and ruleset versions', as
 
 	const time = screen.container.querySelector('time');
 	expect(time?.getAttribute('datetime')).toBe(REPORT.completed_at);
+});
+
+test('the report header names the API the evidence was read through', async () => {
+	// The same commit read through two dated REST versions can yield different fields and
+	// therefore different findings, so which one produced this report is part of what makes
+	// it checkable — not provenance trivia.
+	const source = REPORT.evidence_source;
+	expect(source, 'the fixture must carry an evidence source to assert on').toBeTruthy();
+
+	const screen = await render(ReportHeader, { props: { report: REPORT } });
+	const text = screen.container.textContent ?? '';
+
+	expect(text).toContain('Evidence source');
+	// The label a reader recognises, not the wire token: `GITHUB_REST` is vocabulary for a
+	// client to switch on, and nobody calls it that out loud.
+	expect(text).toContain(EVIDENCE_PROVIDER_LABELS[source!.provider]);
+	expect(text).not.toContain(source!.provider);
+	expect(text).toContain(source!.api_version);
+});
+
+test('a report that never recorded its evidence source says so rather than hiding the row', async () => {
+	// Reports already in the store predate the field, and the absence is rendered on
+	// purpose. Dropping the row would turn "not recorded" into "nothing to record" — the
+	// substitution of absence for evidence that this whole report is built to refuse.
+	const unsourced = EVIDENCE_SOURCE_ABSENT_FIXTURE.report;
+	expect(
+		unsourced.evidence_source,
+		'the fixture must be the one whose evidence source is null'
+	).toBeNull();
+
+	const screen = await render(ReportHeader, { props: { report: unsourced } });
+	const text = screen.container.textContent ?? '';
+
+	expect(text).toContain('Evidence source');
+	expect(text).toContain('Not recorded');
+	// The rest of the header is unaffected by the absence of one fact.
+	expect(text).toContain(`version ${unsourced.analyzer_version}`);
 });
 
 test('the report header links to the exact analyzed commit', async () => {

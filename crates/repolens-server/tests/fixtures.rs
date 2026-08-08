@@ -24,9 +24,10 @@ use repolens_server::contract::analysis::{
 };
 use repolens_server::contract::error::{ApiError, ErrorCode};
 use repolens_server::contract::report::{
-    AreaLineCount, CodeRole, CompositionExclusion, Confidence, Evidence, EvidenceKind, Finding,
-    FindingCategory, FindingState, LanguageLineCount, LargestSourceFile, LargestSourceFiles,
-    Limitation, LineCountSummary, LineRange, OverviewStatement, Report, RoleLineCount, Severity,
+    AreaLineCount, CodeRole, CompositionExclusion, Confidence, Evidence, EvidenceKind,
+    EvidenceProvider, EvidenceSource, Finding, FindingCategory, FindingState, LanguageLineCount,
+    LargestSourceFile, LargestSourceFiles, Limitation, LineCountSummary, LineRange,
+    OverviewStatement, Report, RoleLineCount, Severity,
 };
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -300,6 +301,10 @@ fn report(composition: Option<LineCountSummary>, limitations: Vec<Limitation>) -
         repository: repository(),
         commit_sha: COMMIT_SHA.to_owned(),
         tree_sha: TREE_SHA.to_owned(),
+        evidence_source: Some(EvidenceSource {
+            provider: EvidenceProvider::GithubRest,
+            api_version: "2026-03-10".to_owned(),
+        }),
         analyzer_version: "0.1.0".to_owned(),
         ruleset_version: "1".to_owned(),
         completed_at: UPDATED_AT,
@@ -503,6 +508,14 @@ fn fixtures() -> Vec<(&'static str, String)> {
                     .to_owned(),
         }],
     );
+    // A report written before the analyzer published where its evidence came
+    // from. Nothing produces one now, and the store still holds them — so the
+    // frontend has to render the absence rather than assume the key is there,
+    // and a fixture is how that stays true.
+    let unsourced_report = Report {
+        evidence_source: None,
+        ..report(Some(composition()), vec![])
+    };
 
     let render = |value: &dyn erased::Erased| value.to_pretty();
 
@@ -533,6 +546,13 @@ fn fixtures() -> Vec<(&'static str, String)> {
             render(&Fixture {
                 analysis: &completed,
                 report: Some(&no_composition_report),
+            }),
+        ),
+        (
+            "evidence-source-absent.json",
+            render(&Fixture {
+                analysis: &completed,
+                report: Some(&unsourced_report),
             }),
         ),
     ]

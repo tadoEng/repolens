@@ -45,7 +45,9 @@ pub use rest::{GitHubClientConfig, GitHubRestClient};
 use std::future::Future;
 use std::path::Path;
 
-use repolens_core::{CommitSha, ContentDigest, RepositoryCoordinate, TreeSha};
+use repolens_core::{
+    CommitSha, ContentDigest, EvidenceProvider, EvidenceSource, RepositoryCoordinate, TreeSha,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -61,6 +63,25 @@ use time::OffsetDateTime;
 /// Previous versions stay supported for at least 24 months after a successor
 /// ships, so this is a deliberate upgrade, never an incidental one.
 pub const GITHUB_REST_API_VERSION: &str = "2026-03-10";
+
+/// Which published interface this crate is.
+///
+/// Names the *interface*, not the vendor: a local directory or an uploaded
+/// archive would be a different variant rather than a different field, which is
+/// the shape [`EvidenceSource`] was built for.
+pub const EVIDENCE_PROVIDER: EvidenceProvider = EvidenceProvider::GithubRest;
+
+/// How evidence retrieved through this crate identifies itself.
+///
+/// Lives here, at the ingestion boundary, rather than at the contract that
+/// publishes it. The same reason [`ContentDigest`] is produced here and merely
+/// carried by the report: a value spelled independently in two places does not
+/// disagree until integration, and this one would disagree by naming a version
+/// the requests were never sent with.
+#[must_use]
+pub fn evidence_source() -> EvidenceSource {
+    EvidenceSource::new(EVIDENCE_PROVIDER, GITHUB_REST_API_VERSION)
+}
 
 /// Repository metadata needed before an analysis can start.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,5 +485,17 @@ mod tests {
             "sending the version GitHub already defaults to would make the \
              header pointless and hide an accidental downgrade"
         );
+    }
+
+    #[test]
+    fn the_published_evidence_source_is_the_version_the_requests_carry() {
+        // The whole reason this is built here rather than at the contract: a
+        // report claiming `2026-03-10` while the client sent something else
+        // would be a false statement about which API produced the evidence, and
+        // nothing downstream could detect it.
+        let source = super::evidence_source();
+
+        assert_eq!(source.provider, super::EVIDENCE_PROVIDER);
+        assert_eq!(source.api_version, GITHUB_REST_API_VERSION);
     }
 }
