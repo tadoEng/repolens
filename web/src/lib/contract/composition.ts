@@ -103,17 +103,32 @@ export interface RoleRow {
  * share column states exactly and a bar only approximates.
  *
  * No synthesised remainder row here, unlike the language and area breakdowns. `CodeRole` is
- * a closed contract enum, and appending a sixth pseudo-role for whatever the policy did not
- * attribute would put a value on screen that the API can never send. The shortfall is
+ * a closed contract enum, and appending a pseudo-role for whatever the policy did not
+ * attribute would put a value on screen that the API can never send. A genuine shortfall is
  * reported as a sentence by `roleCoverage` instead.
+ *
+ * `UNCLASSIFIED` is dropped when it is zero, and only then. The other roles describe code —
+ * `TEST` at zero says the repository has no tests, which is worth a row. `UNCLASSIFIED`
+ * describes the *classifier*: at zero it says the policy accounted for everything, which is
+ * the expected case and adds nothing to read. Above zero it is evidence, and it stays in
+ * the table rather than moving to prose, because it participates in the denominator.
+ *
+ * **Shares are never renormalised over the remaining rows.** Every proportion stays against
+ * `code_lines`, the total counted code. Rebasing them after dropping a row would let a
+ * repository with 30% unattributed code display four roles summing to 100% — the same
+ * uncertainty-hiding that making `Production` the residual used to do, moved into the
+ * presentation layer.
  */
 export function roleRows(composition: LineCountSummary): RoleRow[] {
-	return composition.roles.map((role) => ({
-		role: role.role,
-		files: role.files,
-		codeLines: role.code_lines,
-		proportion: share(role.code_lines, composition.code_lines)
-	}));
+	return composition.roles
+		.filter((role) => role.role !== 'UNCLASSIFIED' || role.code_lines > 0)
+		.map((role) => ({
+			role: role.role,
+			files: role.files,
+			codeLines: role.code_lines,
+			// Denominator is the server's own total, not the sum of the rows kept above.
+			proportion: share(role.code_lines, composition.code_lines)
+		}));
 }
 
 /** How much of the counted code the role breakdown accounts for. */
