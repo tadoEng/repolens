@@ -36,6 +36,17 @@ pub const MAX_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 /// Bounds the *iteration*, not the extraction. A tarball of ten million empty
 /// files breaches no byte ceiling at all — every entry is zero-length — and
 /// still costs an inode apiece and an unbounded walk.
+///
+/// Counted per tar entry and *before* admission, so directories, links, every
+/// entry the extractor goes on to refuse, and the top-level prefix directory
+/// GitHub wraps an archive in are all inside the figure. It is therefore a
+/// control on the tarball rather than a count of the repository's paths, which
+/// is why crossing it leaves a report ineligible for comparison.
+///
+/// Contrast [`MAX_FILE_BYTES`], which is checked *after* admission: only a
+/// regular file the analysis would have counted can breach that one, which is
+/// what keeps it a fact about the repository. Deriving an entry ceiling from an
+/// admitted-path count would move this one across the same line.
 pub const MAX_ENTRIES: usize = 200_000;
 
 /// Bytes accepted from any single entry.
@@ -101,24 +112,25 @@ mod tests {
     ///
     /// The question a row answers is not "is this ceiling fixed?" — every
     /// ceiling here is fixed — but "is the quantity it measures a property of
-    /// the repository?". The two stream ceilings have fixed values and measure
-    /// GitHub's archive representation, which is why they read `false`.
+    /// the repository?". For the archive ceilings that reduces to *where in
+    /// `extract_to` the measurement is taken*: everything counted before
+    /// `admit` is a measurement of the tarball, and only what is checked after
+    /// it is a measurement of the repository.
     const CLASSIFIED: [(&str, bool); 6] = [
-        // Measured against the tree: one archive entry per path, and an entry's
-        // declared size is the file's own byte count. A commit with more paths
-        // than the walk accepts has more than it every time.
-        (super::names::ENTRY_COUNT, true),
-        // Ends the run rather than skipping the file, and the entry's declared
-        // size is a property of the file.
+        // The one archive ceiling checked after admission, so nothing but a
+        // regular file the analysis would have counted can breach it — and a
+        // regular file's declared size is its own byte count.
         (super::names::FILE_BYTES, true),
-        // Measured against the archive stream rather than the repository, and
-        // GitHub guarantees neither stream's byte length is stable for a fixed
-        // commit. The decompressed figure is counted between the gzip decoder
-        // and the tar parser, so it carries tar headers and block padding —
-        // representation, not content. An archive sitting near either ceiling
-        // can legitimately fall either side of it.
+        // Measured before admission, against GitHub's archive representation,
+        // for which nothing is guaranteed stable at a fixed commit. The
+        // decompressed figure is counted between the gzip decoder and the tar
+        // parser, so it carries tar headers and block padding; the entry count
+        // is incremented per tar entry, so it carries directories, links,
+        // refused entries and the prefix directory. An archive sitting near any
+        // of these can legitimately fall either side of it.
         (super::names::COMPRESSED_STREAM, false),
         (super::names::DECOMPRESSED_STREAM, false),
+        (super::names::ENTRY_COUNT, false),
         // Properties of the host.
         (super::names::DURATION, false),
         (super::names::EXTRACTION_STORAGE, false),

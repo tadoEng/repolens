@@ -516,14 +516,15 @@ const EXECUTION_METADATA_FIELDS: [&str; 2] = ["analysis_id", "completed_at"];
 ///
 /// Every entry is a claim that the same commit produces the same outcome. A
 /// tree that exceeds the traversal bound exceeds it every time; a file over the
-/// per-blob cap is over it every time; an archive holding more than the entry
-/// limit holds more than it every time.
+/// per-blob cap is over it every time.
 ///
-/// The claim has to survive one further question: *is the quantity measured
-/// against the repository, or against the representation it arrived in?* Both
-/// archive stream ceilings failed that question and sit in
-/// [`RUNTIME_DEPENDENT_LIMITATIONS`] instead.
-const REPRODUCIBLE_LIMITATIONS: [&str; 13] = [
+/// The claim has to survive one further question, and the archive ceilings are
+/// where it kept failing: *is the quantity measured against the repository, or
+/// against the representation it arrived in?* For those, the answer is decided
+/// by **where in the extraction the measurement is taken** — everything counted
+/// before an entry is admitted measures the tarball, whatever the name suggests
+/// about repositories, and sits in [`RUNTIME_DEPENDENT_LIMITATIONS`] instead.
+const REPRODUCIBLE_LIMITATIONS: [&str; 12] = [
     // Bounds applied to the repository, decided by its own shape.
     "TREE_TRUNCATED",
     "BOUNDED_FILE_SELECTION",
@@ -539,14 +540,13 @@ const REPRODUCIBLE_LIMITATIONS: [&str; 13] = [
     // Content outcomes that are properties of the bytes, not of the fetch.
     "FILE_NOT_DECODABLE",
     "FILE_TRUNCATED",
-    // One archive entry per path in the tree, so this counts the repository
-    // rather than the packaging: a commit with more paths than the walk accepts
-    // has more than it every time.
-    "ARCHIVE_ENTRY_COUNT_LIMIT",
-    // The entry's own declared size — the file's bytes, not the archive's.
-    // Ends the run rather than skipping the file, deliberately: a count that
-    // quietly means "counted, minus whatever we choked on" is the failure LOC
-    // reporting is most prone to.
+    // The only archive ceiling checked *after* admission, which is what keeps
+    // it a fact about the repository: a directory or a link declaring an absurd
+    // size is refused as what it is, so nothing but a regular file the analysis
+    // would have counted can breach this, and a regular file's declared size is
+    // its own byte count. Ends the run rather than skipping the file,
+    // deliberately: a count that quietly means "counted, minus whatever we
+    // choked on" is the failure LOC reporting is most prone to.
     "ARCHIVE_FILE_SIZE_LIMIT",
 ];
 
@@ -558,7 +558,7 @@ const REPRODUCIBLE_LIMITATIONS: [&str; 13] = [
 /// that on its own — but to tell a reader *why* a report is ineligible. An
 /// unrecognised code is also ineligible, and saying so honestly ("this build
 /// has not classified it") is different from claiming to know it is transient.
-const RUNTIME_DEPENDENT_LIMITATIONS: [&str; 6] = [
+const RUNTIME_DEPENDENT_LIMITATIONS: [&str; 7] = [
     // A retrieval that failed this time and may succeed next time. This one
     // predates composition: the pipeline deliberately continues without
     // contents rather than failing the analysis, so a completed report already
@@ -568,18 +568,23 @@ const RUNTIME_DEPENDENT_LIMITATIONS: [&str; 6] = [
     // Host conditions.
     "ARCHIVE_DURATION_LIMIT",
     "EXTRACTION_STORAGE_LIMIT",
-    // Both archive stream ceilings, and for one reason: each is measured
-    // against GitHub's archive *representation* rather than against repository
-    // content, and GitHub guarantees neither is byte-stable for a fixed commit.
+    // Every archive ceiling measured before an entry is admitted, and for one
+    // reason: each is taken against GitHub's archive *representation* rather
+    // than against repository content, and GitHub guarantees none of it is
+    // stable for a fixed commit.
     //
-    // The compressed one is whatever gzip emitted. The decompressed one is
-    // counted between the decoder and the tar parser, so tar headers and block
-    // padding are inside the figure — it is the right control for a
-    // decompression bomb, which is about what the machine must hold, and it is
-    // not a count of the repository's own bytes. An archive near either ceiling
-    // can legitimately fall on both sides of it across two runs of one commit.
+    // The compressed figure is whatever gzip emitted. The decompressed figure
+    // is counted between the decoder and the tar parser, so tar headers and
+    // block padding are inside it. The entry count is incremented per tar entry
+    // before `admit` runs, so directories, links, refused entries and the
+    // top-level prefix directory are inside it. All three are the right
+    // controls for a hostile archive, which is about what the machine must pull
+    // through and walk — and none of them is a count of the repository. An
+    // archive near any of these ceilings can legitimately fall on both sides of
+    // it across two runs of one commit.
     "ARCHIVE_COMPRESSED_LIMIT",
     "ARCHIVE_DECOMPRESSED_LIMIT",
+    "ARCHIVE_ENTRY_COUNT_LIMIT",
 ];
 
 /// Why a report may not be compared byte for byte with another.
@@ -809,7 +814,7 @@ mod tests {
                 "TREE_TRUNCATED",
                 "BOUNDED_FILE_SELECTION",
                 "FILE_SKIPPED_TOO_LARGE",
-                "ARCHIVE_ENTRY_COUNT_LIMIT",
+                "ARCHIVE_FILE_SIZE_LIMIT",
             ])
             .comparison_eligibility()
             .is_eligible()
@@ -817,31 +822,49 @@ mod tests {
     }
 
     #[test]
-    fn an_archive_stream_ceiling_is_not_a_measurement_of_the_repository() {
+    fn an_archive_ceiling_is_reproducible_only_where_it_measures_an_admitted_file() {
         /*
-         * Both stream ceilings were once treated as properties of the archive's
-         * content, and the decompressed one survived a round of review that way
-         * because "512 MiB of decoded bytes" reads like a fact about the
-         * repository. It is not. The counter sits between the gzip decoder and
-         * the tar parser, so what it measures is GitHub's tar framing —
-         * headers, block padding, entry order — for which there is no
-         * byte-stability guarantee, exactly as there is none for the compressed
-         * length.
+         * Each of these read like a property of the repository, and each was
+         * classified that way at some point. "512 MiB of decoded bytes" and
+         * "200,000 entries" both sound like facts about a commit. Neither is:
+         * the byte counter sits between the gzip decoder and the tar parser, so
+         * it carries tar framing, and `examined` is incremented per tar entry
+         * before `admit` runs, so it carries directories, links, refused
+         * entries and the prefix directory GitHub wraps the archive in.
          *
-         * Fail-closed classification decided *which set* a code belongs to. It
-         * cannot tell whether the quantity being classified is canonical, and
-         * that question has to be asked at the point the measurement is taken.
+         * The last one survives because of *where* it is checked, not what it
+         * is called: the file-size ceiling is applied after admission, so only
+         * a regular file the analysis would have counted can breach it, and a
+         * regular file's declared size is its own byte count.
+         *
+         * That is the whole lesson of this pair of reviews. Fail-closed
+         * classification decides which set a code belongs to; it cannot tell
+         * whether the quantity being classified is canonical, and that question
+         * has to be asked at the line where the measurement is taken.
          */
-        for code in ["ARCHIVE_COMPRESSED_LIMIT", "ARCHIVE_DECOMPRESSED_LIMIT"] {
+        for code in [
+            "ARCHIVE_COMPRESSED_LIMIT",
+            "ARCHIVE_DECOMPRESSED_LIMIT",
+            "ARCHIVE_ENTRY_COUNT_LIMIT",
+        ] {
             assert_eq!(
                 limited(&[code]).comparison_eligibility(),
                 ComparisonEligibility::Ineligible {
                     code: code.to_owned(),
                     reason: IneligibilityReason::RuntimeDependent,
                 },
-                "{code} is measured against the archive representation, not the repository"
+                "{code} is measured before admission, against the archive rather than the \
+                 repository"
             );
         }
+
+        assert!(
+            limited(&["ARCHIVE_FILE_SIZE_LIMIT"])
+                .comparison_eligibility()
+                .is_eligible(),
+            "a ceiling measured on an admitted file is a fact about the repository, and \
+             classifying every archive ceiling as transient would discard that"
+        );
     }
 
     #[test]
