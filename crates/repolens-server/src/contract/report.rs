@@ -518,7 +518,12 @@ const EXECUTION_METADATA_FIELDS: [&str; 2] = ["analysis_id", "completed_at"];
 /// tree that exceeds the traversal bound exceeds it every time; a file over the
 /// per-blob cap is over it every time; an archive holding more than the entry
 /// limit holds more than it every time.
-const REPRODUCIBLE_LIMITATIONS: [&str; 14] = [
+///
+/// The claim has to survive one further question: *is the quantity measured
+/// against the repository, or against the representation it arrived in?* Both
+/// archive stream ceilings failed that question and sit in
+/// [`RUNTIME_DEPENDENT_LIMITATIONS`] instead.
+const REPRODUCIBLE_LIMITATIONS: [&str; 13] = [
     // Bounds applied to the repository, decided by its own shape.
     "TREE_TRUNCATED",
     "BOUNDED_FILE_SELECTION",
@@ -534,22 +539,26 @@ const REPRODUCIBLE_LIMITATIONS: [&str; 14] = [
     // Content outcomes that are properties of the bytes, not of the fetch.
     "FILE_NOT_DECODABLE",
     "FILE_TRUNCATED",
-    // Archive ceilings measured against archive content.
-    "ARCHIVE_DECOMPRESSED_LIMIT",
+    // One archive entry per path in the tree, so this counts the repository
+    // rather than the packaging: a commit with more paths than the walk accepts
+    // has more than it every time.
     "ARCHIVE_ENTRY_COUNT_LIMIT",
-    // The entry's own declared size. Ends the run rather than skipping the
-    // file, deliberately: a count that quietly means "counted, minus whatever
-    // we choked on" is the failure LOC reporting is most prone to.
+    // The entry's own declared size — the file's bytes, not the archive's.
+    // Ends the run rather than skipping the file, deliberately: a count that
+    // quietly means "counted, minus whatever we choked on" is the failure LOC
+    // reporting is most prone to.
     "ARCHIVE_FILE_SIZE_LIMIT",
 ];
 
-/// Codes this build knows to be decided by the machine or the network.
+/// Codes this build knows to be decided by something other than the
+/// repository: the machine, the network, or the shape of the archive GitHub
+/// delivered.
 ///
 /// Not consulted to decide eligibility — [`REPRODUCIBLE_LIMITATIONS`] does
 /// that on its own — but to tell a reader *why* a report is ineligible. An
 /// unrecognised code is also ineligible, and saying so honestly ("this build
 /// has not classified it") is different from claiming to know it is transient.
-const RUNTIME_DEPENDENT_LIMITATIONS: [&str; 5] = [
+const RUNTIME_DEPENDENT_LIMITATIONS: [&str; 6] = [
     // A retrieval that failed this time and may succeed next time. This one
     // predates composition: the pipeline deliberately continues without
     // contents rather than failing the analysis, so a completed report already
@@ -559,15 +568,26 @@ const RUNTIME_DEPENDENT_LIMITATIONS: [&str; 5] = [
     // Host conditions.
     "ARCHIVE_DURATION_LIMIT",
     "EXTRACTION_STORAGE_LIMIT",
-    // Measured against a stream whose byte length GitHub does not guarantee is
-    // stable for a fixed commit, so a near-ceiling archive can fall either side.
+    // Both archive stream ceilings, and for one reason: each is measured
+    // against GitHub's archive *representation* rather than against repository
+    // content, and GitHub guarantees neither is byte-stable for a fixed commit.
+    //
+    // The compressed one is whatever gzip emitted. The decompressed one is
+    // counted between the decoder and the tar parser, so tar headers and block
+    // padding are inside the figure — it is the right control for a
+    // decompression bomb, which is about what the machine must hold, and it is
+    // not a count of the repository's own bytes. An archive near either ceiling
+    // can legitimately fall on both sides of it across two runs of one commit.
     "ARCHIVE_COMPRESSED_LIMIT",
+    "ARCHIVE_DECOMPRESSED_LIMIT",
 ];
 
 /// Why a report may not be compared byte for byte with another.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IneligibilityReason {
-    /// A condition this build knows to depend on the machine or the network.
+    /// A condition this build knows to depend on something other than the
+    /// repository: the machine, the network, or the archive representation the
+    /// evidence arrived in.
     RuntimeDependent,
     /// A limitation code this build does not classify. Ineligible by default:
     /// an unknown condition is not evidence of reproducibility.
@@ -610,10 +630,10 @@ impl Report {
     /// its reproducibility key.
     ///
     /// Decided from the limitations the report actually carries, not from
-    /// whether `composition` is `null`. An archive that exceeds a fixed
-    /// decompressed-byte ceiling exceeds it every time, so that outcome is as
-    /// reproducible as a successful count. Treating every `UNABLE_TO_VERIFY` as
-    /// non-reproducible would discard the deterministic majority of them.
+    /// whether `composition` is `null`. A tree that exceeds the traversal bound
+    /// exceeds it every time, so that outcome is as reproducible as a complete
+    /// walk. Treating every `UNABLE_TO_VERIFY` as non-reproducible would
+    /// discard the deterministic majority of them.
     ///
     /// **Fails closed.** Only codes on the allowlist keep a report eligible;
     /// anything unrecognised makes it ineligible and says so. A limitation
@@ -789,11 +809,39 @@ mod tests {
                 "TREE_TRUNCATED",
                 "BOUNDED_FILE_SELECTION",
                 "FILE_SKIPPED_TOO_LARGE",
-                "ARCHIVE_DECOMPRESSED_LIMIT",
+                "ARCHIVE_ENTRY_COUNT_LIMIT",
             ])
             .comparison_eligibility()
             .is_eligible()
         );
+    }
+
+    #[test]
+    fn an_archive_stream_ceiling_is_not_a_measurement_of_the_repository() {
+        /*
+         * Both stream ceilings were once treated as properties of the archive's
+         * content, and the decompressed one survived a round of review that way
+         * because "512 MiB of decoded bytes" reads like a fact about the
+         * repository. It is not. The counter sits between the gzip decoder and
+         * the tar parser, so what it measures is GitHub's tar framing —
+         * headers, block padding, entry order — for which there is no
+         * byte-stability guarantee, exactly as there is none for the compressed
+         * length.
+         *
+         * Fail-closed classification decided *which set* a code belongs to. It
+         * cannot tell whether the quantity being classified is canonical, and
+         * that question has to be asked at the point the measurement is taken.
+         */
+        for code in ["ARCHIVE_COMPRESSED_LIMIT", "ARCHIVE_DECOMPRESSED_LIMIT"] {
+            assert_eq!(
+                limited(&[code]).comparison_eligibility(),
+                ComparisonEligibility::Ineligible {
+                    code: code.to_owned(),
+                    reason: IneligibilityReason::RuntimeDependent,
+                },
+                "{code} is measured against the archive representation, not the repository"
+            );
+        }
     }
 
     #[test]

@@ -30,6 +30,13 @@ use crate::{BlobContent, RepositoryTree, TreeEntryKind};
 /// different evidence would claim to be comparable. The key's own membership
 /// test is *does changing this value change the report?*, and changing which
 /// files are read plainly does.
+///
+/// Two gates hold this number honest, and they catch different edits.
+/// `POLICY_SNAPSHOT` pins the *values* selection is decided from — the arrays
+/// and the budgets. `BEHAVIOUR_SNAPSHOT` pins what [`select_paths`] does with
+/// them, because the ranking, the precedence between passes and the rules about
+/// what a dropped file gets recorded as are policy that lives in code rather
+/// than in a constant, and a value snapshot cannot see them change.
 pub const SELECTION_POLICY_VERSION: &str = "1";
 
 /// The selection policy, rendered from the values that decide it.
@@ -514,9 +521,10 @@ max-total-bytes 8388608
         assert_eq!(
             super::describe_selection_policy(),
             POLICY_SNAPSHOT,
-            "
-the selection policy changed. Update POLICY_SNAPSHOT *and* bump              SELECTION_POLICY_VERSION (currently {}) — selection decides which files              every finding is drawn from, so a changed policy under an unchanged version              lets two runs of one commit report different evidence while claiming to be              comparable.
-",
+            "\nthe selection policy changed. Update POLICY_SNAPSHOT *and* bump \
+             SELECTION_POLICY_VERSION (currently {}) — selection decides which files every \
+             finding is drawn from, so a changed policy under an unchanged version lets two runs \
+             of one commit report different evidence while claiming to be comparable.\n",
             super::SELECTION_POLICY_VERSION
         );
     }
@@ -546,6 +554,270 @@ the selection policy changed. Update POLICY_SNAPSHOT *and* bump              SEL
 
     fn selection_of(entries: Vec<TreeEntry>) -> FileSelection {
         select_paths(&tree(entries))
+    }
+
+    fn directory(path: &str) -> TreeEntry {
+        TreeEntry {
+            path: path.to_owned(),
+            sha: "0".repeat(40),
+            kind: TreeEntryKind::Tree,
+            size_bytes: None,
+        }
+    }
+
+    /// A tree built so that every ranking decision is visible in one result.
+    ///
+    /// Small enough to stay under every budget, because what it is for is the
+    /// *order*: which pass runs first, how each pass ranks its candidates, and
+    /// which rejections are worth a record. Several entries are here to be
+    /// absent from the output — a rule that stops matching is as much a change
+    /// as one that starts.
+    fn ordering_fixture() -> RepositoryTree {
+        tree(vec![
+            // Named files, taken in the issue's order rather than the tree's,
+            // and lexicographically within a single pattern.
+            blob("README.md", 10),
+            blob("README.rst", 10),
+            blob("LICENSE", 10),
+            blob("AGENTS.md", 10),
+            blob("SECURITY.md", 10),
+            blob(".github/workflows/ci.yml", 10),
+            // Root manifests belong to the named pass, ahead of every nested
+            // one, and ahead of the source files that describe the same thing
+            // less directly.
+            blob("Cargo.toml", 10),
+            blob("package.json", 10),
+            // Named candidates that are recorded rather than read. Their
+            // absence from the evidence is a fact about the analysis.
+            blob("Cargo.lock", limits::MAX_FILE_BYTES + 1),
+            directory("docs/ARCHITECTURE"),
+            // Never matched at all: `*` stops at a `/`.
+            blob("docs/README.md", 10),
+            blob(".github/workflows/nested/deep.yml", 10),
+            // Nested manifests: shallowest first, then lexicographic, and ahead
+            // of every implementation file.
+            blob("web/package.json", 10),
+            blob("a/package.json", 10),
+            blob("crates/api/Cargo.toml", 10),
+            blob("apps/web/package.json", 10),
+            // Vendored trees are nobody's evidence about this repository, at
+            // any depth and whatever the filename.
+            blob("node_modules/left-pad/package.json", 10),
+            blob("web/vendor/x/Cargo.toml", 10),
+            blob("target/debug/gen.rs", 10),
+            // Implementation files: shallowest first, then lexicographic.
+            blob("src/util/text/pad.rs", 10),
+            blob("src/lib.rs", 10),
+            blob("build.rs", 10),
+            blob("src/app.rs", 10),
+            blob("web/src/main.ts", 10),
+            // Rejected in the implementation pass, which records nothing: a
+            // real repository has thousands of these and a report that listed
+            // them would bury the handful of limitations that matter.
+            blob("src/big.rs", limits::MAX_FILE_BYTES + 1),
+            // Not source. No extension at all, and a leading dot is not one.
+            blob("Makefile", 10),
+            blob(".eslintrc", 10),
+        ])
+    }
+
+    /// A tree that fills the selection part-way through the manifest pass.
+    ///
+    /// The ordering fixture cannot also do this: once the ceiling is reached
+    /// the implementation pass stops without admitting anything, so a single
+    /// tree shows either how the passes rank their candidates or what happens
+    /// when the budget runs out, never both.
+    ///
+    /// What this one pins is the second: how many files fit, who gets the last
+    /// slot, that a dropped manifest is recorded where a dropped source file is
+    /// not, and that the record stops after a bounded number of them.
+    fn exhaustion_fixture() -> RepositoryTree {
+        let mut entries = vec![
+            blob("README.md", 10),
+            blob("LICENSE", 10),
+            blob("Cargo.toml", 10),
+            blob("package.json", 10),
+        ];
+        // Exactly enough depth-1 manifests to spend what the named files left.
+        for index in 0..limits::MAX_SELECTED_FILES - 4 {
+            entries.push(blob(&format!("p{index:02}/package.json"), 10));
+        }
+        // Deeper, so they rank last and meet a full selection. More than the
+        // recording bound, so the bound itself shows in the result.
+        for index in 0..10 {
+            entries.push(blob(&format!("q{index:02}/nested/package.json"), 10));
+        }
+        // Source files, which meet the same full selection and say nothing.
+        entries.push(blob("src/a.rs", 10));
+        entries.push(blob("deep/nest/b.rs", 10));
+        tree(entries)
+    }
+
+    /// What [`select_paths`] actually did, rendered from its own output.
+    ///
+    /// Paired with [`describe_selection_policy`], not a substitute for it: that
+    /// one publishes the values selection is decided from, this one the
+    /// decisions themselves.
+    ///
+    /// [`describe_selection_policy`]: super::describe_selection_policy
+    fn describe_selection_behaviour() -> String {
+        use std::fmt::Write as _;
+
+        let mut rendered = String::new();
+        // Writing to a `String` cannot fail; results are discarded rather than
+        // unwrapped so this stays infallible.
+        let _ = writeln!(
+            rendered,
+            "selection-behaviour {}",
+            super::SELECTION_POLICY_VERSION
+        );
+
+        for (name, fixture) in [
+            ("ordering", ordering_fixture()),
+            ("exhaustion", exhaustion_fixture()),
+        ] {
+            let selection = select_paths(&fixture);
+            let _ = writeln!(rendered, "{name} selected {}", selection.paths.len());
+            for path in &selection.paths {
+                let _ = writeln!(rendered, "  {path}");
+            }
+            let _ = writeln!(rendered, "{name} skipped {}", selection.skipped.len());
+            for skipped in &selection.skipped {
+                let _ = writeln!(rendered, "  {} {}", skipped.reason.code(), skipped.path);
+            }
+        }
+        rendered
+    }
+
+    /// What version 1 of the policy *does*, as opposed to what it is made of.
+    ///
+    /// `POLICY_SNAPSHOT` above pins the arrays and the budgets. It cannot see
+    /// the rest of the policy, which lives in `select_paths` as code: the
+    /// precedence between the three passes, the ranking inside each of them,
+    /// and the rule deciding whether a file that did not fit is worth naming.
+    /// Every one of those changes which evidence a report is drawn from.
+    ///
+    /// Without this, the drift the version exists to prevent stays available in
+    /// one hop: swap `depth().cmp().then_with(path)` for another ranking,
+    /// update the behavioural tests below to whatever the new ranking produces,
+    /// and ship it under `SELECTION_POLICY_VERSION = "1"` with green CI. Those
+    /// tests state the intended behaviour, so they move with the intent; this
+    /// states the *published* behaviour, so it does not.
+    ///
+    /// Regenerate deliberately, never by pasting whatever the test printed. The
+    /// version is the first line so that a diff puts the bump and the changed
+    /// behaviour on screen together.
+    const BEHAVIOUR_SNAPSHOT: &str = "\
+selection-behaviour 1
+ordering selected 17
+  README.md
+  README.rst
+  LICENSE
+  Cargo.toml
+  package.json
+  .github/workflows/ci.yml
+  AGENTS.md
+  SECURITY.md
+  a/package.json
+  web/package.json
+  apps/web/package.json
+  crates/api/Cargo.toml
+  build.rs
+  src/app.rs
+  src/lib.rs
+  web/src/main.ts
+  src/util/text/pad.rs
+ordering skipped 2
+  FILE_SKIPPED_TOO_LARGE Cargo.lock
+  FILE_SKIPPED_NOT_A_FILE docs/ARCHITECTURE
+exhaustion selected 64
+  README.md
+  LICENSE
+  Cargo.toml
+  package.json
+  p00/package.json
+  p01/package.json
+  p02/package.json
+  p03/package.json
+  p04/package.json
+  p05/package.json
+  p06/package.json
+  p07/package.json
+  p08/package.json
+  p09/package.json
+  p10/package.json
+  p11/package.json
+  p12/package.json
+  p13/package.json
+  p14/package.json
+  p15/package.json
+  p16/package.json
+  p17/package.json
+  p18/package.json
+  p19/package.json
+  p20/package.json
+  p21/package.json
+  p22/package.json
+  p23/package.json
+  p24/package.json
+  p25/package.json
+  p26/package.json
+  p27/package.json
+  p28/package.json
+  p29/package.json
+  p30/package.json
+  p31/package.json
+  p32/package.json
+  p33/package.json
+  p34/package.json
+  p35/package.json
+  p36/package.json
+  p37/package.json
+  p38/package.json
+  p39/package.json
+  p40/package.json
+  p41/package.json
+  p42/package.json
+  p43/package.json
+  p44/package.json
+  p45/package.json
+  p46/package.json
+  p47/package.json
+  p48/package.json
+  p49/package.json
+  p50/package.json
+  p51/package.json
+  p52/package.json
+  p53/package.json
+  p54/package.json
+  p55/package.json
+  p56/package.json
+  p57/package.json
+  p58/package.json
+  p59/package.json
+exhaustion skipped 8
+  FILE_SKIPPED_SELECTION_FULL q00/nested/package.json
+  FILE_SKIPPED_SELECTION_FULL q01/nested/package.json
+  FILE_SKIPPED_SELECTION_FULL q02/nested/package.json
+  FILE_SKIPPED_SELECTION_FULL q03/nested/package.json
+  FILE_SKIPPED_SELECTION_FULL q04/nested/package.json
+  FILE_SKIPPED_SELECTION_FULL q05/nested/package.json
+  FILE_SKIPPED_SELECTION_FULL q06/nested/package.json
+  FILE_SKIPPED_SELECTION_FULL q07/nested/package.json
+";
+
+    #[test]
+    fn the_selection_behaviour_matches_the_version_it_is_published_under() {
+        assert_eq!(
+            describe_selection_behaviour(),
+            BEHAVIOUR_SNAPSHOT,
+            "\nselection behaves differently than version {} published. Update \
+             BEHAVIOUR_SNAPSHOT *and* bump SELECTION_POLICY_VERSION — which files a report draws \
+             its findings from is decided here as much as by the patterns and budgets, so a \
+             changed ranking under an unchanged version lets two runs of one commit report \
+             different evidence while claiming to be comparable.\n",
+            super::SELECTION_POLICY_VERSION
+        );
     }
 
     #[test]
@@ -671,16 +943,23 @@ the selection policy changed. Update POLICY_SNAPSHOT *and* bump              SEL
 
     #[test]
     fn implementation_files_are_shallowest_first_then_lexicographic() {
+        // `zz.rs` is what makes this assertion discriminate. Every other path
+        // here sorts the same way under both rules, so without a shallow file
+        // that loses on name — or a deep one that wins on it — this test would
+        // pass just as happily against a plain lexicographic sort and prove
+        // only the tie-break.
         let selection = selection_of(vec![
             blob("src/util/text/pad.rs", 10),
             blob("src/lib.rs", 10),
             blob("build.rs", 10),
+            blob("zz.rs", 10),
             blob("src/app.rs", 10),
         ]);
         assert_eq!(
             selection.paths,
             vec![
                 "build.rs",
+                "zz.rs",
                 "src/app.rs",
                 "src/lib.rs",
                 "src/util/text/pad.rs"

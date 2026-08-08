@@ -22,6 +22,13 @@ pub const MAX_COMPRESSED_BYTES: u64 = repolens_github::limits::MAX_ARCHIVE_COMPR
 /// The second of the two independent layers issue #12 requires. A compressed
 /// cap alone cannot bound this: 4 MiB of zeroes expands to gigabytes, and the
 /// download looks entirely ordinary while it happens.
+///
+/// Counted on the decoded stream *before* the tar parser, so tar headers and
+/// block padding are inside the figure. That is what makes it the right control
+/// for a decompression bomb — the cost being bounded is what the machine has to
+/// pull through, not what the repository contains — and it is also why crossing
+/// it leaves a report ineligible for comparison: the figure is a property of
+/// GitHub's archive representation, which is guaranteed stable nowhere.
 pub const MAX_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Entries examined in one archive.
@@ -85,27 +92,36 @@ mod tests {
     use crate::contract::report::{ComparisonEligibility, Limitation, Report, minimal_report};
 
     /// Every limit name, paired with whether crossing it is decided by the
-    /// repository or by the machine.
+    /// repository or by something else.
     ///
     /// The pairing is the point. A new ceiling added to [`names`] without a row
     /// here fails the test below, so "is this outcome reproducible?" has to be
     /// answered when the ceiling is introduced rather than inferred later by
     /// whoever is debugging two reports that disagree.
+    ///
+    /// The question a row answers is not "is this ceiling fixed?" — every
+    /// ceiling here is fixed — but "is the quantity it measures a property of
+    /// the repository?". The two stream ceilings have fixed values and measure
+    /// GitHub's archive representation, which is why they read `false`.
     const CLASSIFIED: [(&str, bool); 6] = [
-        // Measured against archive *content* under a fixed ceiling. An archive
-        // holding more than the entry limit holds more than it every time.
-        (super::names::DECOMPRESSED_STREAM, true),
+        // Measured against the tree: one archive entry per path, and an entry's
+        // declared size is the file's own byte count. A commit with more paths
+        // than the walk accepts has more than it every time.
         (super::names::ENTRY_COUNT, true),
-        // Measured against the compressed stream, whose byte length GitHub does
-        // not guarantee is stable for a fixed commit — so an archive sitting
-        // near this ceiling can legitimately fall either side of it.
+        // Ends the run rather than skipping the file, and the entry's declared
+        // size is a property of the file.
+        (super::names::FILE_BYTES, true),
+        // Measured against the archive stream rather than the repository, and
+        // GitHub guarantees neither stream's byte length is stable for a fixed
+        // commit. The decompressed figure is counted between the gzip decoder
+        // and the tar parser, so it carries tar headers and block padding —
+        // representation, not content. An archive sitting near either ceiling
+        // can legitimately fall either side of it.
         (super::names::COMPRESSED_STREAM, false),
+        (super::names::DECOMPRESSED_STREAM, false),
         // Properties of the host.
         (super::names::DURATION, false),
         (super::names::EXTRACTION_STORAGE, false),
-        // Ends the run rather than skipping the file, and the entry's declared
-        // size is a property of the archive.
-        (super::names::FILE_BYTES, true),
     ];
 
     fn report_limited_by(code: &str) -> Report {
@@ -131,7 +147,8 @@ mod tests {
         for name in named {
             assert!(
                 CLASSIFIED.iter().any(|(code, _)| *code == name),
-                "{name} has no reproducibility classification; decide whether                  crossing it is a property of the repository or of the host"
+                "{name} has no reproducibility classification; decide whether crossing it is a \
+                 property of the repository or of something else"
             );
         }
         assert_eq!(CLASSIFIED.len(), named.len(), "CLASSIFIED has a stale row");
@@ -147,7 +164,8 @@ mod tests {
             assert_eq!(
                 eligibility.is_eligible(),
                 reproducible,
-                "{code}: infrastructure and contract disagree about whether this                  outcome may be compared between runs"
+                "{code}: infrastructure and contract disagree about whether this outcome may be \
+                 compared between runs"
             );
             if !reproducible {
                 assert!(

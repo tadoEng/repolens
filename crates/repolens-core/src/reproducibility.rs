@@ -211,7 +211,8 @@ mod tests {
                 "source",
                 "tree_sha",
             ],
-            "the reproducibility key gained or lost an input; if a policy now              decides report output, it belongs here and in this list"
+            "the reproducibility key gained or lost an input; if a policy now decides report \
+             output, it belongs here and in this list"
         );
     }
 
@@ -276,6 +277,14 @@ mod tests {
         let mut exclusions = base.clone();
         exclusions.exclusion_policy_version = "2".into();
         assert_ne!(base, exclusions);
+
+        let mut classification = base.clone();
+        classification.classification_policy_version = "2".into();
+        assert_ne!(base, classification);
+
+        let mut selection = base.clone();
+        selection.selection_policy_version = "2".into();
+        assert_ne!(base, selection);
     }
 
     #[test]
