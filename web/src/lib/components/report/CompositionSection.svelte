@@ -521,9 +521,13 @@
 	}
 
 	/*
-	 * The provenance header. Its own panel, because the four values inside it are one
-	 * thing — the key that makes every number below reproducible — and a grid of loose
-	 * pairs would read as four unrelated facts.
+	 * The provenance header. Its own panel, because the five values inside it are one
+	 * thing — what makes the counts below comparable with another run — and a grid of
+	 * loose pairs would read as five unrelated facts.
+	 *
+	 * Not "the key that makes every number reproducible": these five settle whether two
+	 * *counts* may be compared, which is narrower than the report's reproducibility key.
+	 * The module header above says which is which.
 	 */
 	.composition__provenance {
 		display: flex;

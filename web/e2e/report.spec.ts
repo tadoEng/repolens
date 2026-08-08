@@ -195,10 +195,29 @@ test.describe('a completed report', () => {
 		const key = composition.locator('.composition__key');
 
 		/*
-		 * Four values, and all four have to be there: commit and tree say what was counted,
-		 * counter version and policy version say how. Any three of them describe a number
-		 * nobody else can reproduce, which is the difference between evidence and a claim.
+		 * Five values, and all five have to be there: commit and tree say what was counted,
+		 * counter version and the two policy versions say how. Any four of them describe a
+		 * number nobody else can reproduce, which is the difference between evidence and a
+		 * claim.
+		 *
+		 * The count is asserted as well as the contents, because this test owns the property
+		 * "the panel states its whole provenance". Without it, a fact could be deleted from
+		 * the component and every remaining assertion would still pass.
+		 *
+		 * Each policy version is matched inside its own `.composition__key-fact` rather than
+		 * against the panel. Both currently render `version 1`, so a panel-wide
+		 * `toContainText('version 1')` is satisfied by either one — it would survive deleting
+		 * the other, which is exactly the kind of assertion that reports a property it does
+		 * not hold.
+		 *
+		 * What this still cannot catch: the two versions are both `1` today, so swapping the
+		 * *values* between the two facts leaves every assertion here satisfied. Closing that
+		 * would mean a fixture whose versions differ from the real policies, which trades a
+		 * true fixture for a stronger test. The label-to-value pairing is asserted; the
+		 * values being distinguishable is not, and is recorded rather than implied.
 		 */
+		await expect(key.locator('.composition__key-fact')).toHaveCount(5);
+
 		await expect(key.locator(`[title="${REPORT.commit_sha}"]`)).toHaveText(
 			REPORT.commit_sha.slice(0, 7)
 		);
@@ -207,7 +226,13 @@ test.describe('a completed report', () => {
 		);
 		await expect(key).toContainText(REPORT.composition?.counter ?? '');
 		await expect(key).toContainText(REPORT.composition?.counter_version ?? '');
-		await expect(key).toContainText(`version ${REPORT.composition?.exclusion_policy_version}`);
+
+		await expect(
+			key.locator('.composition__key-fact', { hasText: 'Exclusion policy' })
+		).toContainText(`version ${REPORT.composition?.exclusion_policy_version}`);
+		await expect(
+			key.locator('.composition__key-fact', { hasText: 'Classification policy' })
+		).toContainText(`version ${REPORT.composition?.classification_policy_version}`);
 
 		// And it reads before the first table, because the ask was totals-then-detail and a
 		// key that arrives after the numbers it qualifies has already failed to qualify them.
