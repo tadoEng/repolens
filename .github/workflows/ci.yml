@@ -1,8 +1,27 @@
 name: CI
 
+# A pull request is verified once, not twice.
+#
+# `push: ["**"]` alongside `pull_request` ran the whole suite twice for every
+# commit on a PR branch, and the concurrency group below could not dedupe them
+# because `github.ref` differs between the two events — `refs/heads/<branch>`
+# against `refs/pull/<n>/merge`. Measured on one commit of #38: 315 s of runner
+# time for the push run and 359 s for the pull_request run, for an identical
+# tree. Roughly 47% of CI on this repository was spent proving the same thing a
+# second time, on a free tier.
+#
+# Branch pushes therefore no longer trigger anything on their own. That costs a
+# branch pushed *without* a pull request its CI, which is aligned with how this
+# repository is worked: every change goes through a PR, and the run starts the
+# moment one is opened.
+#
+# `pull_request` also tests the branch merged into its base rather than the
+# branch alone, which for a squash-merge workflow is closer to what actually
+# lands. The check is still reported against the head SHA, so exact-head review
+# is unaffected.
 on:
   push:
-    branches: ["**"]
+    branches: [master]
   pull_request:
 
 permissions:
@@ -10,7 +29,18 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded pull-request runs are cancelled. Master runs never are.
+  #
+  # `true` cancelled master, and master is what deploys. Two commits reached
+  # production that way — `6f2a0a4` and `6ac6c65`, both merges made minutes
+  # apart, each cancelling the previous commit's run. Render and Cloudflare
+  # deploy from master automatically, so the effect was a deployment whose
+  # verification never finished and a commit that is green nowhere.
+  #
+  # A superseded branch push is genuinely worth cancelling: nobody wants the
+  # result. A master commit is a distinct artifact that shipped, and its run is
+  # the only record that it was ever verified.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 env:
   CARGO_TERM_COLOR: always
