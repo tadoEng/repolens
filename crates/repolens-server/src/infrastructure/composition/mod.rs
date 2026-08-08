@@ -30,11 +30,13 @@
 //! # Layout
 //!
 //! * [`limits`] — the seven controls, with what each one is protecting.
+//! * [`classification`] — what a counted file is, and where it lives.
 //! * [`counter`] — Tokei, behind the domain's counting contract.
 //! * [`entry`] — whether one archive entry may be written, as a pure function.
 //! * [`exclusion`] — what is left out of the count, and under which rule.
 //! * [`extract`] — the bounded, self-cleaning extraction itself.
 
+pub mod classification;
 pub mod counter;
 pub mod entry;
 pub mod exclusion;

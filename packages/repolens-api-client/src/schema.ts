@@ -211,7 +211,7 @@ export interface components {
          *     with a great deal of it may test the wrong things.
          * @enum {string}
          */
-        CodeRole: "PRODUCTION" | "TEST" | "GENERATED" | "TOOLING";
+        CodeRole: "PRODUCTION" | "TEST" | "GENERATED" | "TOOLING" | "UNCLASSIFIED";
         /**
          * @description Why some files were left out of the counts.
          *
@@ -423,6 +423,16 @@ export interface components {
              * @description Blank lines.
              */
             blank_lines: number;
+            /**
+             * @description Version of the policy that decided each file's role and area.
+             *
+             *     Separate from the exclusion policy because the two answer different
+             *     questions — what was left out, and what the rest *is* — and either can
+             *     change without the other. Both are needed before two composition
+             *     results may be compared: a changed classifier moves the production
+             *     share without any file changing.
+             */
+            classification_policy_version: string;
             /**
              * Format: int64
              * @description Lines of code.
