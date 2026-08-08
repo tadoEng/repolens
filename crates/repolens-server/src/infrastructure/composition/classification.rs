@@ -20,11 +20,20 @@
 //! # This classifies by path, and says so
 //!
 //! Nothing here opens a file. A path is weak evidence — `src/parser.rs` might
-//! be nothing but test helpers — and the honest response is to keep the rules
-//! conventional, narrow, and legible rather than to guess harder. Where a
-//! convention is genuinely ambiguous the file stays [`CodeRole::Production`],
-//! because that is the claim that adds nothing: it is the residual category,
-//! not a positive finding.
+//! be nothing but test helpers — and the honest response is to narrow the claim
+//! rather than to guess harder.
+//!
+//! So every role is claimed **positively**, including `Production`, which is
+//! recognised by a `src/` segment rather than left over. Where no rule
+//! recognises a layout the file is [`CodeRole::Unclassified`], and that is the
+//! label which adds nothing.
+//!
+//! The distinction is the whole point. `Production` means *ordinary
+//! implementation code* — a claim about the file. `Unclassified` means *this
+//! policy does not recognise the layout* — a statement about the policy. An
+//! earlier revision collapsed them by making `Production` the residual, which
+//! made the published production share read as far more certain than the
+//! evidence supports: every unrecognised path silently voted for it.
 //!
 //! In particular there is **no content sniffing and no heuristic scoring**. A
 //! classifier that is right 90% of the time produces a number nobody can check,
