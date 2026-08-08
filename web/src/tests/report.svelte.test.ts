@@ -56,7 +56,7 @@ function renderCategory(findings: Finding[], emptyLabel = 'this category') {
  * The composition section wired as the route wires it.
  *
  * The commit and tree SHAs come from the report rather than from `LineCountSummary`, so the
- * section takes them as props: they are half of the reproducibility key its header states.
+ * section takes them as props: they are part of the composition provenance its header states.
  * Read from the fixture here for the same reason as everywhere else in this file — a literal
  * would be a second copy of the contract.
  */
@@ -548,6 +548,62 @@ test('an unrecognised role is named rather than dropped or crashed on', async ()
 	expect(text).toContain('Unrecognised (VENDORED)');
 	expect(screen.container.querySelectorAll('[data-role="VENDORED"]')).toHaveLength(2);
 	expect(text).toContain('vendor/thing.rs');
+});
+
+/** The share cell of one row of the roles table, by its wire role value. */
+function roleShare(container: HTMLElement, role: string): string | null {
+	const heading = container.querySelector(`.composition__table th[data-role="${role}"]`);
+	const cell = heading?.closest('tr')?.querySelector('.composition__share-value');
+	return cell?.textContent?.trim() ?? null;
+}
+
+test('an UNCLASSIFIED role of zero is not given a row', async () => {
+	// A permanent zero row is a row nobody reads. UNCLASSIFIED at zero says the policy
+	// accounted for everything, which is the expected case — unlike TEST at zero, which is
+	// a fact about the repository and keeps its row.
+	const accounted: LineCountSummary = {
+		...COMPOSITION,
+		roles: [
+			{ role: 'PRODUCTION', files: 604, code_lines: 63400 },
+			{ role: 'TEST', files: 178, code_lines: 11710 },
+			{ role: 'GENERATED', files: 34, code_lines: 3200 },
+			{ role: 'UNCLASSIFIED', files: 0, code_lines: 0 }
+		]
+	};
+
+	const screen = await renderComposition(accounted);
+
+	expect(roleShare(screen.container, 'UNCLASSIFIED')).toBeNull();
+	// The recognised roles are untouched, including their shares.
+	expect(roleShare(screen.container, 'PRODUCTION')).toBe('81%');
+	expect(roleShare(screen.container, 'TEST')).toBe('15%');
+});
+
+test('an UNCLASSIFIED role above zero gets a row, and the shares are not rebased', async () => {
+	/*
+	 * Making UNCLASSIFIED the residual was what stopped unattributed code voting silently
+	 * for the production share. Renormalising the remaining rows after dropping it would
+	 * reintroduce exactly that one layer up: roles summing to 100% on a repository where
+	 * the classifier could not place a tenth of the code.
+	 *
+	 * So this asserts the denominator, not merely that the row appears. 60,000 of 78,310
+	 * counted code lines is 77%; rebased over the recognised roles alone it reads 85%.
+	 */
+	const partial: LineCountSummary = {
+		...COMPOSITION,
+		roles: [
+			{ role: 'PRODUCTION', files: 604, code_lines: 60000 },
+			{ role: 'TEST', files: 178, code_lines: 10500 },
+			{ role: 'UNCLASSIFIED', files: 90, code_lines: 7810 }
+		]
+	};
+
+	const screen = await renderComposition(partial);
+
+	// 9.97%, just under the threshold where `percent` switches to whole numbers.
+	expect(roleShare(screen.container, 'UNCLASSIFIED')).toBe('10.0%');
+	expect(roleShare(screen.container, 'PRODUCTION')).toBe('77%');
+	expect(roleShare(screen.container, 'PRODUCTION')).not.toBe('85%');
 });
 
 test('a role breakdown that leaves code unattributed says so, without inventing a role', async () => {

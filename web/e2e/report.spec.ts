@@ -34,7 +34,7 @@ test.describe('a completed report', () => {
 		await expect(page.getByText('rust-lang/crates.io').first()).toBeVisible();
 
 		// The exact analyzed commit, short on screen and complete in `title`. Scoped to the
-		// report header because Composition now leads with the same reproducibility key —
+		// report header because Composition now repeats commit and tree in its own provenance —
 		// deliberately, so a screenshot of that section carries what makes it checkable.
 		await expect(
 			page.locator('.report-header').locator(`[title="${REPORT.commit_sha}"]`)
@@ -187,7 +187,7 @@ test.describe('a completed report', () => {
 		await expect(composition.getByText('Excluded: 126', { exact: false })).toBeVisible();
 	});
 
-	test('composition leads with the reproducibility key, not with the chart', async ({ page }) => {
+	test('composition leads with its provenance, not with the chart', async ({ page }) => {
 		await page.goto(REPORT_URL);
 		await expect(page.getByRole('heading', { name: 'Composition' })).toBeVisible();
 

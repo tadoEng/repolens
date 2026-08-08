@@ -39,16 +39,24 @@
 	 *
 	 * ## Provenance is the header, not the small print
 	 *
-	 * The chart is not the most important thing on screen. Commit, tree, counter version and
-	 * exclusion-policy version are: together they are the reproducibility key, and they are
-	 * what turns a number a reader can quote into a number a reader can *argue with*. A
-	 * count with no provenance is a rumour, so those four values open the section with the
-	 * weight of the claim rather than trailing it as a grey sentence.
+	 * The chart is not the most important thing on screen. Commit, tree, counter version,
+	 * exclusion-policy version and classification-policy version are: they are what turns a
+	 * number a reader can quote into a number a reader can *argue with*. A count with no
+	 * provenance is a rumour, so those values open the section with the weight of the claim
+	 * rather than trailing it as a grey sentence.
+	 *
+	 * These are the section's **composition provenance**, not the report's reproducibility
+	 * key. The key is the wider set in `repolens_core::reproducibility` — it also carries the
+	 * repository coordinate, the evidence source and its API version, the analyzer version
+	 * and the ruleset version. Naming this subset "the key" would claim that matching these
+	 * five values is enough for two reports to be comparable, which is exactly the kind of
+	 * overstatement this section exists not to make. What these five settle is narrower and
+	 * still worth stating plainly: whether two *counts* may be compared.
 	 *
 	 * Commit and tree come from the report rather than from `LineCountSummary`, which is why
 	 * this component takes them as props. They also appear in `ReportHeader`; that is
 	 * deliberate duplication, because this section is the one people screenshot and quote,
-	 * and a figure separated from its key is the thing that gets misused.
+	 * and a figure separated from its provenance is the thing that gets misused.
 	 *
 	 * ## Totals before detail
 	 *
@@ -86,7 +94,7 @@
 		composition: LineCountSummary | null;
 		/** Report-level limitations, which are what explain a `null` composition. */
 		limitations: Limitation[];
-		/** Analyzed commit. Half of the reproducibility key this section's header states. */
+		/** Analyzed commit. Part of the composition provenance this section's header states. */
 		commitSha: string;
 		/** Root tree the collectors walked. Two commits sharing one yield identical counts. */
 		treeSha: string;
@@ -127,8 +135,8 @@
 	</div>
 {:else}
 	<!--
-		The reproducibility key, as a header. Same `<dl>` idiom as `ReportHeader`, because
-		these are the same kind of value and a reader who has learned to look for the key
+		Composition provenance, as a header. Same `<dl>` idiom as `ReportHeader`, because
+		these are the same kind of value and a reader who has learned to look for provenance
 		once should not have to learn a second shape for it.
 	-->
 	<div class="composition__provenance">
@@ -149,10 +157,23 @@
 				<dt>Exclusion policy</dt>
 				<dd>version {composition.exclusion_policy_version}</dd>
 			</div>
+			<!--
+				Beside the exclusion policy, not folded into it. The two answer different
+				questions — what was left out, and what the rest *is* — and either can change
+				without the other. A changed classifier moves the production share without a
+				single file changing, so a count that cannot name its classifier cannot be
+				compared with another.
+			-->
+			<div class="composition__key-fact">
+				<dt>Classification policy</dt>
+				<dd>version {composition.classification_policy_version}</dd>
+			</div>
 		</dl>
 
 		<p class="composition__lead">
-			Different counter versions count differently, which is why the version is part of the result.
+			Different counter versions count differently, and a different classification policy moves the
+			share each role holds without any file changing. Both versions are part of the result for that
+			reason.
 		</p>
 	</div>
 
@@ -252,11 +273,13 @@
 		</p>
 	{:else}
 		<div class="composition__view">
-			<ScrollRegion label="Code lines by role: production, test, generated and tooling">
+			<ScrollRegion label="Code lines by role">
 				<table class="composition__table">
 					<caption>
 						Code lines by role. Structural evidence, not a judgement: generated code is named as
-						generated so it is not counted as hand-written work.
+						generated so it is not counted as hand-written work. `Unclassified` appears only when it
+						is above zero, and when it does it is counted against the same total as every other row
+						— the shares are not rebased over the roles that were recognised.
 					</caption>
 					<thead>
 						<tr>
@@ -287,9 +310,12 @@
 
 			{#if coverage && !coverage.complete && coverage.listed < coverage.total}
 				<!--
-					Stated rather than absorbed into a synthesised sixth role. `CodeRole` is a closed
-					contract enum, and inventing a row the API can never send is the fabrication this
-					whole pipeline exists to prevent.
+					A genuine arithmetic gap in what the server sent, not the classifier declining to
+					attribute a file — that case has its own role now, `UNCLASSIFIED`, and it arrives
+					as a row rather than as a shortfall. So this fires only when the rows really do
+					not add up, and it is still stated rather than absorbed into an invented row:
+					`CodeRole` is a closed contract enum, and putting a value on screen the API can
+					never send is the fabrication this whole pipeline exists to prevent.
 				-->
 				<p class="composition__lead">
 					The listed roles account for {integer(coverage.listed)} of {integer(coverage.total)} counted

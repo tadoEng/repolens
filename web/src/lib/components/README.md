@@ -71,11 +71,13 @@ Each of these exists because the obvious alternative ships a specific defect.
   so a 4% row is read against the same rail as a 62% one. Both are asserted, and the two
   steps come from `--chart-fill` / `--chart-track` — measured against the surface, never
   eyeballed, with the reasoning in `tokens.css`.
-- **Composition leads with the reproducibility key.** Commit, tree, counter version and
-  exclusion-policy version open the section, before the totals and long before the tables.
-  Those four are what make a count arguable rather than merely quotable, and the commit and
-  tree deliberately repeat `ReportHeader` — a figure separated from its key is the one that
-  gets misquoted.
+- **Composition leads with its provenance.** Commit, tree, counter version,
+  exclusion-policy version and classification-policy version open the section, before the
+  totals and long before the tables. Those five are what make a count arguable rather than
+  merely quotable, and the commit and tree deliberately repeat `ReportHeader` — a figure
+  separated from its provenance is the one that gets misquoted. They are the _section's_
+  provenance, not the report's reproducibility key, which is wider; claiming otherwise would
+  say these five are enough to compare two reports.
 - **`CodeRole` is rendered wherever a file is listed.** A 1,980-line generated client at the
   top of the largest-files list is not the same fact as a 1,980-line hand-written module, and
   omitting the column is the most common way that list misleads. Every role is styled
