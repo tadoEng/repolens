@@ -35,6 +35,7 @@
 //! * [`entry`] — whether one archive entry may be written, as a pure function.
 //! * [`exclusion`] — what is left out of the count, and under which rule.
 //! * [`extract`] — the bounded, self-cleaning extraction itself.
+//! * [`summary`] — the count, projected into what the report publishes.
 
 pub mod classification;
 pub mod counter;
@@ -42,3 +43,4 @@ pub mod entry;
 pub mod exclusion;
 pub mod extract;
 pub mod limits;
+pub mod summary;

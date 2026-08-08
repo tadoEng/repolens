@@ -53,6 +53,13 @@ use super::exclusion::{self, EXCLUSION_POLICY_VERSION};
 /// to be able to explain.
 pub const TOKEI_VERSION: &str = "14.0.0";
 
+/// The counter's name, as the report and the reproducibility key publish it.
+///
+/// Beside the version rather than spelled at the two places that publish it:
+/// they are one identity, and a report naming a counter the key does not would
+/// be two answers to the question of what produced the numbers.
+pub const COUNTER_NAME: &str = "tokei";
+
 /// One file that was counted, for the manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CountedFile {
