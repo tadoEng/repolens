@@ -504,7 +504,77 @@ pub struct Report {
 /// it cannot drift apart by editing one and not the other.
 const EXECUTION_METADATA_FIELDS: [&str; 2] = ["analysis_id", "completed_at"];
 
+/// Limitation codes whose occurrence is decided by the machine, not the
+/// repository.
+///
+/// A run that crosses a wall-clock deadline on a loaded host, or fills a
+/// bounded extraction volume, would not have done so on a quieter one. Two
+/// reports of the same commit under the same versions may therefore differ,
+/// and neither is wrong.
+///
+/// Everything else in `limits::names` is a property of the archive under a
+/// fixed versioned ceiling: an archive holding more than the entry limit holds
+/// more than it every time. Those stay eligible — `composition == null` is not
+/// the same claim as "not reproducible", and collapsing the two would discard
+/// a perfectly deterministic outcome.
+///
+/// `infrastructure::composition::limits` has a test asserting every name it
+/// defines is classified here exactly once, so a new ceiling cannot be added
+/// without deciding which kind it is.
+const RUNTIME_DEPENDENT_LIMITATIONS: [&str; 2] =
+    ["ARCHIVE_DURATION_LIMIT", "EXTRACTION_STORAGE_LIMIT"];
+
+/// Whether two reports sharing a reproducibility key may be compared byte for
+/// byte.
+///
+/// Explicit rather than implied by a `None`, and deliberately *not* implemented
+/// by removing the offending evidence from the payload: deleting the fields
+/// that record a timeout would make a timed-out run and a successful one look
+/// comparable by erasing the difference between them. The payload keeps
+/// everything; this says whether comparing it means anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComparisonEligibility {
+    /// Every limitation is a property of the repository under fixed versioned
+    /// limits, so another run with the same key must produce the same payload.
+    Eligible,
+    /// A runtime condition affected the result. Another run with the same key
+    /// may legitimately differ, and a mismatch is not evidence of a defect.
+    Ineligible {
+        /// The limitation code that made it so.
+        code: String,
+    },
+}
+
+impl ComparisonEligibility {
+    /// Whether a determinism comparison over this report proves anything.
+    #[must_use]
+    pub fn is_eligible(&self) -> bool {
+        matches!(self, Self::Eligible)
+    }
+}
+
 impl Report {
+    /// Whether this report may be compared byte for byte with another sharing
+    /// its reproducibility key.
+    ///
+    /// Decided from the limitations the report actually carries, not from
+    /// whether `composition` is `null`. An archive that exceeds a fixed
+    /// decompressed-byte ceiling exceeds it every time, so that outcome is as
+    /// reproducible as a successful count; a run that ran out of wall-clock on
+    /// a busy host is not. Treating every `UNABLE_TO_VERIFY` as
+    /// non-reproducible would discard the deterministic majority of them.
+    #[must_use]
+    pub fn comparison_eligibility(&self) -> ComparisonEligibility {
+        self.limitations
+            .iter()
+            .find(|limitation| RUNTIME_DEPENDENT_LIMITATIONS.contains(&limitation.code.as_str()))
+            .map_or(ComparisonEligibility::Eligible, |limitation| {
+                ComparisonEligibility::Ineligible {
+                    code: limitation.code.clone(),
+                }
+            })
+    }
+
     /// The part of this report that two runs over the same inputs must agree
     /// on, byte for byte.
     ///
@@ -516,9 +586,20 @@ impl Report {
     /// prevent — so the claim is bounded by executable code rather than by
     /// prose that the next reader has to trust.
     ///
-    /// What remains is a function of the reproducibility key — repository,
-    /// commit SHA, tree SHA, analyzer version, ruleset version — and must not
-    /// vary between runs.
+    /// What remains is a function of the reproducibility key **for runs that
+    /// completed within their resource limits**, and must not vary between
+    /// those runs.
+    ///
+    /// That qualifier is load-bearing and was missing while it was harmless:
+    /// composition runs under a wall-clock ceiling, so two runs with identical
+    /// semantic inputs can legitimately produce different payloads when one
+    /// crosses it on a loaded host. Ask [`Report::comparison_eligibility`]
+    /// before treating a mismatch as a defect.
+    ///
+    /// Ineligible reports are **not** stripped of the evidence that made them
+    /// ineligible. Removing the timeout limitation to make the payloads match
+    /// would delete exactly the field recording that the two runs differed —
+    /// manufacturing agreement rather than establishing it.
     ///
     /// Built by removing fields from the serialized report rather than by
     /// listing the ones to keep: a field added to [`Report`] then enters this
@@ -537,6 +618,32 @@ impl Report {
             }
         }
         Ok(value)
+    }
+}
+
+/// A report with no findings, for tests that care about one field.
+///
+/// Module-level rather than inside `mod tests` so `infrastructure` can use it:
+/// its limits test compares its own classification against
+/// [`Report::comparison_eligibility`], and a second copy of this literal is
+/// exactly the kind of duplicate definition that drifts.
+#[cfg(test)]
+pub(crate) fn minimal_report() -> Report {
+    Report {
+        analysis_id: Uuid::nil(),
+        repository: RepositoryIdentity {
+            owner: "rust-lang".into(),
+            name: "crates.io".into(),
+        },
+        commit_sha: "0".repeat(40),
+        tree_sha: "1".repeat(40),
+        analyzer_version: "1".into(),
+        ruleset_version: "1".into(),
+        completed_at: OffsetDateTime::UNIX_EPOCH,
+        overview: vec![],
+        findings: vec![],
+        composition: None,
+        limitations: vec![],
     }
 }
 

@@ -79,3 +79,87 @@ pub mod names {
     /// from an OOM-killed job.
     pub const EXTRACTION_STORAGE: &str = "EXTRACTION_STORAGE_LIMIT";
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::contract::report::{ComparisonEligibility, Limitation, Report};
+
+    /// Every limit name, paired with whether crossing it is decided by the
+    /// repository or by the machine.
+    ///
+    /// The pairing is the point. A new ceiling added to [`names`] without a row
+    /// here fails the test below, so "is this outcome reproducible?" has to be
+    /// answered when the ceiling is introduced rather than inferred later by
+    /// whoever is debugging two reports that disagree.
+    const CLASSIFIED: [(&str, bool); 6] = [
+        // Properties of the archive under a fixed versioned ceiling. An archive
+        // that holds more than the entry limit holds more than it every time.
+        (super::names::COMPRESSED_STREAM, true),
+        (super::names::DECOMPRESSED_STREAM, true),
+        (super::names::ENTRY_COUNT, true),
+        (super::names::FILE_BYTES, true),
+        // Properties of the host. The same archive on a quieter machine, or one
+        // with a less contended volume, need not trip either of these.
+        (super::names::DURATION, false),
+        (super::names::EXTRACTION_STORAGE, false),
+    ];
+
+    fn report_limited_by(code: &str) -> Report {
+        let mut report = crate::contract::report::minimal_report();
+        report.limitations = vec![Limitation {
+            code: code.to_owned(),
+            explanation: "fixture".to_owned(),
+        }];
+        report
+    }
+
+    #[test]
+    fn every_limit_name_is_classified_as_reproducible_or_not() {
+        // Guards the inventory itself: a name added to `names` with no row in
+        // CLASSIFIED would otherwise default to "reproducible" by silence,
+        // because `comparison_eligibility` only knows the codes it was told
+        // about. Silence is the wrong default for a determinism claim.
+        let named = [
+            super::names::COMPRESSED_STREAM,
+            super::names::DECOMPRESSED_STREAM,
+            super::names::ENTRY_COUNT,
+            super::names::FILE_BYTES,
+            super::names::DURATION,
+            super::names::EXTRACTION_STORAGE,
+        ];
+
+        for name in named {
+            assert!(
+                CLASSIFIED.iter().any(|(code, _)| *code == name),
+                "{name} has no reproducibility classification; decide whether \
+                 crossing it is a property of the repository or of the host"
+            );
+        }
+        assert_eq!(CLASSIFIED.len(), named.len(), "CLASSIFIED has a stale row");
+    }
+
+    #[test]
+    fn the_contract_agrees_with_this_classification() {
+        // The two live apart on purpose — limitation codes are contract
+        // vocabulary, ceilings are infrastructure — so this is what stops them
+        // drifting into disagreement about which outcomes are reproducible.
+        for (code, reproducible) in CLASSIFIED {
+            let eligibility = report_limited_by(code).comparison_eligibility();
+            assert_eq!(
+                eligibility.is_eligible(),
+                reproducible,
+                "{code}: infrastructure and contract disagree about whether this \
+                 outcome may be compared between runs"
+            );
+            if !reproducible {
+                assert_eq!(
+                    eligibility,
+                    ComparisonEligibility::Ineligible {
+                        code: code.to_owned()
+                    },
+                    "an ineligible report must name the limitation that made it so"
+                );
+            }
+        }
+    }
+}
