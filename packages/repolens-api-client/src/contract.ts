@@ -19,6 +19,7 @@ export type ApiError = Schemas['ApiError'];
 export type AreaLineCount = Schemas['AreaLineCount'];
 export type CompositionExclusion = Schemas['CompositionExclusion'];
 export type Evidence = Schemas['Evidence'];
+export type EvidenceSource = Schemas['EvidenceSource'];
 export type ExecutionMetadata = Schemas['ExecutionMetadata'];
 export type Finding = Schemas['Finding'];
 export type LanguageLineCount = Schemas['LanguageLineCount'];

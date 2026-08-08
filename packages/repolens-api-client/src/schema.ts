@@ -296,6 +296,27 @@ export interface components {
          * @enum {string}
          */
         EvidenceKind: "FILE_PRESENCE" | "FILE_EXCERPT" | "DEPENDENCY_ENTRY" | "WORKFLOW_DEFINITION" | "STATISTIC" | "REPOSITORY_METADATA";
+        /**
+         * @description The retrieval interface an analysis read its evidence through.
+         *
+         *     A wire mirror of [`repolens_core::EvidenceSource`], for the same reason
+         *     [`RepositoryIdentity`] mirrors `RepositoryCoordinate`: the domain crate is
+         *     deliberately free of presentation dependencies, and `ToSchema` is one.
+         *     Converted at this boundary rather than restated, so the two cannot drift
+         *     into naming different sources.
+         *
+         *     Two fields rather than one string because the pair answers two different
+         *     questions. GitHub isolates breaking changes into dated REST versions, so the
+         *     same commit read through two of them can yield different fields and
+         *     therefore different findings; and a future non-GitHub source is then a new
+         *     `api` value rather than a new field.
+         */
+        EvidenceSource: {
+            /** @description Identifier for the retrieval interface, e.g. `github-rest`. */
+            api: string;
+            /** @description Version of that interface, e.g. `2026-03-10`. */
+            version: string;
+        };
         /** @description Scheduling facts about an analysis. */
         ExecutionMetadata: {
             /** @description Runner-assigned execution identifier, for correlating logs. */
@@ -558,6 +579,7 @@ export interface components {
              */
             completed_at: string;
             composition: null | components["schemas"]["LineCountSummary"];
+            evidence_source: null | components["schemas"]["EvidenceSource"];
             /**
              * @description All findings, in a **server-decided order**.
              *

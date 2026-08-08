@@ -577,6 +577,11 @@ fn build_report(
         // `TreeSha` → `String` happens here and only here: the wire DTO is the
         // one place the typed identity has to be flattened.
         tree_sha: commit.tree_sha.as_str().to_owned(),
+        // Asked of the ingestion crate rather than spelled here. The pipeline
+        // knows it is reading GitHub, but it does not know which API version
+        // the requests carried, and a report that names the wrong one is a
+        // false claim nothing downstream can catch.
+        evidence_source: Some(repolens_github::evidence_source().into()),
         analyzer_version: ANALYZER_VERSION.to_owned(),
         ruleset_version: ruleset::RULESET_VERSION.to_owned(),
         completed_at: OffsetDateTime::now_utc(),
@@ -1633,6 +1638,49 @@ mod tests {
         assert_ne!(
             report.tree_sha, report.commit_sha,
             "a commit and its root tree are different objects"
+        );
+    }
+
+    #[test]
+    fn the_report_names_the_api_version_the_requests_actually_carried() {
+        // The failure this rules out is a report that names one API version
+        // while the client sent another. Nothing downstream could catch it: the
+        // value is well-formed, the report is complete, and the only symptom is
+        // two runs of one commit disagreeing for a reason the report denies.
+        //
+        // Asserted against the ingestion crate's own constants rather than
+        // against a literal, because a literal here would be the second
+        // spelling that makes the disagreement possible in the first place.
+        let commit = repolens_github::ResolvedCommit {
+            sha: repolens_core::CommitSha::parse(&"a".repeat(40)).expect("a literal digest"),
+            tree_sha: repolens_core::TreeSha::parse(&"b".repeat(40)).expect("a literal digest"),
+            committed_at: OffsetDateTime::from_unix_timestamp(1_785_873_497)
+                .expect("a literal timestamp"),
+        };
+        let tree = repolens_github::RepositoryTree {
+            sha: "b".repeat(40),
+            entries: Vec::new(),
+            truncated: false,
+        };
+
+        let report = build_report(
+            Uuid::nil(),
+            &RepositoryCoordinate::new("rust-lang", "crates.io"),
+            &commit,
+            &tree,
+            false,
+            &[],
+            &ruleset::evaluate(&path_input(&[])),
+        );
+
+        let source = report
+            .evidence_source
+            .expect("a report built by this analyzer always records where it read from");
+        assert_eq!(source.api, repolens_github::EVIDENCE_API);
+        assert_eq!(
+            source.version,
+            repolens_github::GITHUB_REST_API_VERSION,
+            "the published version must be the one sent as X-GitHub-Api-Version"
         );
     }
 

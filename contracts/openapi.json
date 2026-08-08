@@ -662,6 +662,24 @@
           "REPOSITORY_METADATA"
         ]
       },
+      "EvidenceSource": {
+        "type": "object",
+        "description": "The retrieval interface an analysis read its evidence through.\n\nA wire mirror of [`repolens_core::EvidenceSource`], for the same reason\n[`RepositoryIdentity`] mirrors `RepositoryCoordinate`: the domain crate is\ndeliberately free of presentation dependencies, and `ToSchema` is one.\nConverted at this boundary rather than restated, so the two cannot drift\ninto naming different sources.\n\nTwo fields rather than one string because the pair answers two different\nquestions. GitHub isolates breaking changes into dated REST versions, so the\nsame commit read through two of them can yield different fields and\ntherefore different findings; and a future non-GitHub source is then a new\n`api` value rather than a new field.",
+        "required": [
+          "api",
+          "version"
+        ],
+        "properties": {
+          "api": {
+            "type": "string",
+            "description": "Identifier for the retrieval interface, e.g. `github-rest`."
+          },
+          "version": {
+            "type": "string",
+            "description": "Version of that interface, e.g. `2026-03-10`."
+          }
+        }
+      },
       "ExecutionMetadata": {
         "type": "object",
         "description": "Scheduling facts about an analysis.",
@@ -1070,6 +1088,7 @@
           "repository",
           "commit_sha",
           "tree_sha",
+          "evidence_source",
           "analyzer_version",
           "ruleset_version",
           "completed_at",
@@ -1105,6 +1124,17 @@
               {
                 "$ref": "#/components/schemas/LineCountSummary",
                 "description": "Composition and line counts.\n\n**Null when counting did not happen** — most often because extraction\nexceeded its configured limit. That is a designed `UNABLE_TO_VERIFY`\noutcome with a matching entry in `limitations`, not an error and not a\nzero. Required-but-nullable so a consumer must handle it."
+              }
+            ]
+          },
+          "evidence_source": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EvidenceSource",
+                "description": "Retrieval interface and version the evidence came through.\n\n**Null only when the report predates this field.** Every report written\nby this build carries one; a document already in the store does not, and\nbackfilling it would mean rewriting a report to say something it never\nrecorded — which the `reports` table forbids in as many words, and which\nwould be inference dressed as evidence. The pinned API version has in\nfact never changed, and that is exactly what makes the inference\ntempting and still not a thing the document says.\n\nRequired-but-nullable, like `composition`, so a consumer has to handle\nthe absence rather than discover it."
               }
             ]
           },

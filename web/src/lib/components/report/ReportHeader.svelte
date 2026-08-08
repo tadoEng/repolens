@@ -7,7 +7,14 @@
 	 * its ruleset version is a report whose conclusions cannot be reproduced or compared.
 	 *
 	 * `tree_sha` is here for the same reason: two commits that share a tree yield identical
-	 * evidence, so it is part of the reproducibility key rather than trivia.
+	 * evidence, so it is part of the reproducibility key rather than trivia. So is the
+	 * evidence source — GitHub isolates breaking changes into dated REST versions, so the
+	 * same commit read through two of them can produce different findings.
+	 *
+	 * That one is nullable, and the absence is rendered rather than hidden. A report written
+	 * before the analyzer published its source does not become one that used an unknown API;
+	 * it becomes one that did not say. Dropping the row would quietly turn "not recorded"
+	 * into "nothing to record", which is the substitution this whole report exists to refuse.
 	 *
 	 * A `<dl>` because these are name/value pairs, and pairing them in the markup is what
 	 * lets a screen reader read "Analyzer version, 0.1.0" instead of two loose strings.
@@ -45,6 +52,19 @@
 		<div class="report-header__fact">
 			<dt>Tree</dt>
 			<dd><CopyableSha value={report.tree_sha} label="analyzed tree SHA" /></dd>
+		</div>
+
+		<div class="report-header__fact">
+			<dt>Evidence source</dt>
+			<dd>
+				{#if report.evidence_source}
+					{report.evidence_source.api} version {report.evidence_source.version}
+				{:else}
+					<span class="report-header__unrecorded"
+						>Not recorded — this report predates the field</span
+					>
+				{/if}
+			</dd>
 		</div>
 
 		<div class="report-header__fact">
@@ -110,5 +130,11 @@
 		margin: 0;
 		font-size: var(--font-size-sm);
 		color: var(--text-primary);
+	}
+
+	/* Muted, because it is an absence rather than a value — but still present,
+	   because a row that vanished would read as a report with nothing to say. */
+	.report-header__unrecorded {
+		color: var(--text-muted);
 	}
 </style>

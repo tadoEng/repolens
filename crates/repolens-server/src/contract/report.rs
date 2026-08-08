@@ -454,6 +454,36 @@ pub struct OverviewStatement {
     pub confidence: Confidence,
 }
 
+/// The retrieval interface an analysis read its evidence through.
+///
+/// A wire mirror of [`repolens_core::EvidenceSource`], for the same reason
+/// [`RepositoryIdentity`] mirrors `RepositoryCoordinate`: the domain crate is
+/// deliberately free of presentation dependencies, and `ToSchema` is one.
+/// Converted at this boundary rather than restated, so the two cannot drift
+/// into naming different sources.
+///
+/// Two fields rather than one string because the pair answers two different
+/// questions. GitHub isolates breaking changes into dated REST versions, so the
+/// same commit read through two of them can yield different fields and
+/// therefore different findings; and a future non-GitHub source is then a new
+/// `api` value rather than a new field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct EvidenceSource {
+    /// Identifier for the retrieval interface, e.g. `github-rest`.
+    pub api: String,
+    /// Version of that interface, e.g. `2026-03-10`.
+    pub version: String,
+}
+
+impl From<repolens_core::EvidenceSource> for EvidenceSource {
+    fn from(source: repolens_core::EvidenceSource) -> Self {
+        Self {
+            api: source.api,
+            version: source.version,
+        }
+    }
+}
+
 /// A complete report for one repository at one commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Report {
@@ -467,6 +497,20 @@ pub struct Report {
     /// Root tree the collectors walked. Part of the reproducibility key, since
     /// two commits sharing a tree yield identical evidence.
     pub tree_sha: String,
+    /// Retrieval interface and version the evidence came through.
+    ///
+    /// **Null only when the report predates this field.** Every report written
+    /// by this build carries one; a document already in the store does not, and
+    /// backfilling it would mean rewriting a report to say something it never
+    /// recorded — which the `reports` table forbids in as many words, and which
+    /// would be inference dressed as evidence. The pinned API version has in
+    /// fact never changed, and that is exactly what makes the inference
+    /// tempting and still not a thing the document says.
+    ///
+    /// Required-but-nullable, like `composition`, so a consumer has to handle
+    /// the absence rather than discover it.
+    #[schema(required)]
+    pub evidence_source: Option<EvidenceSource>,
     /// Analyzer version that produced this report. First-class, not a footnote.
     pub analyzer_version: String,
     /// Ruleset version evaluated. First-class, not a footnote.
@@ -735,6 +779,10 @@ pub(crate) fn minimal_report() -> Report {
         },
         commit_sha: "0".repeat(40),
         tree_sha: "1".repeat(40),
+        evidence_source: Some(EvidenceSource {
+            api: "github-rest".into(),
+            version: "2026-03-10".into(),
+        }),
         analyzer_version: "1".into(),
         ruleset_version: "1".into(),
         completed_at: OffsetDateTime::UNIX_EPOCH,
@@ -973,29 +1021,24 @@ mod tests {
     }
 
     #[test]
-    fn a_null_composition_is_serialized_rather_than_omitted() {
-        // `UNABLE_TO_VERIFY` composition must be visible to the client as an
-        // explicit null, not an absent key it can overlook.
-        let report = Report {
-            analysis_id: Uuid::nil(),
-            repository: RepositoryIdentity {
-                owner: "o".into(),
-                name: "n".into(),
-            },
-            commit_sha: "0".repeat(40),
-            tree_sha: "1".repeat(40),
-            analyzer_version: "0.1.0".into(),
-            ruleset_version: "1".into(),
-            completed_at: OffsetDateTime::UNIX_EPOCH,
-            overview: vec![],
-            findings: vec![],
-            composition: None,
-            limitations: vec![],
-        };
+    fn a_null_required_field_is_serialized_rather_than_omitted() {
+        // Both nullable fields carry the same contract: `UNABLE_TO_VERIFY`
+        // composition and a report written before the evidence source was
+        // published must reach the client as explicit nulls, not as absent keys
+        // it can overlook. An omitted key is indistinguishable from a client
+        // that forgot to read one.
+        let mut report = minimal_report();
+        report.composition = None;
+        report.evidence_source = None;
 
         let json = serde_json::to_value(&report).unwrap();
-        assert!(json.get("composition").is_some());
-        assert!(json["composition"].is_null());
+        for field in ["composition", "evidence_source"] {
+            assert!(
+                json.get(field).is_some_and(serde_json::Value::is_null),
+                "{field} must serialize as an explicit null, got {:?}",
+                json.get(field)
+            );
+        }
     }
 
     /// A report with every analytical field fixed, so only the execution
@@ -1003,19 +1046,8 @@ mod tests {
     fn report_with_execution(analysis_id: Uuid, completed_at: OffsetDateTime) -> Report {
         Report {
             analysis_id,
-            repository: RepositoryIdentity {
-                owner: "rust-lang".into(),
-                name: "crates.io".into(),
-            },
-            commit_sha: "0".repeat(40),
-            tree_sha: "1".repeat(40),
-            analyzer_version: "0.1.0".into(),
-            ruleset_version: "1".into(),
             completed_at,
-            overview: vec![],
-            findings: vec![],
-            composition: None,
-            limitations: vec![],
+            ..minimal_report()
         }
     }
 

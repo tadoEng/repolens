@@ -50,6 +50,7 @@ const FIXTURES_MODULE_PATH = fileURLToPath(new URL('./src/fixtures.ts', import.m
  */
 const REQUIRED_FIXTURES = [
 	'completed-report',
+	'evidence-source-absent',
 	'failed-permanent',
 	'failed-retriable',
 	'loc-unavailable',

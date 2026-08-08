@@ -28,10 +28,7 @@
     },
     "commit_sha": "0584a2df65968a4e9e6859ef46bbed430408a3f1",
     "tree_sha": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
-    "evidence_source": {
-      "api": "github-rest",
-      "version": "2026-03-10"
-    },
+    "evidence_source": null,
     "analyzer_version": "0.1.0",
     "ruleset_version": "1",
     "completed_at": "2026-08-06T09:00:04Z",
@@ -114,12 +111,84 @@
         ]
       }
     ],
-    "composition": null,
-    "limitations": [
-      {
-        "code": "EXTRACTION_STORAGE_LIMIT",
-        "explanation": "Archive extraction exceeded the configured storage limit, so no line counts were produced. This is not a claim that the repository has no code."
-      }
-    ]
+    "composition": {
+      "counter": "tokei",
+      "counter_version": "14.0.0",
+      "exclusion_policy_version": "1",
+      "classification_policy_version": "1",
+      "total_files": 842,
+      "total_lines": 91204,
+      "code_lines": 78310,
+      "comment_lines": 8120,
+      "blank_lines": 4774,
+      "languages": [
+        {
+          "language": "Rust",
+          "files": 512,
+          "code_lines": 48210,
+          "comment_lines": 6420,
+          "blank_lines": 3180
+        },
+        {
+          "language": "TypeScript",
+          "files": 214,
+          "code_lines": 19430,
+          "comment_lines": 1060,
+          "blank_lines": 1010
+        }
+      ],
+      "areas": [
+        {
+          "area": "crates/",
+          "code_lines": 51800
+        },
+        {
+          "area": "web/",
+          "code_lines": 26510
+        }
+      ],
+      "exclusions": [
+        {
+          "path_or_rule": "**/node_modules/**",
+          "reason": "Vendored dependencies are not this repository's code.",
+          "matched_rule": "vendor.node_modules",
+          "file_count": 126,
+          "bytes": 4182004
+        }
+      ],
+      "roles": [
+        {
+          "role": "PRODUCTION",
+          "files": 604,
+          "code_lines": 63400
+        },
+        {
+          "role": "TEST",
+          "files": 178,
+          "code_lines": 11710
+        },
+        {
+          "role": "GENERATED",
+          "files": 34,
+          "code_lines": 3200
+        }
+      ],
+      "largest_files": [
+        {
+          "path": "src/publication.rs",
+          "language": "Rust",
+          "code_lines": 2410,
+          "role": "PRODUCTION"
+        },
+        {
+          "path": "packages/api-client/src/schema.ts",
+          "language": "TypeScript",
+          "code_lines": 1980,
+          "role": "GENERATED"
+        }
+      ],
+      "unclassified_files": 7
+    },
+    "limitations": []
   }
 }
