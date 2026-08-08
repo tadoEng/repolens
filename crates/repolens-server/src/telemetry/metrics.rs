@@ -348,10 +348,15 @@ impl HistogramSnapshot {
             return None;
         }
 
-        // 1-based rank of the observation being asked for. Rounded up so p99 of
-        // a hundred observations is the hundredth rather than something between
-        // the ninety-ninth and it, and floored at one so p0 selects the fastest
-        // observation rather than none.
+        // Nearest rank: the observation selected is the one at 1-based rank
+        // `ceil(percentile × count / 100)`, floored at 1.
+        //
+        // The formula is written down because the intuition it contradicts is a
+        // common one, and only the arithmetic settles it: of a hundred
+        // observations p99 is the ninety-ninth, so one observation is slower
+        // than the figure reported — the slowest is reached at p100 and nowhere
+        // earlier. The floor is what makes p0 the fastest observation rather
+        // than rank zero, which no observation occupies.
         let rank = (u64::from(percentile.min(100)) * self.count)
             .div_ceil(100)
             .max(1);
@@ -787,8 +792,11 @@ mod tests {
     #[test]
     fn a_percentile_lands_in_the_bucket_holding_that_rank() {
         let metrics = Metrics::new();
-        // Ninety-nine fast requests and one slow one: p50 must sit in the fast
-        // bucket and p99 must not be dragged there by the majority.
+        // Ninety-nine fast requests and one slow one, arranged so the rank
+        // arithmetic is the only thing that can produce the answers below. At
+        // rank 99 of 100, p99 is still one of the fast observations; the single
+        // slow one is reached at p100 and not before. Expecting p99 to follow
+        // the tail is the misreading this case exists to fail on.
         for _ in 0..99 {
             record(&metrics, "/fast", 400);
         }
