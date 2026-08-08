@@ -365,6 +365,22 @@ pub fn extract_to(
         // the run. Only a *file* we would otherwise have counted can breach
         // this ceiling, which is what makes the breach mean the counts are
         // incomplete.
+        //
+        // This position is what makes the ceiling repository-derived, and the
+        // rule generalises only so far:
+        //
+        //     per-entry, after admit()  ->  repository-derived
+        //     aggregate,  after admit()  ->  repository-derived only when
+        //                                    defined over the canonical unique
+        //                                    normalized-path set
+        //
+        // `admit` proves an entry is a safe regular file and normalizes its
+        // path. It does not establish uniqueness across the archive, so a tar
+        // carrying two entries for one normalized path would let a count or a
+        // byte sum taken here measure the packaging twice. Nothing aggregates
+        // at this point today, and any future ceiling that does has to be
+        // defined over the unique path set before it may claim to measure the
+        // repository.
         if size > ceilings.file_bytes {
             return Err(ExtractionLimit::FileSize {
                 limit: ceilings.file_bytes,
