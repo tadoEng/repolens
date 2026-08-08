@@ -39,7 +39,24 @@ use crate::store;
 ///
 /// Distinct from the ruleset version: the same rules run by a different
 /// analyzer can produce a different report, so both are published.
-const ANALYZER_VERSION: &str = env!("CARGO_PKG_VERSION");
+///
+/// **Semantic, and deliberately not `env!("CARGO_PKG_VERSION")`.** It was, and
+/// that made it unable to do its job: report semantics changed repeatedly —
+/// evidence gained excerpts and digests, composition arrived, the residual role
+/// inverted — while the package sat at `0.1.0` throughout. The key would have
+/// declared two materially different analyzers to be the same analyzer, which
+/// is the failure its own membership test exists to prevent.
+///
+/// Bump on any change to how a report is *assembled* that is not already
+/// covered by another version in the key: a new report field, a changed
+/// overview statement, a different finding order, a change to which
+/// limitations are emitted. Rule changes belong to `RULESET_VERSION`,
+/// counting to the counter version, and the three policies to their own.
+///
+/// Package version stays what Cargo uses to publish a crate. Conflating the two
+/// means either the analyzer version moves for a dependency bump that changed
+/// no output, or it stays still for a change that rewrote every report.
+pub const ANALYZER_VERSION: &str = "1";
 
 /// Runs one analysis to completion, recording every state transition.
 ///

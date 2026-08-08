@@ -504,7 +504,175 @@ pub struct Report {
 /// it cannot drift apart by editing one and not the other.
 const EXECUTION_METADATA_FIELDS: [&str; 2] = ["analysis_id", "completed_at"];
 
+/// Limitation codes whose occurrence is decided by the repository, under a
+/// fixed set of versioned policies.
+///
+/// An allowlist, and the direction matters. Eligibility is granted only to
+/// codes named here; anything else — including a code added tomorrow — makes a
+/// report ineligible. The opposite default is fail-open: a new transient
+/// condition would silently be treated as reproducible, and the first evidence
+/// of the mistake would be two reports that disagree with nothing to explain
+/// why.
+///
+/// Every entry is a claim that the same commit produces the same outcome. A
+/// tree that exceeds the traversal bound exceeds it every time; a file over the
+/// per-blob cap is over it every time.
+///
+/// The claim has to survive one further question, and the archive ceilings are
+/// where it kept failing: *is the quantity measured against the repository, or
+/// against the representation it arrived in?* For those, the answer is decided
+/// by **where in the extraction the measurement is taken** — everything counted
+/// before an entry is admitted measures the tarball, whatever the name suggests
+/// about repositories, and sits in [`RUNTIME_DEPENDENT_LIMITATIONS`] instead.
+const REPRODUCIBLE_LIMITATIONS: [&str; 12] = [
+    // Bounds applied to the repository, decided by its own shape.
+    "TREE_TRUNCATED",
+    "BOUNDED_FILE_SELECTION",
+    // Selection outcomes. Each is a property of the tree under a fixed
+    // selection policy, which is why that policy is versioned in the key.
+    "FILE_SKIPPED_NOT_IN_TREE",
+    "FILE_SKIPPED_NOT_A_FILE",
+    "FILE_SKIPPED_TOO_LARGE",
+    "FILE_SKIPPED_BINARY",
+    "FILE_SKIPPED_UNDECODABLE",
+    "FILE_SKIPPED_BUDGET_SPENT",
+    "FILE_SKIPPED_SELECTION_FULL",
+    // Content outcomes that are properties of the bytes, not of the fetch.
+    "FILE_NOT_DECODABLE",
+    "FILE_TRUNCATED",
+    // The only archive ceiling checked *after* admission, which is what keeps
+    // it a fact about the repository: a directory or a link declaring an absurd
+    // size is refused as what it is, so nothing but a regular file the analysis
+    // would have counted can breach this, and a regular file's declared size is
+    // its own byte count. Ends the run rather than skipping the file,
+    // deliberately: a count that quietly means "counted, minus whatever we
+    // choked on" is the failure LOC reporting is most prone to.
+    "ARCHIVE_FILE_SIZE_LIMIT",
+];
+
+/// Codes this build knows to be decided by something other than the
+/// repository: the machine, the network, or the shape of the archive GitHub
+/// delivered.
+///
+/// Not consulted to decide eligibility — [`REPRODUCIBLE_LIMITATIONS`] does
+/// that on its own — but to tell a reader *why* a report is ineligible. An
+/// unrecognised code is also ineligible, and saying so honestly ("this build
+/// has not classified it") is different from claiming to know it is transient.
+const RUNTIME_DEPENDENT_LIMITATIONS: [&str; 7] = [
+    // A retrieval that failed this time and may succeed next time. This one
+    // predates composition: the pipeline deliberately continues without
+    // contents rather than failing the analysis, so a completed report already
+    // had a transient path before any wall-clock ceiling existed.
+    "CONTENTS_NOT_COLLECTED",
+    "FILE_NOT_RETRIEVED",
+    // Host conditions.
+    "ARCHIVE_DURATION_LIMIT",
+    "EXTRACTION_STORAGE_LIMIT",
+    // Every archive ceiling measured before an entry is admitted, and for one
+    // reason: each is taken against GitHub's archive *representation* rather
+    // than against repository content, and GitHub guarantees none of it is
+    // stable for a fixed commit.
+    //
+    // The compressed figure is whatever gzip emitted. The decompressed figure
+    // is counted between the decoder and the tar parser, so tar headers and
+    // block padding are inside it. The entry count is incremented per tar entry
+    // before `admit` runs, so directories, links, refused entries and the
+    // top-level prefix directory are inside it. All three are the right
+    // controls for a hostile archive, which is about what the machine must pull
+    // through and walk — and none of them is a count of the repository. An
+    // archive near any of these ceilings can legitimately fall on both sides of
+    // it across two runs of one commit.
+    "ARCHIVE_COMPRESSED_LIMIT",
+    "ARCHIVE_DECOMPRESSED_LIMIT",
+    "ARCHIVE_ENTRY_COUNT_LIMIT",
+];
+
+/// Why a report may not be compared byte for byte with another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IneligibilityReason {
+    /// A condition this build knows to depend on something other than the
+    /// repository: the machine, the network, or the archive representation the
+    /// evidence arrived in.
+    RuntimeDependent,
+    /// A limitation code this build does not classify. Ineligible by default:
+    /// an unknown condition is not evidence of reproducibility.
+    Unclassified,
+}
+
+/// Whether two reports sharing a reproducibility key may be compared byte for
+/// byte.
+///
+/// Explicit rather than implied by a `None`, and deliberately *not* implemented
+/// by removing the offending evidence from the payload: deleting the fields
+/// that record a timeout would make a timed-out run and a successful one look
+/// comparable by erasing the difference between them. The payload keeps
+/// everything; this says whether comparing it means anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComparisonEligibility {
+    /// Every limitation is a property of the repository under fixed versioned
+    /// limits, so another run with the same key must produce the same payload.
+    Eligible,
+    /// Something in this report was not decided by the repository alone.
+    Ineligible {
+        /// The limitation code that made it so.
+        code: String,
+        /// Whether this build recognises that code as transient, or simply does
+        /// not classify it.
+        reason: IneligibilityReason,
+    },
+}
+
+impl ComparisonEligibility {
+    /// Whether a determinism comparison over this report proves anything.
+    #[must_use]
+    pub fn is_eligible(&self) -> bool {
+        matches!(self, Self::Eligible)
+    }
+}
+
 impl Report {
+    /// Whether this report may be compared byte for byte with another sharing
+    /// its reproducibility key.
+    ///
+    /// Decided from the limitations the report actually carries, not from
+    /// whether `composition` is `null`. A tree that exceeds the traversal bound
+    /// exceeds it every time, so that outcome is as reproducible as a complete
+    /// walk. Treating every `UNABLE_TO_VERIFY` as non-reproducible would
+    /// discard the deterministic majority of them.
+    ///
+    /// **Fails closed.** Only codes on the allowlist keep a report eligible;
+    /// anything unrecognised makes it ineligible and says so. A limitation
+    /// added later is therefore conservative until somebody classifies it,
+    /// which is the safe direction for a claim of determinism.
+    ///
+    /// Finding-level limitations count too. A single blob that failed to
+    /// retrieve turns one finding into `UNABLE_TO_VERIFY` without any
+    /// report-level limitation, and two runs then differ for a reason the
+    /// repository did not decide.
+    #[must_use]
+    pub fn comparison_eligibility(&self) -> ComparisonEligibility {
+        let finding_limitations = self
+            .findings
+            .iter()
+            .flat_map(|finding| finding.limitations.iter());
+
+        self.limitations
+            .iter()
+            .chain(finding_limitations)
+            .find(|limitation| !REPRODUCIBLE_LIMITATIONS.contains(&limitation.code.as_str()))
+            .map_or(ComparisonEligibility::Eligible, |limitation| {
+                let reason = if RUNTIME_DEPENDENT_LIMITATIONS.contains(&limitation.code.as_str()) {
+                    IneligibilityReason::RuntimeDependent
+                } else {
+                    IneligibilityReason::Unclassified
+                };
+                ComparisonEligibility::Ineligible {
+                    code: limitation.code.clone(),
+                    reason,
+                }
+            })
+    }
+
     /// The part of this report that two runs over the same inputs must agree
     /// on, byte for byte.
     ///
@@ -516,9 +684,20 @@ impl Report {
     /// prevent — so the claim is bounded by executable code rather than by
     /// prose that the next reader has to trust.
     ///
-    /// What remains is a function of the reproducibility key — repository,
-    /// commit SHA, tree SHA, analyzer version, ruleset version — and must not
-    /// vary between runs.
+    /// What remains is a function of the reproducibility key **for runs that
+    /// completed within their resource limits**, and must not vary between
+    /// those runs.
+    ///
+    /// That qualifier is load-bearing and was missing while it was harmless:
+    /// composition runs under a wall-clock ceiling, so two runs with identical
+    /// semantic inputs can legitimately produce different payloads when one
+    /// crosses it on a loaded host. Ask [`Report::comparison_eligibility`]
+    /// before treating a mismatch as a defect.
+    ///
+    /// Ineligible reports are **not** stripped of the evidence that made them
+    /// ineligible. Removing the timeout limitation to make the payloads match
+    /// would delete exactly the field recording that the two runs differed —
+    /// manufacturing agreement rather than establishing it.
     ///
     /// Built by removing fields from the serialized report rather than by
     /// listing the ones to keep: a field added to [`Report`] then enters this
@@ -540,9 +719,183 @@ impl Report {
     }
 }
 
+/// A report with no findings, for tests that care about one field.
+///
+/// Module-level rather than inside `mod tests` so `infrastructure` can use it:
+/// its limits test compares its own classification against
+/// [`Report::comparison_eligibility`], and a second copy of this literal is
+/// exactly the kind of duplicate definition that drifts.
+#[cfg(test)]
+pub(crate) fn minimal_report() -> Report {
+    Report {
+        analysis_id: Uuid::nil(),
+        repository: RepositoryIdentity {
+            owner: "rust-lang".into(),
+            name: "crates.io".into(),
+        },
+        commit_sha: "0".repeat(40),
+        tree_sha: "1".repeat(40),
+        analyzer_version: "1".into(),
+        ruleset_version: "1".into(),
+        completed_at: OffsetDateTime::UNIX_EPOCH,
+        overview: vec![],
+        findings: vec![],
+        composition: None,
+        limitations: vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn limited(codes: &[&str]) -> Report {
+        let mut report = minimal_report();
+        report.limitations = codes
+            .iter()
+            .map(|code| Limitation {
+                code: (*code).to_owned(),
+                explanation: "fixture".to_owned(),
+            })
+            .collect();
+        report
+    }
+
+    #[test]
+    fn a_transient_content_failure_is_not_reproducible() {
+        /*
+         * The path that existed before composition did. `collect_selected_blobs`
+         * failing does not fail the analysis — the pipeline continues without
+         * contents, content rules report UNABLE_TO_VERIFY, and the report says
+         * CONTENTS_NOT_COLLECTED.
+         *
+         * So two runs over the same commit, same tree and same versions can
+         * differ: one has content-backed findings, the other does not. Calling
+         * both eligible would make a correct outcome look like a defect, and
+         * would have done so before any wall-clock ceiling existed.
+         */
+        let eligibility = limited(&["CONTENTS_NOT_COLLECTED"]).comparison_eligibility();
+
+        assert!(!eligibility.is_eligible());
+        assert_eq!(
+            eligibility,
+            ComparisonEligibility::Ineligible {
+                code: "CONTENTS_NOT_COLLECTED".to_owned(),
+                reason: IneligibilityReason::RuntimeDependent,
+            }
+        );
+    }
+
+    #[test]
+    fn an_unclassified_limitation_makes_a_report_ineligible() {
+        // Fail closed. A code this build does not know is not evidence of
+        // reproducibility, and the honest answer is "unclassified" rather than
+        // a claim that it is transient.
+        let eligibility = limited(&["SOMETHING_ADDED_LATER"]).comparison_eligibility();
+
+        assert_eq!(
+            eligibility,
+            ComparisonEligibility::Ineligible {
+                code: "SOMETHING_ADDED_LATER".to_owned(),
+                reason: IneligibilityReason::Unclassified,
+            },
+            "an unrecognised limitation must not silently mean reproducible"
+        );
+    }
+
+    #[test]
+    fn ordinary_bounded_limitations_stay_eligible() {
+        // The common case, and the reason this is an allowlist rather than a
+        // blanket "any limitation means non-reproducible": a truncated tree and
+        // a skipped oversized file are properties of the repository, and a
+        // report carrying them is as comparable as one carrying none.
+        assert!(
+            limited(&[
+                "TREE_TRUNCATED",
+                "BOUNDED_FILE_SELECTION",
+                "FILE_SKIPPED_TOO_LARGE",
+                "ARCHIVE_FILE_SIZE_LIMIT",
+            ])
+            .comparison_eligibility()
+            .is_eligible()
+        );
+    }
+
+    #[test]
+    fn an_archive_ceiling_is_reproducible_only_where_it_measures_an_admitted_file() {
+        /*
+         * Each of these read like a property of the repository, and each was
+         * classified that way at some point. "512 MiB of decoded bytes" and
+         * "200,000 entries" both sound like facts about a commit. Neither is:
+         * the byte counter sits between the gzip decoder and the tar parser, so
+         * it carries tar framing, and `examined` is incremented per tar entry
+         * before `admit` runs, so it carries directories, links, refused
+         * entries and the prefix directory GitHub wraps the archive in.
+         *
+         * The last one survives because of *where* it is checked, not what it
+         * is called: the file-size ceiling is applied after admission, so only
+         * a regular file the analysis would have counted can breach it, and a
+         * regular file's declared size is its own byte count.
+         *
+         * That is the whole lesson of this pair of reviews. Fail-closed
+         * classification decides which set a code belongs to; it cannot tell
+         * whether the quantity being classified is canonical, and that question
+         * has to be asked at the line where the measurement is taken.
+         */
+        for code in [
+            "ARCHIVE_COMPRESSED_LIMIT",
+            "ARCHIVE_DECOMPRESSED_LIMIT",
+            "ARCHIVE_ENTRY_COUNT_LIMIT",
+        ] {
+            assert_eq!(
+                limited(&[code]).comparison_eligibility(),
+                ComparisonEligibility::Ineligible {
+                    code: code.to_owned(),
+                    reason: IneligibilityReason::RuntimeDependent,
+                },
+                "{code} is measured before admission, against the archive rather than the \
+                 repository"
+            );
+        }
+
+        assert!(
+            limited(&["ARCHIVE_FILE_SIZE_LIMIT"])
+                .comparison_eligibility()
+                .is_eligible(),
+            "a ceiling measured on an admitted file is a fact about the repository, and \
+             classifying every archive ceiling as transient would discard that"
+        );
+    }
+
+    #[test]
+    fn a_finding_level_transient_limitation_also_makes_a_report_ineligible() {
+        // A single blob that failed to retrieve turns one finding into
+        // UNABLE_TO_VERIFY without any report-level limitation at all. Scanning
+        // only `Report::limitations` would call that pair of runs comparable.
+        let mut report = minimal_report();
+        report.findings = vec![Finding {
+            id: Uuid::nil(),
+            rule_id: "rule".to_owned(),
+            ruleset_version: "1".to_owned(),
+            category: FindingCategory::Technology,
+            state: FindingState::UnableToVerify,
+            severity: Severity::Info,
+            confidence: Confidence::Low,
+            title: "t".to_owned(),
+            explanation: "e".to_owned(),
+            evidence: vec![],
+            limitations: vec![Limitation {
+                code: "FILE_NOT_RETRIEVED".to_owned(),
+                explanation: "fixture".to_owned(),
+            }],
+            recommended_action: None,
+        }];
+
+        assert!(
+            !report.comparison_eligibility().is_eligible(),
+            "a transient failure inside a finding is still a transient failure"
+        );
+    }
 
     #[test]
     fn severity_and_confidence_are_distinct_types() {

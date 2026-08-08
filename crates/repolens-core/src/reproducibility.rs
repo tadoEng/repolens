@@ -10,6 +10,40 @@
 //! real input silently claims reproducibility it cannot deliver, which is worse
 //! than having no key at all — the report would assert determinism while two
 //! runs disagreed.
+//!
+//! # What this key does *not* determine
+//!
+//! Semantic inputs only. The key says what the analysis was asked to do; it
+//! says nothing about the machine that did it.
+//!
+//! ```text
+//! determines                        does not determine
+//! ──────────                        ──────────────────
+//! repository, commit, tree          host scheduling and contention
+//! evidence API and version          whether a wall-clock ceiling was crossed
+//! analyzer semantics                transient storage exhaustion
+//! ruleset                           transient memory pressure
+//! selection policy
+//! counter and its version
+//! exclusion policy
+//! classification policy
+//! ```
+//!
+//! This boundary is load-bearing rather than pedantic. Composition runs under a
+//! wall-clock ceiling, so two runs with an identical key can legitimately
+//! disagree: one finishes inside the limit and counts, the other crosses it on
+//! a loaded host and reports `UNABLE_TO_VERIFY` with the limit and the observed
+//! value. Both are correct. A key claiming to determine the whole report would
+//! make one of them a bug.
+//!
+//! The claim this key actually supports is therefore bounded:
+//!
+//! > Given identical semantic inputs **and a composition run that completed
+//! > within its limits**, the normalized result is identical.
+//!
+//! Not "every analysis with the same key produces a byte-identical report".
+//! The difference is also what keeps a transient timeout from being cached and
+//! served later as though it were a finding about the repository.
 
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +133,24 @@ pub struct ReproducibilityKey {
     pub composition_counter: Option<CompositionCounter>,
     /// Version of the policy deciding which paths are excluded from counting.
     pub exclusion_policy_version: String,
+    /// Version of the policy deciding each counted file's role and area.
+    ///
+    /// Separate from the exclusion policy because the two answer different
+    /// questions — what was left out, and what the rest *is* — and either can
+    /// change without the other. A changed classifier moves the production
+    /// share without a single file changing.
+    pub classification_policy_version: String,
+    /// Version of the policy deciding **which files are read at all**, and in
+    /// what order.
+    ///
+    /// The last of the three to be recorded here, and the one whose absence was
+    /// least visible: selection decides the evidence every finding is drawn
+    /// from, so changing it changes findings without changing a rule, a count,
+    /// or a repository. The selection module has always said as much in prose.
+    /// Until this field existed, that sentence had no mechanism behind it —
+    /// selection could change, every version here could stay put, and two
+    /// reports drawn from different evidence would claim to be comparable.
+    pub selection_policy_version: String,
 }
 
 #[cfg(test)]
@@ -115,7 +167,53 @@ mod tests {
             ruleset_version: "1".into(),
             composition_counter: Some(CompositionCounter::new("tokei", "14.0.0")),
             exclusion_policy_version: "1".into(),
+            classification_policy_version: "1".into(),
+            selection_policy_version: "1".into(),
         }
+    }
+
+    #[test]
+    fn every_field_of_the_key_is_listed_here() {
+        /*
+         * An inventory, so that adding an input to the key is a deliberate act
+         * with a second place to update, and *omitting* one is what fails.
+         *
+         * The failure this guards is the one the key already suffered: three
+         * policies decided report output while only one of them appeared here.
+         * Nothing broke, nothing failed, and the key quietly asserted a
+         * reproducibility it could not deliver — which its own documentation
+         * calls worse than having no key at all.
+         *
+         * The membership test is above: does changing this value change the
+         * report? If a new constant answers yes, it belongs in the struct and
+         * in this list. If it answers no, it belongs in neither.
+         */
+        let json = serde_json::to_value(key()).unwrap();
+        let mut fields: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fields.sort_unstable();
+
+        assert_eq!(
+            fields,
+            [
+                "analyzer_version",
+                "classification_policy_version",
+                "commit_sha",
+                "composition_counter",
+                "exclusion_policy_version",
+                "repository",
+                "ruleset_version",
+                "selection_policy_version",
+                "source",
+                "tree_sha",
+            ],
+            "the reproducibility key gained or lost an input; if a policy now decides report \
+             output, it belongs here and in this list"
+        );
     }
 
     #[test]
@@ -179,6 +277,14 @@ mod tests {
         let mut exclusions = base.clone();
         exclusions.exclusion_policy_version = "2".into();
         assert_ne!(base, exclusions);
+
+        let mut classification = base.clone();
+        classification.classification_policy_version = "2".into();
+        assert_ne!(base, classification);
+
+        let mut selection = base.clone();
+        selection.selection_policy_version = "2".into();
+        assert_ne!(base, selection);
     }
 
     #[test]
