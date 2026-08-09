@@ -1,0 +1,169 @@
+{
+  "process": {
+    "build_sha": "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+    "uptime_seconds": 93784,
+    "resident_bytes": null
+  },
+  "http": {
+    "in_flight": 1,
+    "tracked_routes": 5,
+    "max_tracked_routes": 64,
+    "routes": [
+      {
+        "route": "/api/v1/analyses",
+        "method": "POST",
+        "requests": 412,
+        "responses": {
+          "informational": 0,
+          "success": 389,
+          "redirection": 0,
+          "client_error": 22,
+          "server_error": 1,
+          "other": 0
+        },
+        "latency": {
+          "total_micros": 64070000,
+          "p50": {
+            "micros": 9800,
+            "lower_bound_micros": 5000,
+            "upper_bound_micros": 10000
+          },
+          "p95": {
+            "micros": 31200,
+            "lower_bound_micros": 25000,
+            "upper_bound_micros": 50000
+          },
+          "p99": {
+            "micros": 10000000,
+            "lower_bound_micros": 10000000,
+            "upper_bound_micros": null
+          }
+        }
+      },
+      {
+        "route": "/api/v1/analyses/{analysis_id}",
+        "method": "GET",
+        "requests": 7102,
+        "responses": {
+          "informational": 0,
+          "success": 7041,
+          "redirection": 0,
+          "client_error": 60,
+          "server_error": 1,
+          "other": 0
+        },
+        "latency": {
+          "total_micros": 63918000,
+          "p50": {
+            "micros": 7900,
+            "lower_bound_micros": 5000,
+            "upper_bound_micros": 10000
+          },
+          "p95": {
+            "micros": 22800,
+            "lower_bound_micros": 10000,
+            "upper_bound_micros": 25000
+          },
+          "p99": {
+            "micros": 41500,
+            "lower_bound_micros": 25000,
+            "upper_bound_micros": 50000
+          }
+        }
+      },
+      {
+        "route": "/api/v1/system/probe",
+        "method": "GET",
+        "requests": 1241,
+        "responses": {
+          "informational": 0,
+          "success": 1241,
+          "redirection": 0,
+          "client_error": 0,
+          "server_error": 0,
+          "other": 0
+        },
+        "latency": {
+          "total_micros": 9928000,
+          "p50": {
+            "micros": 6800,
+            "lower_bound_micros": 5000,
+            "upper_bound_micros": 10000
+          },
+          "p95": {
+            "micros": 17400,
+            "lower_bound_micros": 10000,
+            "upper_bound_micros": 25000
+          },
+          "p99": {
+            "micros": 33100,
+            "lower_bound_micros": 25000,
+            "upper_bound_micros": 50000
+          }
+        }
+      },
+      {
+        "route": "/healthz",
+        "method": "GET",
+        "requests": 6814,
+        "responses": {
+          "informational": 0,
+          "success": 6814,
+          "redirection": 0,
+          "client_error": 0,
+          "server_error": 0,
+          "other": 0
+        },
+        "latency": {
+          "total_micros": 6132600,
+          "p50": {
+            "micros": 720,
+            "lower_bound_micros": 500,
+            "upper_bound_micros": 1000
+          },
+          "p95": {
+            "micros": 2100,
+            "lower_bound_micros": 1000,
+            "upper_bound_micros": 2500
+          },
+          "p99": {
+            "micros": 4400,
+            "lower_bound_micros": 2500,
+            "upper_bound_micros": 5000
+          }
+        }
+      },
+      {
+        "route": "<unmatched>",
+        "method": "GET",
+        "requests": 37,
+        "responses": {
+          "informational": 0,
+          "success": 0,
+          "redirection": 0,
+          "client_error": 37,
+          "server_error": 0,
+          "other": 0
+        },
+        "latency": {
+          "total_micros": 11100,
+          "p50": {
+            "micros": 260,
+            "lower_bound_micros": 0,
+            "upper_bound_micros": 500
+          },
+          "p95": {
+            "micros": 420,
+            "lower_bound_micros": 0,
+            "upper_bound_micros": 500
+          },
+          "p99": {
+            "micros": 480,
+            "lower_bound_micros": 0,
+            "upper_bound_micros": 500
+          }
+        }
+      }
+    ]
+  }
+}

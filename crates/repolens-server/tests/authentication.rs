@@ -1,126 +1,30 @@
 //! The authentication gate on analysis creation.
 //!
 //! Tokens are **minted in-process** against a throwaway RSA key, and the
-//! verifier is handed that key instead of Google's. Recording a real Firebase
-//! token would have been simpler and would have expired within the hour, taking
-//! the suite with it — and it would have put a live credential in the
-//! repository.
+//! verifier is handed that key instead of Google's — see [`support`], which
+//! `tests/admin.rs` shares so that neither suite can end up asserting against
+//! its own private idea of a valid token.
 //!
 //! What that buys is the ability to test the checks that matter by constructing
 //! tokens that fail exactly one of them: wrong audience, wrong issuer, expired,
 //! signed by a key the verifier does not have.
 
-use std::collections::HashMap;
+mod support;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
 use repolens_github::{GitHubClientConfig, GitHubRestClient};
 use repolens_server::api;
 use repolens_server::auth::FirebaseVerifier;
 use repolens_server::state::AppState;
-use serde::Serialize;
+use support::{KID, PROJECT, decoding_keys, mint, now, valid_claims};
 use tower::ServiceExt as _;
-
-const PROJECT: &str = "repolens-test-project";
-const KID: &str = "test-key-1";
-
-/// The RSA keypair this suite signs with, generated once per test binary.
-///
-/// Generated rather than committed. `.gitignore` blocks `*.pem` and `*.key` on
-/// purpose, and carving an exception for a fixture would weaken a net that
-/// exists to catch the real thing — a key that never touches disk cannot be
-/// mistaken for a credential by a scanner or by the next reader.
-///
-/// Returned as DER plus the public modulus and exponent, which is deliberately
-/// the same shape the verifier consumes in production: Google publishes JWKs,
-/// so `DecodingKey::from_rsa_raw_components` is the path that actually ships
-/// and therefore the path worth exercising.
-///
-/// 2048 bits, matching Google, paid once per binary.
-struct TestKey {
-    private_der: Vec<u8>,
-    modulus: Vec<u8>,
-    exponent: Vec<u8>,
-}
-
-fn key() -> &'static TestKey {
-    use rsa::pkcs1::EncodeRsaPrivateKey as _;
-    use rsa::traits::PublicKeyParts as _;
-    use rsa::{RsaPrivateKey, RsaPublicKey};
-
-    static KEY: std::sync::OnceLock<TestKey> = std::sync::OnceLock::new();
-    KEY.get_or_init(|| {
-        let mut rng = rand::thread_rng();
-        let private = RsaPrivateKey::new(&mut rng, 2048).expect("a keypair is generated");
-        let public = RsaPublicKey::from(&private);
-        TestKey {
-            private_der: private
-                .to_pkcs1_der()
-                .expect("the private key encodes")
-                .as_bytes()
-                .to_vec(),
-            modulus: public.n().to_bytes_be(),
-            exponent: public.e().to_bytes_be(),
-        }
-    })
-}
-
-/// Firebase ID token claims, as far as this API reads them.
-///
-/// Every field is `Option` with `skip_serializing_if` so a test can mint a token
-/// that **omits** a claim, not merely one that carries a wrong value. Required
-/// and valid are different rules and each needs its own token.
-#[derive(Serialize)]
-struct TestClaims {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sub: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    aud: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    iss: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    iat: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    auth_time: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exp: Option<i64>,
-}
-
-fn now() -> i64 {
-    time::OffsetDateTime::now_utc().unix_timestamp()
-}
-
-/// Signs a token with the fixture key.
-fn mint(claims: &TestClaims, kid: &str) -> String {
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some(kid.to_owned());
-    let signing = EncodingKey::from_rsa_der(&key().private_der);
-    jsonwebtoken::encode(&header, claims, &signing).expect("the token signs")
-}
-
-fn valid_claims() -> TestClaims {
-    TestClaims {
-        sub: Some("firebase-uid-123".to_owned()),
-        aud: Some(PROJECT.to_owned()),
-        iss: Some(format!("https://securetoken.google.com/{PROJECT}")),
-        iat: Some(now() - 60),
-        auth_time: Some(now() - 120),
-        exp: Some(now() + 3600),
-    }
-}
 
 /// A router whose verifier trusts the fixture key and nothing else.
 fn app_with_auth() -> axum::Router {
-    let mut keys = HashMap::new();
-    keys.insert(
-        KID.to_owned(),
-        DecodingKey::from_rsa_raw_components(&key().modulus, &key().exponent),
-    );
-
     let github = GitHubRestClient::new(GitHubClientConfig::new()).expect("constructible");
     let state = AppState::without_database(github).with_verifier(std::sync::Arc::new(
-        FirebaseVerifier::with_keys(PROJECT, keys),
+        FirebaseVerifier::with_keys(PROJECT, decoding_keys()),
     ));
 
     api::build(state, None).0

@@ -66,6 +66,19 @@ pub enum ErrorCode {
     /// Not retriable as-is — the same request repeated unchanged fails
     /// identically. The remedy is to sign in and present a fresh token.
     Unauthenticated,
+    /// The caller proved who they are, and that identity is not permitted here.
+    ///
+    /// Distinct from [`Unauthenticated`](Self::Unauthenticated), and the
+    /// distinction is the whole reason both exist: `UNAUTHENTICATED` says no
+    /// identity was established, so signing in is the remedy. This says an
+    /// identity *was* established and the answer is still no, so signing in
+    /// again — or signing in as anyone else the client can offer — changes
+    /// nothing. A UI that collapsed them would loop a non-admin through a
+    /// sign-in flow that cannot succeed.
+    ///
+    /// Carries no detail about what would have been permitted. Telling a caller
+    /// which identities are allow-listed is telling them who to compromise.
+    Forbidden,
     /// Sign-in could not be checked, so the request was refused rather than
     /// admitted.
     ///
@@ -114,7 +127,7 @@ impl ErrorCode {
     /// Hand-maintained but *not* hand-trusted: `all_variants_are_listed` fails
     /// if this drifts from the enum. Without it, a test that iterates "all
     /// codes" would quietly iterate only the ones somebody remembered.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::InvalidRepositoryUrl,
         Self::RepositoryNotFound,
         Self::RepositoryInaccessible,
@@ -126,6 +139,7 @@ impl ErrorCode {
         Self::AnalysisNotFound,
         Self::ReportNotAvailable,
         Self::Unauthenticated,
+        Self::Forbidden,
         Self::AuthenticationUnavailable,
         Self::MalformedRequest,
         Self::RequestTooLarge,
@@ -281,6 +295,7 @@ mod tests {
                 | ErrorCode::AnalysisNotFound
                 | ErrorCode::ReportNotAvailable
                 | ErrorCode::Unauthenticated
+                | ErrorCode::Forbidden
                 | ErrorCode::AuthenticationUnavailable
                 | ErrorCode::MalformedRequest
                 | ErrorCode::RequestTooLarge
@@ -356,6 +371,14 @@ mod tests {
         assert!(!ErrorCode::AnalyzerFailedPermanent.is_retriable());
         assert!(!ErrorCode::InvalidRepositoryUrl.is_retriable());
         assert!(!ErrorCode::RepositoryArchived.is_retriable());
+        // Repeating the request with the same credential fails identically, and
+        // so does presenting a fresh one for the same identity. The remedy is
+        // configuration, which is not something the caller can retry into.
+        assert!(!ErrorCode::Forbidden.is_retriable());
+        // Its neighbour is the opposite case and is the one most likely to be
+        // grouped with it by mistake: a dependency of ours was unreachable, so
+        // the very same request may well succeed a moment later.
+        assert!(ErrorCode::AuthenticationUnavailable.is_retriable());
         assert!(ErrorCode::RateLimited.is_retriable());
         assert!(ErrorCode::WorkerFailedRetriable.is_retriable());
     }

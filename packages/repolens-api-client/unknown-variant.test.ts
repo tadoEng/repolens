@@ -22,7 +22,9 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
 import {
+	ADMIN_FIXTURES,
 	ANALYSIS_FIXTURES,
+	type AdminFixtureName,
 	type AnalysisFixtureName
 } from './src/fixtures';
 import {
@@ -35,6 +37,7 @@ import {
 	describeEvidenceProvider,
 	describeFindingCategory,
 	describeFindingState,
+	describeHttpMethodClass,
 	describeProbeStatus,
 	describeSeverity,
 	describeTriggerStatus,
@@ -62,6 +65,7 @@ const DESCRIBERS: Readonly<Record<string, (raw: string) => VariantDescriptor<str
 	EvidenceProvider: describeEvidenceProvider,
 	FindingCategory: describeFindingCategory,
 	FindingState: describeFindingState,
+	HttpMethodClass: describeHttpMethodClass,
 	ProbeStatus: describeProbeStatus,
 	Severity: describeSeverity,
 	TriggerStatus: describeTriggerStatus
@@ -166,6 +170,31 @@ describe('unknown enum variants', () => {
 				const described = describe_(inherited);
 				expect(described.known).toBeNull();
 				expect(typeof described.label).toBe('string');
+			}
+		}
+	});
+
+	test('the DESCRIBERS registry is annotated, not a subset that happens to fit', () => {
+		// `DESCRIBERS` is what the per-enum blocks below run against, and a name
+		// missing from it makes those blocks return early rather than fail. The
+		// registry and the label maps therefore have to agree, or the runtime half
+		// of this gate quietly stops covering an enum while the type half still
+		// passes.
+		expect(Object.keys(DESCRIBERS).sort()).toEqual(Object.keys(HANDLED_VARIANTS).sort());
+	});
+
+	test('the admin fixtures contain only variants the frontend handles', () => {
+		// The admin fixtures are the contract made executable for `/admin`, and the
+		// route table is where an enum value actually reaches a reader. A method
+		// class the frontend cannot name would render as a raw token in the one
+		// table nobody looks at until something is wrong.
+		for (const name of Object.keys(ADMIN_FIXTURES) as AdminFixtureName[]) {
+			const overview = ADMIN_FIXTURES[name];
+
+			expect(overview.http.routes.length).toBeGreaterThan(0);
+			for (const route of overview.http.routes) {
+				const { raw, known } = describeHttpMethodClass(route.method);
+				expect(known, `fixture ${name} carries unhandled method class ${raw}`).not.toBeNull();
 			}
 		}
 	});

@@ -39,6 +39,7 @@ import type {
 	EvidenceProvider,
 	FindingCategory,
 	FindingState,
+	HttpMethodClass,
 	ProbeStatus,
 	Severity,
 	TriggerStatus
@@ -123,12 +124,16 @@ export const ERROR_CODE_LABELS: Readonly<Record<ErrorCode, string>> = {
 	RATE_LIMITED: 'Rate limited',
 	WORKER_FAILED_RETRIABLE: 'Worker failed (retriable)',
 	ANALYZER_FAILED_PERMANENT: 'Analyzer failed (permanent)',
-	// The seven below are produced by the HTTP layer rather than by an analysis,
+	// The eight below are produced by the HTTP layer rather than by an analysis,
 	// so they are never a stored analysis state — they arrive only as the
 	// response to a request that could not be served.
 	ANALYSIS_NOT_FOUND: 'Analysis not found',
 	REPORT_NOT_AVAILABLE: 'Report not available',
 	UNAUTHENTICATED: 'Not signed in',
+	// Deliberately not phrased as a sign-in prompt. The caller *is* signed in,
+	// and offering the sign-in flow again would loop them through something that
+	// cannot change the answer.
+	FORBIDDEN: 'Not permitted',
 	AUTHENTICATION_UNAVAILABLE: 'Sign-in unavailable',
 	MALFORMED_REQUEST: 'Malformed request',
 	REQUEST_TOO_LARGE: 'Request too large',
@@ -189,6 +194,32 @@ export const FINDING_STATE_LABELS: Readonly<Record<FindingState, string>> = {
 	UNABLE_TO_VERIFY: 'Unable to verify'
 };
 
+/**
+ * The request methods the operational snapshot records, as a closed set.
+ *
+ * Mostly an identity map, and that is not an argument against having it. HTTP methods are an
+ * *extensible* token — a client may send `EVIL1 /healthz` and the server will answer it — so
+ * everything outside this set is folded into `OTHER` before it can become a row of the route
+ * table. Handling it here is what makes that foldable set a thing the frontend agrees to,
+ * rather than a server-side detail a UI discovers by rendering a value it has never seen.
+ */
+export const HTTP_METHOD_CLASS_LABELS: Readonly<Record<HttpMethodClass, string>> = {
+	GET: 'GET',
+	HEAD: 'HEAD',
+	POST: 'POST',
+	PUT: 'PUT',
+	PATCH: 'PATCH',
+	DELETE: 'DELETE',
+	OPTIONS: 'OPTIONS',
+	TRACE: 'TRACE',
+	CONNECT: 'CONNECT',
+	// Not a method anyone sent. It is the bucket every unrecognised verb was
+	// folded into, and a row labelled `OTHER` means "some number of requests
+	// arrived with methods this service does not name" — which a bare verb
+	// could not say.
+	OTHER: 'Other method'
+};
+
 export const PROBE_STATUS_LABELS: Readonly<Record<ProbeStatus, string>> = {
 	OK: 'OK',
 	DEGRADED: 'Degraded',
@@ -240,6 +271,10 @@ export function describeFindingState(raw: string): VariantDescriptor<FindingStat
 	return describeVariant(FINDING_STATE_LABELS, raw);
 }
 
+export function describeHttpMethodClass(raw: string): VariantDescriptor<HttpMethodClass> {
+	return describeVariant(HTTP_METHOD_CLASS_LABELS, raw);
+}
+
 export function describeProbeStatus(raw: string): VariantDescriptor<ProbeStatus> {
 	return describeVariant(PROBE_STATUS_LABELS, raw);
 }
@@ -271,6 +306,7 @@ export const HANDLED_VARIANTS: Readonly<Record<string, readonly string[]>> = {
 	EvidenceProvider: Object.keys(EVIDENCE_PROVIDER_LABELS),
 	FindingCategory: Object.keys(FINDING_CATEGORY_LABELS),
 	FindingState: Object.keys(FINDING_STATE_LABELS),
+	HttpMethodClass: Object.keys(HTTP_METHOD_CLASS_LABELS),
 	ProbeStatus: Object.keys(PROBE_STATUS_LABELS),
 	Severity: Object.keys(SEVERITY_LABELS),
 	TriggerStatus: Object.keys(TRIGGER_STATUS_LABELS)

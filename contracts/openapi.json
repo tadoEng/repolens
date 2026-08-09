@@ -10,6 +10,76 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/admin/overview": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "overview",
+        "responses": {
+          "200": {
+            "description": "Operational snapshot of the process that answered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminOverview"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid Firebase ID token was presented",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is signed in and is not an administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The request exceeded the server time budget",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unhandled fault in this service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Sign-in could not be checked, so the request was refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/analyses": {
       "post": {
         "tags": [
@@ -367,6 +437,24 @@
   },
   "components": {
     "schemas": {
+      "AdminOverview": {
+        "type": "object",
+        "description": "The operational snapshot of one process.",
+        "required": [
+          "process",
+          "http"
+        ],
+        "properties": {
+          "http": {
+            "$ref": "#/components/schemas/HttpOverview",
+            "description": "Facts about the requests it has served."
+          },
+          "process": {
+            "$ref": "#/components/schemas/ProcessOverview",
+            "description": "Facts about the process itself."
+          }
+        }
+      },
       "Analysis": {
         "type": "object",
         "description": "One analysis run.",
@@ -592,6 +680,7 @@
           "ANALYSIS_NOT_FOUND",
           "REPORT_NOT_AVAILABLE",
           "UNAUTHENTICATED",
+          "FORBIDDEN",
           "AUTHENTICATION_UNAVAILABLE",
           "MALFORMED_REQUEST",
           "REQUEST_TOO_LARGE",
@@ -817,6 +906,59 @@
           "UNABLE_TO_VERIFY"
         ]
       },
+      "HttpMethodClass": {
+        "type": "string",
+        "description": "The request method, folded into the closed set this service records.\n\nA wire enum of its own rather than the internal `RouteMethod`, translated by\nan exhaustive match in `api::admin`. HTTP methods are an *extensible* token —\n`hyper` will deliver `WHATEVER /healthz` — so publishing the method as a free\nstring would tell a consumer the set is open when the entire cardinality\nguarantee is that it is closed. Everything outside this set arrives as\n[`Other`](Self::Other).",
+        "enum": [
+          "GET",
+          "HEAD",
+          "POST",
+          "PUT",
+          "PATCH",
+          "DELETE",
+          "OPTIONS",
+          "TRACE",
+          "CONNECT",
+          "OTHER"
+        ]
+      },
+      "HttpOverview": {
+        "type": "object",
+        "description": "What the process has observed about the requests it served.",
+        "required": [
+          "in_flight",
+          "tracked_routes",
+          "max_tracked_routes",
+          "routes"
+        ],
+        "properties": {
+          "in_flight": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requests being served at the moment the snapshot was taken.",
+            "minimum": 0
+          },
+          "max_tracked_routes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The ceiling on that number.\n\nPublished so a reader can tell a quiet registry from a full one without\nknowing the constant. Once `tracked_routes` reaches this, further labels\nare folded into the `<overflow>` row rather than allocated — which is\nwhat keeps the memory bound arithmetic rather than a hope about how the\nrouter behaves.",
+            "minimum": 0
+          },
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RouteOverview"
+            },
+            "description": "One row per route and method class that has served a request.\n\nSorted by route then method, and combinations with no requests are\nomitted entirely — so the labels present are exactly the labels this\nprocess recorded, rather than a grid of zeroes that would hide which\nones were real."
+          },
+          "tracked_routes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct route labels currently held.",
+            "minimum": 0
+          }
+        }
+      },
       "LanguageLineCount": {
         "type": "object",
         "description": "Line counts for one language.",
@@ -885,6 +1027,68 @@
           "role": {
             "$ref": "#/components/schemas/CodeRole",
             "description": "Role, so a large generated file is not mistaken for a large hand-written\none — which is the most common way this list misleads."
+          }
+        }
+      },
+      "LatencyPercentile": {
+        "type": "object",
+        "description": "One percentile, carrying the resolution it was read at.\n\n`micros` is a linear interpolation *inside one bucket*, which assumes the\nobservations in that bucket are spread evenly across it. They are not, and\nnothing measured how they actually are. The bounds are what the histogram\ngenuinely knows — the answer lies between them — and they travel with the\nestimate rather than being recoverable only by consulting a bucket table\nelsewhere, so a consumer cannot take the interpolation for a measurement\nwithout first stepping over the two fields that say it is not one.",
+        "required": [
+          "micros",
+          "lower_bound_micros",
+          "upper_bound_micros"
+        ],
+        "properties": {
+          "lower_bound_micros": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Lower bound of the bucket the percentile fell in.",
+            "minimum": 0
+          },
+          "micros": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Interpolated estimate, in microseconds.",
+            "minimum": 0
+          },
+          "upper_bound_micros": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Upper bound of that bucket.\n\n**Null for the overflow bucket**, where the histogram recorded that an\nobservation was slower than the last bound and nothing further. Any\nfigure here would be invented, and `micros` is then the last bound itself\n— a floor rather than an estimate, which a UI has to render differently.\n\nRequired-but-nullable rather than optional, so a consumer cannot skip the\ncase: the field is always present, its value is not.",
+            "minimum": 0
+          }
+        }
+      },
+      "LatencySummary": {
+        "type": "object",
+        "description": "The latency distribution for one route and method.\n\nNo mean is published. `total_micros` and the request count it belongs to are\nwhat a mean is computed *from*, and they are strictly more useful: a\nconsumer that wants the average can divide, and one that wants to know how\nmuch time a route has cost in total cannot recover it from an average.",
+        "required": [
+          "total_micros",
+          "p50",
+          "p95",
+          "p99"
+        ],
+        "properties": {
+          "p50": {
+            "$ref": "#/components/schemas/LatencyPercentile",
+            "description": "Median."
+          },
+          "p95": {
+            "$ref": "#/components/schemas/LatencyPercentile",
+            "description": "95th percentile."
+          },
+          "p99": {
+            "$ref": "#/components/schemas/LatencyPercentile",
+            "description": "99th percentile.\n\nOf a hundred observations this is the ninety-ninth, so exactly one is\nslower than the figure reported. The slowest observation is reached at\np100 and nowhere earlier — expecting p99 to follow the tail is the\ncommon misreading, and the bucket bounds on each estimate are what let a\nreader check rather than assume."
+          },
+          "total_micros": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total observed latency across every recorded request, in microseconds.",
+            "minimum": 0
           }
         }
       },
@@ -1087,6 +1291,36 @@
           "UNAVAILABLE"
         ]
       },
+      "ProcessOverview": {
+        "type": "object",
+        "description": "What the process knows about itself.",
+        "required": [
+          "build_sha",
+          "uptime_seconds",
+          "resident_bytes"
+        ],
+        "properties": {
+          "build_sha": {
+            "type": "string",
+            "description": "Commit this binary was built from, or `unknown` for a local build."
+          },
+          "resident_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Resident set size in bytes, where the platform can answer.\n\n**Null off Linux**, which has no `/proc/self/status` to read it from and\nis where development happens. A plausible zero would turn \"we cannot\nmeasure this here\" into \"the process uses no memory\" — unknown is not\nzero, the same rule the report contract keeps for a truncated tree.\n\nRequired-but-nullable, so a consumer must render the unknown case rather\nthan being permitted to forget it exists.",
+            "minimum": 0
+          },
+          "uptime_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds since the process started, on a monotonic clock.\n\nUnaffected by the wall clock being corrected underneath it, and anchored\nat the top of `main` rather than at the first read — a process up for\ndays must not report an uptime of seconds.",
+            "minimum": 0
+          }
+        }
+      },
       "Report": {
         "type": "object",
         "description": "A complete report for one repository at one commit.",
@@ -1245,6 +1479,41 @@
           }
         }
       },
+      "RouteOverview": {
+        "type": "object",
+        "description": "Counters for one route label and one method class.",
+        "required": [
+          "route",
+          "method",
+          "requests",
+          "responses",
+          "latency"
+        ],
+        "properties": {
+          "latency": {
+            "$ref": "#/components/schemas/LatencySummary",
+            "description": "How long they took."
+          },
+          "method": {
+            "$ref": "#/components/schemas/HttpMethodClass",
+            "description": "The method class."
+          },
+          "requests": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requests recorded for this route and method.",
+            "minimum": 0
+          },
+          "responses": {
+            "$ref": "#/components/schemas/StatusClassCounts",
+            "description": "How those requests were answered."
+          },
+          "route": {
+            "type": "string",
+            "description": "The normalised route label.\n\nAlways the *matched* router pattern — `/api/v1/analyses/{analysis_id}` —\nnever the path a caller sent, so no analysis id, repository name, or\npasted token can arrive here. Two labels are not patterns and say so:\n`<unmatched>` for a request that matched no route, and `<overflow>` for\nrequests folded together once the registry stopped distinguishing."
+          }
+        }
+      },
       "Severity": {
         "type": "string",
         "description": "Impact if the finding is valid. Independent of [`Confidence`].",
@@ -1254,6 +1523,56 @@
           "MEDIUM",
           "HIGH"
         ]
+      },
+      "StatusClassCounts": {
+        "type": "object",
+        "description": "Responses counted by status class.\n\nNamed fields rather than an array, because an array's meaning is its index\norder and no consumer can check that it still holds. A field named\n`server_error` cannot be silently reordered into the position `client_error`\nused to occupy.\n\nA class rather than the code: `404` and `410` answer the same operational\nquestion, and a counter per code would be several hundred figures at a\nresolution nothing reads at.",
+        "required": [
+          "informational",
+          "success",
+          "redirection",
+          "client_error",
+          "server_error",
+          "other"
+        ],
+        "properties": {
+          "client_error": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`4xx` — the caller's fault.",
+            "minimum": 0
+          },
+          "informational": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`1xx`.",
+            "minimum": 0
+          },
+          "other": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Any other status the HTTP crate admits. No handler here produces one.",
+            "minimum": 0
+          },
+          "redirection": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`3xx`.",
+            "minimum": 0
+          },
+          "server_error": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`5xx` — ours.",
+            "minimum": 0
+          },
+          "success": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`2xx`.",
+            "minimum": 0
+          }
+        }
       },
       "SystemProbeResponse": {
         "type": "object",

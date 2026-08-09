@@ -1,23 +1,23 @@
 /**
  * GENERATED FILE — DO NOT EDIT BY HAND.
  *
- * The executable `analysis-v1` fixtures, bound to TypeScript. Produced from
- * `contracts/fixtures/analysis-v1/*.json` — themselves generated from the Rust DTOs — by:
+ * The executable fixtures, bound to TypeScript. Produced from the JSON under
+ * `contracts/fixtures/` — itself generated from the Rust DTOs — by:
  *
  *     pnpm --filter @repolens/api-client fixtures:update
  *
- * Each fixture is emitted as a literal under `satisfies AnalysisFixture` so the compiler
- * checks it against the generated schema. A JSON import could not: TypeScript widens string
- * literals in JSON modules, which would type every enum value as `string` and silently
- * retire the check that matters most.
+ * Each fixture is emitted as a literal under a `satisfies` clause so the compiler checks it
+ * against the generated schema. A JSON import could not: TypeScript widens string literals
+ * in JSON modules, which would type every enum value as `string` and silently retire the
+ * check that matters most.
  *
  * This is a binding, not a copy. `fixtures.test.ts` regenerates it and fails if the result
  * differs, so fixture content is authored in exactly one place — the JSON.
  */
 
-import type { AnalysisFixture } from './contract';
+import type { AdminFixture, AnalysisFixture } from './contract';
 
-/** Fixture `completed-report.json`. */
+/** Fixture `analysis-v1/completed-report.json`. */
 export const COMPLETED_REPORT_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -216,7 +216,7 @@ export const COMPLETED_REPORT_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Fixture `evidence-source-absent.json`. */
+/** Fixture `analysis-v1/evidence-source-absent.json`. */
 export const EVIDENCE_SOURCE_ABSENT_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -412,7 +412,7 @@ export const EVIDENCE_SOURCE_ABSENT_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Fixture `failed-inaccessible.json`. */
+/** Fixture `analysis-v1/failed-inaccessible.json`. */
 export const FAILED_INACCESSIBLE_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -440,7 +440,7 @@ export const FAILED_INACCESSIBLE_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Fixture `failed-permanent.json`. */
+/** Fixture `analysis-v1/failed-permanent.json`. */
 export const FAILED_PERMANENT_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -469,7 +469,7 @@ export const FAILED_PERMANENT_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Fixture `failed-repository-archived.json`. */
+/** Fixture `analysis-v1/failed-repository-archived.json`. */
 export const FAILED_REPOSITORY_ARCHIVED_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -498,7 +498,7 @@ export const FAILED_REPOSITORY_ARCHIVED_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Fixture `failed-repository-not-found.json`. */
+/** Fixture `analysis-v1/failed-repository-not-found.json`. */
 export const FAILED_REPOSITORY_NOT_FOUND_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -527,7 +527,7 @@ export const FAILED_REPOSITORY_NOT_FOUND_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Fixture `failed-repository-too-large.json`. */
+/** Fixture `analysis-v1/failed-repository-too-large.json`. */
 export const FAILED_REPOSITORY_TOO_LARGE_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -556,7 +556,7 @@ export const FAILED_REPOSITORY_TOO_LARGE_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Fixture `failed-retriable.json`. */
+/** Fixture `analysis-v1/failed-retriable.json`. */
 export const FAILED_RETRIABLE_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -585,7 +585,7 @@ export const FAILED_RETRIABLE_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Fixture `failed-worker-retriable.json`. */
+/** Fixture `analysis-v1/failed-worker-retriable.json`. */
 export const FAILED_WORKER_RETRIABLE_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -613,7 +613,7 @@ export const FAILED_WORKER_RETRIABLE_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Fixture `loc-unavailable.json`. */
+/** Fixture `analysis-v1/loc-unavailable.json`. */
 export const LOC_UNAVAILABLE_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -740,7 +740,7 @@ export const LOC_UNAVAILABLE_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Fixture `queued.json`. */
+/** Fixture `analysis-v1/queued.json`. */
 export const QUEUED_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -766,7 +766,7 @@ export const QUEUED_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Fixture `resolving.json`. */
+/** Fixture `analysis-v1/resolving.json`. */
 export const RESOLVING_FIXTURE = {
 	analysis: {
 		id: "0193a5c0-0000-7000-8000-000000000001",
@@ -792,7 +792,7 @@ export const RESOLVING_FIXTURE = {
 	}
 } satisfies AnalysisFixture;
 
-/** Names of the available fixtures, for exhaustive scenario handling. */
+/** Names of the available `analysis-v1` fixtures, for exhaustive scenario handling. */
 export type AnalysisFixtureName =
 	| "completed-report"
 	| "evidence-source-absent"
@@ -808,16 +808,16 @@ export type AnalysisFixtureName =
 	| "resolving";
 
 /**
- * Every fixture, keyed by its file name.
+ * Every `analysis-v1` fixture, keyed by its file name.
  *
  * Keyed by file name rather than by an invented scenario label so that the map and the
  * directory listing can be compared without a translation table in between.
  *
  * Annotated `AnalysisFixture` rather than left to inference. The constants above keep
  * their exact literal types, which is what makes the `satisfies` on each of them a real
- * check; but a lookup into an inferred map would return a union of six unrelated shapes,
- * and reading `.report` off it would not compile for the fixtures that have no report.
- * The annotation hands consumers the contract type instead of the shape of the sample.
+ * check; but a lookup into an inferred map would return a union of unrelated shapes, and
+ * reading an optional field off it would not compile for the fixtures that lack it. The
+ * annotation hands consumers the contract type instead of the shape of the sample.
  */
 export const ANALYSIS_FIXTURES: Readonly<Record<AnalysisFixtureName, AnalysisFixture>> = {
 	"completed-report": COMPLETED_REPORT_FIXTURE,
@@ -837,8 +837,8 @@ export const ANALYSIS_FIXTURES: Readonly<Record<AnalysisFixtureName, AnalysisFix
 /**
  * The same names as a value.
  *
- * Emitted as a literal rather than `Object.keys(ANALYSIS_FIXTURES)`, which would be typed
- * `string[]` and force every consumer into a cast back to `AnalysisFixtureName`.
+ * Emitted as a literal rather than `Object.keys(ANALYSIS_FIXTURES)`, which would be
+ * typed `string[]` and force every consumer into a cast back to `AnalysisFixtureName`.
  */
 export const ANALYSIS_FIXTURE_NAMES = [
 	"completed-report",
@@ -854,3 +854,378 @@ export const ANALYSIS_FIXTURE_NAMES = [
 	"queued",
 	"resolving"
 ] as const satisfies readonly AnalysisFixtureName[];
+
+/** Fixture `admin-v1/overview.json`. */
+export const ADMIN_OVERVIEW_FIXTURE = {
+	process: {
+		build_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+		uptime_seconds: 93784,
+		resident_bytes: 61849600
+	},
+	http: {
+		in_flight: 1,
+		tracked_routes: 5,
+		max_tracked_routes: 64,
+		routes: [
+			{
+				route: "/api/v1/analyses",
+				method: "POST",
+				requests: 412,
+				responses: {
+					informational: 0,
+					success: 389,
+					redirection: 0,
+					client_error: 22,
+					server_error: 1,
+					other: 0
+				},
+				latency: {
+					total_micros: 64070000,
+					p50: {
+						micros: 9800,
+						lower_bound_micros: 5000,
+						upper_bound_micros: 10000
+					},
+					p95: {
+						micros: 31200,
+						lower_bound_micros: 25000,
+						upper_bound_micros: 50000
+					},
+					p99: {
+						micros: 10000000,
+						lower_bound_micros: 10000000,
+						upper_bound_micros: null
+					}
+				}
+			},
+			{
+				route: "/api/v1/analyses/{analysis_id}",
+				method: "GET",
+				requests: 7102,
+				responses: {
+					informational: 0,
+					success: 7041,
+					redirection: 0,
+					client_error: 60,
+					server_error: 1,
+					other: 0
+				},
+				latency: {
+					total_micros: 63918000,
+					p50: {
+						micros: 7900,
+						lower_bound_micros: 5000,
+						upper_bound_micros: 10000
+					},
+					p95: {
+						micros: 22800,
+						lower_bound_micros: 10000,
+						upper_bound_micros: 25000
+					},
+					p99: {
+						micros: 41500,
+						lower_bound_micros: 25000,
+						upper_bound_micros: 50000
+					}
+				}
+			},
+			{
+				route: "/api/v1/system/probe",
+				method: "GET",
+				requests: 1241,
+				responses: {
+					informational: 0,
+					success: 1241,
+					redirection: 0,
+					client_error: 0,
+					server_error: 0,
+					other: 0
+				},
+				latency: {
+					total_micros: 9928000,
+					p50: {
+						micros: 6800,
+						lower_bound_micros: 5000,
+						upper_bound_micros: 10000
+					},
+					p95: {
+						micros: 17400,
+						lower_bound_micros: 10000,
+						upper_bound_micros: 25000
+					},
+					p99: {
+						micros: 33100,
+						lower_bound_micros: 25000,
+						upper_bound_micros: 50000
+					}
+				}
+			},
+			{
+				route: "/healthz",
+				method: "GET",
+				requests: 6814,
+				responses: {
+					informational: 0,
+					success: 6814,
+					redirection: 0,
+					client_error: 0,
+					server_error: 0,
+					other: 0
+				},
+				latency: {
+					total_micros: 6132600,
+					p50: {
+						micros: 720,
+						lower_bound_micros: 500,
+						upper_bound_micros: 1000
+					},
+					p95: {
+						micros: 2100,
+						lower_bound_micros: 1000,
+						upper_bound_micros: 2500
+					},
+					p99: {
+						micros: 4400,
+						lower_bound_micros: 2500,
+						upper_bound_micros: 5000
+					}
+				}
+			},
+			{
+				route: "<unmatched>",
+				method: "GET",
+				requests: 37,
+				responses: {
+					informational: 0,
+					success: 0,
+					redirection: 0,
+					client_error: 37,
+					server_error: 0,
+					other: 0
+				},
+				latency: {
+					total_micros: 11100,
+					p50: {
+						micros: 260,
+						lower_bound_micros: 0,
+						upper_bound_micros: 500
+					},
+					p95: {
+						micros: 420,
+						lower_bound_micros: 0,
+						upper_bound_micros: 500
+					},
+					p99: {
+						micros: 480,
+						lower_bound_micros: 0,
+						upper_bound_micros: 500
+					}
+				}
+			}
+		]
+	}
+} satisfies AdminFixture;
+
+/** Fixture `admin-v1/overview-memory-unavailable.json`. */
+export const ADMIN_OVERVIEW_MEMORY_UNAVAILABLE_FIXTURE = {
+	process: {
+		build_sha: "0584a2df65968a4e9e6859ef46bbed430408a3f1",
+		uptime_seconds: 93784,
+		resident_bytes: null
+	},
+	http: {
+		in_flight: 1,
+		tracked_routes: 5,
+		max_tracked_routes: 64,
+		routes: [
+			{
+				route: "/api/v1/analyses",
+				method: "POST",
+				requests: 412,
+				responses: {
+					informational: 0,
+					success: 389,
+					redirection: 0,
+					client_error: 22,
+					server_error: 1,
+					other: 0
+				},
+				latency: {
+					total_micros: 64070000,
+					p50: {
+						micros: 9800,
+						lower_bound_micros: 5000,
+						upper_bound_micros: 10000
+					},
+					p95: {
+						micros: 31200,
+						lower_bound_micros: 25000,
+						upper_bound_micros: 50000
+					},
+					p99: {
+						micros: 10000000,
+						lower_bound_micros: 10000000,
+						upper_bound_micros: null
+					}
+				}
+			},
+			{
+				route: "/api/v1/analyses/{analysis_id}",
+				method: "GET",
+				requests: 7102,
+				responses: {
+					informational: 0,
+					success: 7041,
+					redirection: 0,
+					client_error: 60,
+					server_error: 1,
+					other: 0
+				},
+				latency: {
+					total_micros: 63918000,
+					p50: {
+						micros: 7900,
+						lower_bound_micros: 5000,
+						upper_bound_micros: 10000
+					},
+					p95: {
+						micros: 22800,
+						lower_bound_micros: 10000,
+						upper_bound_micros: 25000
+					},
+					p99: {
+						micros: 41500,
+						lower_bound_micros: 25000,
+						upper_bound_micros: 50000
+					}
+				}
+			},
+			{
+				route: "/api/v1/system/probe",
+				method: "GET",
+				requests: 1241,
+				responses: {
+					informational: 0,
+					success: 1241,
+					redirection: 0,
+					client_error: 0,
+					server_error: 0,
+					other: 0
+				},
+				latency: {
+					total_micros: 9928000,
+					p50: {
+						micros: 6800,
+						lower_bound_micros: 5000,
+						upper_bound_micros: 10000
+					},
+					p95: {
+						micros: 17400,
+						lower_bound_micros: 10000,
+						upper_bound_micros: 25000
+					},
+					p99: {
+						micros: 33100,
+						lower_bound_micros: 25000,
+						upper_bound_micros: 50000
+					}
+				}
+			},
+			{
+				route: "/healthz",
+				method: "GET",
+				requests: 6814,
+				responses: {
+					informational: 0,
+					success: 6814,
+					redirection: 0,
+					client_error: 0,
+					server_error: 0,
+					other: 0
+				},
+				latency: {
+					total_micros: 6132600,
+					p50: {
+						micros: 720,
+						lower_bound_micros: 500,
+						upper_bound_micros: 1000
+					},
+					p95: {
+						micros: 2100,
+						lower_bound_micros: 1000,
+						upper_bound_micros: 2500
+					},
+					p99: {
+						micros: 4400,
+						lower_bound_micros: 2500,
+						upper_bound_micros: 5000
+					}
+				}
+			},
+			{
+				route: "<unmatched>",
+				method: "GET",
+				requests: 37,
+				responses: {
+					informational: 0,
+					success: 0,
+					redirection: 0,
+					client_error: 37,
+					server_error: 0,
+					other: 0
+				},
+				latency: {
+					total_micros: 11100,
+					p50: {
+						micros: 260,
+						lower_bound_micros: 0,
+						upper_bound_micros: 500
+					},
+					p95: {
+						micros: 420,
+						lower_bound_micros: 0,
+						upper_bound_micros: 500
+					},
+					p99: {
+						micros: 480,
+						lower_bound_micros: 0,
+						upper_bound_micros: 500
+					}
+				}
+			}
+		]
+	}
+} satisfies AdminFixture;
+
+/** Names of the available `admin-v1` fixtures, for exhaustive scenario handling. */
+export type AdminFixtureName =
+	| "overview"
+	| "overview-memory-unavailable";
+
+/**
+ * Every `admin-v1` fixture, keyed by its file name.
+ *
+ * Keyed by file name rather than by an invented scenario label so that the map and the
+ * directory listing can be compared without a translation table in between.
+ *
+ * Annotated `AdminFixture` rather than left to inference. The constants above keep
+ * their exact literal types, which is what makes the `satisfies` on each of them a real
+ * check; but a lookup into an inferred map would return a union of unrelated shapes, and
+ * reading an optional field off it would not compile for the fixtures that lack it. The
+ * annotation hands consumers the contract type instead of the shape of the sample.
+ */
+export const ADMIN_FIXTURES: Readonly<Record<AdminFixtureName, AdminFixture>> = {
+	"overview": ADMIN_OVERVIEW_FIXTURE,
+	"overview-memory-unavailable": ADMIN_OVERVIEW_MEMORY_UNAVAILABLE_FIXTURE
+};
+
+/**
+ * The same names as a value.
+ *
+ * Emitted as a literal rather than `Object.keys(ADMIN_FIXTURES)`, which would be
+ * typed `string[]` and force every consumer into a cast back to `AdminFixtureName`.
+ */
+export const ADMIN_FIXTURE_NAMES = [
+	"overview",
+	"overview-memory-unavailable"
+] as const satisfies readonly AdminFixtureName[];

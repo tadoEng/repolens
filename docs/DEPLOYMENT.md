@@ -78,6 +78,7 @@ The cheap one therefore moves last.
 | `GH_ANALYSIS_TOKEN`   | yes    | no       | Raises GitHub's rate-limit ceiling from roughly sixty requests an hour to five thousand. |
 | `CORS_ALLOWED_ORIGIN` | no     | yes      | The one origin a browser may call this API from — the deployed frontend. |
 | `FIREBASE_PROJECT_ID` | no     | see below | The **public** Firebase project id whose ID tokens this deployment accepts. |
+| `ADMIN_FIREBASE_UIDS` | no     | no       | Comma-separated Firebase UIDs allowed to read the operational snapshot. Empty closes it. |
 | `PORT`                | no     | injected | Supplied by the platform. Do not set it by hand.                    |
 
 Both database URLs should carry `sslmode=verify-full`, and neither should carry
@@ -114,6 +115,36 @@ check available:
 
 - `analysis creation requires a Firebase ID token`, naming the project;
 - or `FIREBASE_PROJECT_ID is not set, so analysis creation is closed`.
+
+`ADMIN_FIREBASE_UIDS` authorises `GET /api/v1/admin/overview`, which publishes
+this process's request counts, latency percentiles, uptime and resident memory.
+It carries no environment value, connection string, or credential, and a test
+asserts that against the response bytes rather than against the struct.
+
+UIDs, not emails: a UID is the stable Firebase identity, while an email can
+change, be unverified, or be reused. Find one in the Firebase console under
+Authentication → Users. The list is never logged — it is not a credential, but
+it names people — so the startup log reports only how many were configured.
+
+Unset, empty, and whitespace-only are one behaviour: **nobody is an admin**, and
+the service still starts. A deployment that forgot the variable serves its public
+endpoints and refuses its operational one, which is the safe direction; the
+opposite default would publish process internals to whoever found the path. Both
+outcomes are stated at startup:
+
+- `operational data is readable by the configured administrators`, with a count;
+- or `ADMIN_FIREBASE_UIDS is not set, so GET /api/v1/admin/overview is closed to
+  everyone`.
+
+A caller with no valid token gets `401 UNAUTHENTICATED`; a signed-in caller who
+is not on the list gets `403 FORBIDDEN`. The distinction is deliberate — signing
+in again cannot change the second answer, and a UI that collapsed the two would
+loop a non-admin through a sign-in flow that cannot succeed. With no
+`FIREBASE_PROJECT_ID` configured the endpoint answers `503`, because no identity
+can be established at all and the allowlist alone must never admit anybody.
+
+The figures describe **the single process that answered**. Render running more
+than one instance means each holds its own counters, and a restart resets them.
 
 RepoLens ships no `Dockerfile`, so how the Render service builds and starts the
 `server` binary is a property of the service configuration and is not recorded

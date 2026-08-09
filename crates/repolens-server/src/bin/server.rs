@@ -84,6 +84,27 @@ async fn main() -> anyhow::Result<()> {
         state
     };
 
+    // Authorisation for the operational snapshot. Read here for the same reason
+    // everything else is: `api::build` deliberately reads no environment of its
+    // own, which is what makes the policy assertable by driving the real router.
+    //
+    // An empty list is a working configuration, not an error, and it means
+    // nobody is an admin. The service still serves its public endpoints and
+    // refuses its operational one — the safe direction for a variable somebody
+    // can forget. The list is counted, never logged: it names people.
+    let admin_uids = config::admin_firebase_uids();
+    if admin_uids.is_empty() {
+        tracing::warn!(
+            "ADMIN_FIREBASE_UIDS is not set, so GET /api/v1/admin/overview is closed to everyone"
+        );
+    } else {
+        tracing::info!(
+            count = admin_uids.len(),
+            "operational data is readable by the configured administrators"
+        );
+    }
+    let state = state.with_admin_uids(admin_uids);
+
     // Configuration is read here, at the composition root, and handed to the
     // router. `api::build` deliberately reads no environment of its own.
     let cors_allowed_origin = config::cors_allowed_origin();

@@ -635,8 +635,16 @@ impl Metrics {
                 .then(left.method.index().cmp(&right.method.index()))
         });
 
+        // Read from the same guard as the samples above, not through
+        // `tracked_routes()`. Two separate reads could disagree — a route
+        // recorded between them would be counted and not listed — and a
+        // snapshot whose own fields contradict each other is the shape a reader
+        // has no reason to distrust.
+        let tracked_routes = routes.len();
+
         MetricsSnapshot {
             in_flight: self.in_flight(),
+            tracked_routes,
             routes: samples,
         }
     }
@@ -705,6 +713,14 @@ impl Drop for InFlightGuard {
 pub struct MetricsSnapshot {
     /// Requests being served when the snapshot was taken.
     pub in_flight: u64,
+    /// Distinct route labels held, which is the number [`MAX_TRACKED_ROUTES`]
+    /// bounds.
+    ///
+    /// Not derivable from `routes` below: that field lists the `<overflow>`
+    /// series alongside real labels once the registry is full, so counting it
+    /// would report the ceiling plus one and hide the fact that the map stopped
+    /// growing exactly where it promised to.
+    pub tracked_routes: usize,
     /// One entry per route and method class that has seen a request, sorted.
     pub routes: Vec<RouteSample>,
 }
@@ -770,10 +786,12 @@ mod tests {
     #[test]
     fn an_untouched_registry_reports_no_series() {
         let metrics = Metrics::new();
+        let snapshot = metrics.snapshot();
         assert!(
-            metrics.snapshot().routes.is_empty(),
+            snapshot.routes.is_empty(),
             "nothing recorded means no series at all, not a series full of zeroes"
         );
+        assert_eq!(snapshot.tracked_routes, 0);
         assert_eq!(metrics.tracked_routes(), 0);
     }
 
@@ -936,6 +954,17 @@ mod tests {
             snapshot.route_labels().contains(&OVERFLOW_ROUTE),
             "requests past the ceiling are still counted, under a label that says \
              the registry stopped distinguishing"
+        );
+        assert_eq!(
+            snapshot.tracked_routes, MAX_TRACKED_ROUTES,
+            "the snapshot must report the map's size, not the number of series it \
+             lists — those differ by the overflow row exactly when the ceiling is \
+             reached, which is the moment the figure matters"
+        );
+        assert!(
+            snapshot.route_labels().len() > snapshot.tracked_routes,
+            "the overflow label is a series without being a tracked route; if these \
+             were equal the assertion above would be proving nothing"
         );
 
         let total: u64 = snapshot.routes.iter().map(|route| route.count).sum();
