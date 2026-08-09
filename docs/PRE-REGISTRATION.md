@@ -11,7 +11,9 @@ honestly.
 > neither authorises new instrumentation during Experimental-v1.
 
 Feature development ended at `7f81660`, the merge of #48. The freeze target is
-the commit that introduces this file; its exact SHA is recorded in
+**the commit on `master` that introduces this file** — not the pull-request head
+that proposed it. This repository rebases on merge, so those are different SHAs
+and only the one on `master` was ever deployable. Its exact value is recorded in
 [`DEPLOYMENT-ATTESTATION.md`](DEPLOYMENT-ATTESTATION.md) and carried by the
 `experimental-v1` tag. A document cannot contain its own commit SHA, which is
 why the attestation — written after the deployment it describes — is where that
@@ -165,8 +167,8 @@ is 50 ms is therefore strictly slower than 50 ms.
 
 **Overall verdict:**
 
-- **CONFIRMED** if both benchmark routes PASS in at least **4 of 5** valid windows.
-- **REJECTED** if either benchmark route FAILS in at least **3 of 5** valid windows.
+- **CONFIRMED** if both benchmark routes PASS in at least **4 of 5** H1-valid windows.
+- **REJECTED** if either benchmark route FAILS in at least **3 of 5** H1-valid windows.
 - **INCONCLUSIVE** otherwise.
 
 **No ratio participates in this verdict.** See §3.4.
@@ -196,16 +198,29 @@ Pairing cold with warm **inside the same window** is deliberate: it compares a
 cold request against the network conditions it actually occurred in, rather than
 against a pooled baseline from another day.
 
-| Verdict | Condition on the median across 5 valid windows |
+| Verdict | Condition on the median across the 5 H2-valid windows |
 | --- | --- |
 | **CONFIRMED** | median ratio ≥ 2.0× **and** median penalty ≥ +500 ms |
 | **REJECTED** | median ratio < 1.25× **and** median penalty < +250 ms |
 | **INCONCLUSIVE** | anything else |
 
-A first request that fails or never answers is **recorded as a failure** and
-counted. It is not replaced by the successful retry, and the retry does not
-become the cold observation. Failures are reported as a count alongside the
-medians, which are computed over the successful cold observations.
+A first request that fails or never answers is **recorded as a failure**. It is
+not replaced by the successful retry, and the retry does not become the cold
+observation.
+
+**A failed cold request makes its window not H2-valid.** That window therefore:
+
+- does not count toward the five windows H2 requires;
+- contributes to neither median;
+- is reported as a failure, with its count stated beside the medians.
+
+Collection continues until **five H2-valid windows with a successful cold
+observation** exist, or day 14 arrives. Fewer than five at the cutoff is
+`UNDERPOWERED`.
+
+This is stated because the alternative reading is available and wrong: four
+failures and one success must never produce a one-observation median wearing the
+authority of a five-window verdict.
 
 ### H3 — GitHub, network and database dominate deterministic analysis work
 
@@ -258,8 +273,9 @@ browsing is an anecdote in the report, not evidence in a verdict.
 
 ### 4.3 HTTP windows (H1 and H2)
 
-A **window** begins when a process starts and ends before the next restart.
-Five valid windows are required.
+A **window** begins when a process starts and ends before the next restart. Five
+H1-valid **and** five H2-valid windows are required; §4.5 defines the two
+conditions, and a single window commonly satisfies both.
 
 1. **Idle** for at least 20 minutes with no inbound traffic to the service.
    Render documents that Free web services spin down after 15 minutes without
@@ -327,8 +343,16 @@ reported `UNDERPOWERED`.** It is not weakened afterwards.
 ### 4.7 Analysis dataset (descriptive only)
 
 Six public GitHub repositories at exact commit SHAs, five sequential runs each,
-30 analyses total. No concurrency: this experiment is about cost attribution,
-not throughput saturation.
+**30 attempts** total. No concurrency: this experiment is about cost
+attribution, not throughput saturation.
+
+**Attempts, not completions.** `COMPLETED` is one specific terminal state and
+the failures have their own, so a target of "30 completed analyses" would keep
+running until thirty *succeeded* — selecting the dataset on the outcome. Exactly
+30 are attempted. A failure is data, is never re-run to replace it, and is
+reported with its error code. Each attempt is followed to a terminal state or to
+the day-14 cutoff; one still running at the cutoff is recorded as still running,
+never substituted.
 
 The six repositories are fixed **now**, before any result is seen, spanning
 small, medium and large:
@@ -356,12 +380,18 @@ recorded, because it does not exist: any breakdown of where that duration went.
 
 Collection stops at whichever comes first:
 
-- 30 completed analyses **and** 5 valid HTTP windows; or
+- **30 analysis attempts** (five per repository), **and** 5 windows valid for H1,
+  **and** 5 windows valid for H2 with a successful cold observation; or
 - 14 calendar days from the first measurement.
+
+The two window counts are stated separately because §4.5 defines the two
+validity conditions separately. One window usually satisfies both, and a window
+that satisfies only one counts only toward that one.
 
 **Collection is never extended because a result is ambiguous.** If the minimum
 sample is not reached by day 14, the affected hypothesis is reported
-`UNDERPOWERED`, with the counts actually obtained.
+`UNDERPOWERED`, with the counts actually obtained. Each hypothesis is judged on
+its own sample: H1 may be decided while H2 is underpowered, or the reverse.
 
 ---
 
@@ -369,11 +399,19 @@ sample is not reached by day 14, the affected hypothesis is reported
 
 Two distinct failures, both worth reporting.
 
-**Performance.** Warm service-side handling repeatedly consumes a large share of
-observed external latency, or `p95` stays above 50 ms on lightweight routes
-under sequential low-load operation. At that point the application request path
-is materially in the critical path and "the framework layer is negligible" is
-wrong — though, per H1's asymmetry, still without saying which layer owns it.
+**Performance.** Falsification occurs **exactly when H1 is `REJECTED` under the
+rule in §3** — either benchmark route showing `p95.lower_bound_micros ≥ 50_000`
+in at least three of five H1-valid windows.
+
+There is no second, softer route to this conclusion. **The p95 scale ratio can
+neither confirm nor reject H1**, and no impression that handling "consumes a
+large share of external latency" may stand in for the preregistered rule. One
+authority, fixed in advance, or the criterion is whatever the result makes
+convenient.
+
+Should it happen, the application request path is materially in the critical
+path and "the framework layer is negligible" is wrong — though, per H1's
+asymmetry, still without saying which layer owns it.
 
 **Observability.** If measurement finishes and the question that most matters
 turns out to be *where analysis time went*, and Experimental-v1 cannot answer it
