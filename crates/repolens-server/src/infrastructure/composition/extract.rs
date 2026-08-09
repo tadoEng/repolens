@@ -237,9 +237,15 @@ impl Default for Ceilings {
 
 /// Extracts `archive` into a self-deleting directory under `parent`.
 ///
-/// `parent` is where the bounded volume is mounted in production, so the
-/// storage ceiling here is a *second* line rather than the only one: the volume
-/// makes an over-large write fail, and this makes it fail with a name.
+/// The storage ceiling here is enforced in application code, whatever `parent`
+/// is: it refuses a write it can already see will not fit, and it fails with a
+/// name rather than as an anonymous I/O error.
+///
+/// It is *designed* as the second line behind a physically size-limited mount,
+/// which would make an over-large write fail even if this ceiling were wrong.
+/// Whether such a mount is provisioned is a deployment fact rather than
+/// something this function can observe, so it is attested at deployment and not
+/// assumed here.
 ///
 /// # Errors
 ///
@@ -365,6 +371,22 @@ pub fn extract_to(
         // the run. Only a *file* we would otherwise have counted can breach
         // this ceiling, which is what makes the breach mean the counts are
         // incomplete.
+        //
+        // This position is what makes the ceiling repository-derived, and the
+        // rule generalises only so far:
+        //
+        //     per-entry, after admit()  ->  repository-derived
+        //     aggregate,  after admit()  ->  repository-derived only when
+        //                                    defined over the canonical unique
+        //                                    normalized-path set
+        //
+        // `admit` proves an entry is a safe regular file and normalizes its
+        // path. It does not establish uniqueness across the archive, so a tar
+        // carrying two entries for one normalized path would let a count or a
+        // byte sum taken here measure the packaging twice. Nothing aggregates
+        // at this point today, and any future ceiling that does has to be
+        // defined over the unique path set before it may claim to measure the
+        // repository.
         if size > ceilings.file_bytes {
             return Err(ExtractionLimit::FileSize {
                 limit: ceilings.file_bytes,

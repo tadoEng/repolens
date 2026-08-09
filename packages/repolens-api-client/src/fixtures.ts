@@ -204,7 +204,7 @@ export const COMPLETED_REPORT_FIXTURE = {
 					role: "PRODUCTION"
 				},
 				{
-					path: "packages/api-client/src/schema.ts",
+					path: "packages/api-client/src/generated/schema.ts",
 					language: "TypeScript",
 					code_lines: 1980,
 					role: "GENERATED"
@@ -400,7 +400,7 @@ export const EVIDENCE_SOURCE_ABSENT_FIXTURE = {
 					role: "PRODUCTION"
 				},
 				{
-					path: "packages/api-client/src/schema.ts",
+					path: "packages/api-client/src/generated/schema.ts",
 					language: "TypeScript",
 					code_lines: 1980,
 					role: "GENERATED"

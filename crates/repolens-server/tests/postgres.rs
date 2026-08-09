@@ -427,3 +427,210 @@ async fn an_unknown_analysis_is_not_found_rather_than_an_error() {
     let no_report = store::load_report(&pool, Uuid::now_v7()).await;
     assert!(matches!(no_report, Err(store::StoreError::NotFound)));
 }
+
+// ---------------------------------------------------------------------------
+// The seam: Composed -> ReproducibilityKey -> Report -> store -> load.
+// ---------------------------------------------------------------------------
+
+/// GitHub wraps an archive in one top-level directory; extraction strips it.
+const ARCHIVE_PREFIX: &str = "owner-repo-0584a2d";
+
+/// A source that answers the whole pipeline, with a real gzip'd tarball.
+///
+/// Every other double in this repository stops before the archive. That is
+/// exactly where the two ends of this slice were proved separately and never
+/// against each other: composition was tested against real tarballs, the
+/// projection against a key, and the seam between them by construction.
+struct WholePipelineSource {
+    /// `None` writes a corrupt archive, for the failure path.
+    files: Option<Vec<(&'static str, &'static str)>>,
+}
+
+impl repolens_github::GitHubRepositorySource for WholePipelineSource {
+    async fn resolve_repository(
+        &self,
+        coordinate: &RepositoryCoordinate,
+    ) -> Result<repolens_github::ResolvedRepository, repolens_github::GitHubSourceError> {
+        Ok(repolens_github::ResolvedRepository {
+            coordinate: coordinate.clone(),
+            default_branch: "main".to_owned(),
+            archived: false,
+            size_kilobytes: 32,
+        })
+    }
+
+    async fn resolve_commit(
+        &self,
+        _coordinate: &RepositoryCoordinate,
+        _reference: &str,
+    ) -> Result<repolens_github::ResolvedCommit, repolens_github::GitHubSourceError> {
+        Ok(repolens_github::ResolvedCommit {
+            sha: repolens_core::CommitSha::parse("0584a2df65968a4e9e6859ef46bbed430408a3f1")
+                .expect("a literal digest"),
+            tree_sha: repolens_core::TreeSha::parse("4b825dc642cb6eb9a060e54bf8d69288fbee4904")
+                .expect("a literal digest"),
+            committed_at: OffsetDateTime::UNIX_EPOCH,
+        })
+    }
+
+    async fn fetch_tree(
+        &self,
+        _coordinate: &RepositoryCoordinate,
+        _commit: &repolens_core::CommitSha,
+    ) -> Result<repolens_github::RepositoryTree, repolens_github::GitHubSourceError> {
+        Ok(repolens_github::RepositoryTree {
+            sha: "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned(),
+            entries: Vec::new(),
+            truncated: false,
+        })
+    }
+
+    async fn collect_selected_blobs(
+        &self,
+        _coordinate: &RepositoryCoordinate,
+        _tree: &repolens_github::RepositoryTree,
+        _paths: &[String],
+    ) -> Result<repolens_github::BlobSelection, repolens_github::GitHubSourceError> {
+        Ok(repolens_github::BlobSelection::default())
+    }
+
+    async fn download_archive(
+        &self,
+        _coordinate: &RepositoryCoordinate,
+        _commit: &repolens_core::CommitSha,
+        _max_compressed_bytes: u64,
+        destination: &std::path::Path,
+    ) -> Result<repolens_github::ArchiveDownload, repolens_github::GitHubSourceError> {
+        let Some(files) = self.files.as_ref() else {
+            std::fs::write(destination, b"not a gzip stream").expect("a scratch file");
+            return Ok(repolens_github::ArchiveDownload {
+                compressed_bytes: 17,
+            });
+        };
+
+        let file = std::fs::File::create(destination).expect("a scratch archive");
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        for (path, contents) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    format!("{ARCHIVE_PREFIX}/{path}"),
+                    contents.as_bytes(),
+                )
+                .expect("appending to a scratch archive");
+        }
+        builder
+            .into_inner()
+            .expect("finishing the tar")
+            .finish()
+            .expect("finishing the gzip");
+
+        Ok(repolens_github::ArchiveDownload {
+            compressed_bytes: std::fs::metadata(destination)
+                .expect("the archive exists")
+                .len(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_counted_archive_reaches_the_stored_report() {
+    // The whole slice, as production runs it: an archive is downloaded,
+    // extracted, counted, projected through the key, written, and read back.
+    //
+    // Reloaded rather than asserted in memory, because the store is part of the
+    // seam: the report crosses `serde_json` into `jsonb` and back, and a
+    // section that serialized but could not be read again would be a report
+    // nobody can open.
+    let pool = pool().await;
+    let coordinate = RepositoryCoordinate::new("owner", "repo");
+    let id = queued(&pool, &coordinate).await;
+
+    repolens_server::pipeline::run(
+        &pool,
+        &WholePipelineSource {
+            files: Some(vec![
+                ("src/main.rs", "fn main() {\n    println!(\"hi\");\n}\n"),
+                ("crates/a/src/lib.rs", "pub fn add() -> i32 {\n    1\n}\n"),
+            ]),
+        },
+        id,
+        &coordinate,
+    )
+    .await;
+
+    let report = store::load_report(&pool, id)
+        .await
+        .expect("a completed analysis has a report");
+
+    let composition = report
+        .composition
+        .expect("a readable archive must produce counts, not a null section");
+    assert_eq!(composition.counter, "tokei");
+    assert!(
+        composition.total_files > 0 && composition.code_lines > 0,
+        "the counts must be the archive's, not zeroes: {composition:?}"
+    );
+
+    // Projected from the one key rather than assembled beside it: the versions
+    // the section publishes are the ones that decided the numbers.
+    assert_eq!(
+        composition.counter_version,
+        repolens_server::infrastructure::composition::counter::TOKEI_VERSION
+    );
+    assert_eq!(
+        composition.classification_policy_version,
+        repolens_server::infrastructure::composition::classification::CLASSIFICATION_POLICY_VERSION
+    );
+
+    // And nothing claims a limitation about counts that succeeded.
+    let codes: Vec<&str> = report
+        .limitations
+        .iter()
+        .map(|limitation| limitation.code.as_str())
+        .collect();
+    assert!(
+        !codes.contains(&"COMPOSITION_NOT_COLLECTED"),
+        "a successful count must not also report a failure: {codes:?}"
+    );
+
+    cleanup(&pool, id).await;
+}
+
+#[tokio::test]
+async fn an_unreadable_archive_persists_a_null_section_with_its_reason() {
+    // The other half of the contract, and the state the report is most likely
+    // to be misread on: `composition: null` is a designed outcome, and it is
+    // never allowed to appear without something saying why.
+    let pool = pool().await;
+    let coordinate = RepositoryCoordinate::new("owner", "repo");
+    let id = queued(&pool, &coordinate).await;
+
+    repolens_server::pipeline::run(&pool, &WholePipelineSource { files: None }, id, &coordinate)
+        .await;
+
+    let report = store::load_report(&pool, id)
+        .await
+        .expect("a failed count still completes the analysis");
+
+    assert!(
+        report.composition.is_none(),
+        "an unreadable archive cannot produce counts"
+    );
+    let codes: Vec<&str> = report
+        .limitations
+        .iter()
+        .map(|limitation| limitation.code.as_str())
+        .collect();
+    assert!(
+        codes.contains(&"COMPOSITION_NOT_COLLECTED"),
+        "a null section must always carry its reason: {codes:?}"
+    );
+
+    cleanup(&pool, id).await;
+}
