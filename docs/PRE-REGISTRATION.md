@@ -380,9 +380,18 @@ recorded, because it does not exist: any breakdown of where that duration went.
 
 Collection stops at whichever comes first:
 
-- **30 analysis attempts** (five per repository), **and** 5 windows valid for H1,
-  **and** 5 windows valid for H2 with a successful cold observation; or
+- **all 30 fixed analysis attempts have reached a terminal state** (five per
+  repository), **and** 5 windows valid for H1 exist, **and** 5 windows valid for
+  H2 with a successful cold observation exist; or
 - 14 calendar days from the first measurement.
+
+**Terminal state, not attempt count.** "30 attempts" is satisfied the moment the
+thirtieth *starts*, which would let collection stop with an analysis still
+running — contradicting §4.7, which requires every attempt to be followed to a
+terminal state or to the cutoff. Terminal includes every failure state, not only
+`COMPLETED`, so this does not reintroduce the success selection §4.7 removed. An
+attempt that hangs simply carries the experiment to day 14, where it is recorded
+as still running.
 
 The two window counts are stated separately because §4.5 defines the two
 validity conditions separately. One window usually satisfies both, and a window
