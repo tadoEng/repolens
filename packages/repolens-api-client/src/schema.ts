@@ -13,6 +13,22 @@
  */
 
 export interface paths {
+    "/api/v1/admin/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["overview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/analyses": {
         parameters: {
             query?: never;
@@ -97,6 +113,13 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description The operational snapshot of one process. */
+        AdminOverview: {
+            /** @description Facts about the requests it has served. */
+            http: components["schemas"]["HttpOverview"];
+            /** @description Facts about the process itself. */
+            process: components["schemas"]["ProcessOverview"];
+        };
         /** @description One analysis run. */
         Analysis: {
             /**
@@ -259,7 +282,7 @@ export interface components {
          *     when a future backend adds one it has never seen.
          * @enum {string}
          */
-        ErrorCode: "INVALID_REPOSITORY_URL" | "REPOSITORY_NOT_FOUND" | "REPOSITORY_INACCESSIBLE" | "REPOSITORY_ARCHIVED" | "REPOSITORY_TOO_LARGE" | "RATE_LIMITED" | "WORKER_FAILED_RETRIABLE" | "ANALYZER_FAILED_PERMANENT" | "ANALYSIS_NOT_FOUND" | "REPORT_NOT_AVAILABLE" | "UNAUTHENTICATED" | "AUTHENTICATION_UNAVAILABLE" | "MALFORMED_REQUEST" | "REQUEST_TOO_LARGE" | "REQUEST_TIMED_OUT" | "INTERNAL_ERROR";
+        ErrorCode: "INVALID_REPOSITORY_URL" | "REPOSITORY_NOT_FOUND" | "REPOSITORY_INACCESSIBLE" | "REPOSITORY_ARCHIVED" | "REPOSITORY_TOO_LARGE" | "RATE_LIMITED" | "WORKER_FAILED_RETRIABLE" | "ANALYZER_FAILED_PERMANENT" | "ANALYSIS_NOT_FOUND" | "REPORT_NOT_AVAILABLE" | "UNAUTHENTICATED" | "FORBIDDEN" | "AUTHENTICATION_UNAVAILABLE" | "MALFORMED_REQUEST" | "REQUEST_TOO_LARGE" | "REQUEST_TIMED_OUT" | "INTERNAL_ERROR";
         /**
          * @description One checkable fact supporting a finding.
          *
@@ -386,6 +409,51 @@ export interface components {
          * @enum {string}
          */
         FindingState: "DETECTED" | "DOCUMENTED" | "MISSING" | "NOT_APPLICABLE" | "UNABLE_TO_VERIFY";
+        /**
+         * @description The request method, folded into the closed set this service records.
+         *
+         *     A wire enum of its own rather than the internal `RouteMethod`, translated by
+         *     an exhaustive match in `api::admin`. HTTP methods are an *extensible* token —
+         *     `hyper` will deliver `WHATEVER /healthz` — so publishing the method as a free
+         *     string would tell a consumer the set is open when the entire cardinality
+         *     guarantee is that it is closed. Everything outside this set arrives as
+         *     [`Other`](Self::Other).
+         * @enum {string}
+         */
+        HttpMethodClass: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS" | "TRACE" | "CONNECT" | "OTHER";
+        /** @description What the process has observed about the requests it served. */
+        HttpOverview: {
+            /**
+             * Format: int64
+             * @description Requests being served at the moment the snapshot was taken.
+             */
+            in_flight: number;
+            /**
+             * Format: int64
+             * @description The ceiling on that number.
+             *
+             *     Published so a reader can tell a quiet registry from a full one without
+             *     knowing the constant. Once `tracked_routes` reaches this, further labels
+             *     are folded into the `<overflow>` row rather than allocated — which is
+             *     what keeps the memory bound arithmetic rather than a hope about how the
+             *     router behaves.
+             */
+            max_tracked_routes: number;
+            /**
+             * @description One row per route and method class that has served a request.
+             *
+             *     Sorted by route then method, and combinations with no requests are
+             *     omitted entirely — so the labels present are exactly the labels this
+             *     process recorded, rather than a grid of zeroes that would hide which
+             *     ones were real.
+             */
+            routes: components["schemas"]["RouteOverview"][];
+            /**
+             * Format: int64
+             * @description Distinct route labels currently held.
+             */
+            tracked_routes: number;
+        };
         /** @description Line counts for one language. */
         LanguageLineCount: {
             /**
@@ -433,6 +501,71 @@ export interface components {
              *     one — which is the most common way this list misleads.
              */
             role: components["schemas"]["CodeRole"];
+        };
+        /**
+         * @description One percentile, carrying the resolution it was read at.
+         *
+         *     `micros` is a linear interpolation *inside one bucket*, which assumes the
+         *     observations in that bucket are spread evenly across it. They are not, and
+         *     nothing measured how they actually are. The bounds are what the histogram
+         *     genuinely knows — the answer lies between them — and they travel with the
+         *     estimate rather than being recoverable only by consulting a bucket table
+         *     elsewhere, so a consumer cannot take the interpolation for a measurement
+         *     without first stepping over the two fields that say it is not one.
+         */
+        LatencyPercentile: {
+            /**
+             * Format: int64
+             * @description Lower bound of the bucket the percentile fell in.
+             */
+            lower_bound_micros: number;
+            /**
+             * Format: int64
+             * @description Interpolated estimate, in microseconds.
+             */
+            micros: number;
+            /**
+             * Format: int64
+             * @description Upper bound of that bucket.
+             *
+             *     **Null for the overflow bucket**, where the histogram recorded that an
+             *     observation was slower than the last bound and nothing further. Any
+             *     figure here would be invented, and `micros` is then the last bound itself
+             *     — a floor rather than an estimate, which a UI has to render differently.
+             *
+             *     Required-but-nullable rather than optional, so a consumer cannot skip the
+             *     case: the field is always present, its value is not.
+             */
+            upper_bound_micros: number | null;
+        };
+        /**
+         * @description The latency distribution for one route and method.
+         *
+         *     No mean is published. `total_micros` and the request count it belongs to are
+         *     what a mean is computed *from*, and they are strictly more useful: a
+         *     consumer that wants the average can divide, and one that wants to know how
+         *     much time a route has cost in total cannot recover it from an average.
+         */
+        LatencySummary: {
+            /** @description Median. */
+            p50: components["schemas"]["LatencyPercentile"];
+            /** @description 95th percentile. */
+            p95: components["schemas"]["LatencyPercentile"];
+            /**
+             * @description 99th percentile.
+             *
+             *     Of a hundred observations this is the ninety-ninth, so exactly one is
+             *     slower than the figure reported. The slowest observation is reached at
+             *     p100 and nowhere earlier — expecting p99 to follow the tail is the
+             *     common misreading, and the bucket bounds on each estimate are what let a
+             *     reader check rather than assume.
+             */
+            p99: components["schemas"]["LatencyPercentile"];
+            /**
+             * Format: int64
+             * @description Total observed latency across every recorded request, in microseconds.
+             */
+            total_micros: number;
         };
         /** @description Something the analyzer could not establish. */
         Limitation: {
@@ -570,6 +703,33 @@ export interface components {
          * @enum {string}
          */
         ProbeStatus: "OK" | "DEGRADED" | "UNAVAILABLE";
+        /** @description What the process knows about itself. */
+        ProcessOverview: {
+            /** @description Commit this binary was built from, or `unknown` for a local build. */
+            build_sha: string;
+            /**
+             * Format: int64
+             * @description Resident set size in bytes, where the platform can answer.
+             *
+             *     **Null off Linux**, which has no `/proc/self/status` to read it from and
+             *     is where development happens. A plausible zero would turn "we cannot
+             *     measure this here" into "the process uses no memory" — unknown is not
+             *     zero, the same rule the report contract keeps for a truncated tree.
+             *
+             *     Required-but-nullable, so a consumer must render the unknown case rather
+             *     than being permitted to forget it exists.
+             */
+            resident_bytes: number | null;
+            /**
+             * Format: int64
+             * @description Seconds since the process started, on a monotonic clock.
+             *
+             *     Unaffected by the wall clock being corrected underneath it, and anchored
+             *     at the top of `main` rather than at the first read — a process up for
+             *     days must not report an uptime of seconds.
+             */
+            uptime_seconds: number;
+        };
         /** @description A complete report for one repository at one commit. */
         Report: {
             /**
@@ -664,11 +824,79 @@ export interface components {
             /** @description Which role. */
             role: components["schemas"]["CodeRole"];
         };
+        /** @description Counters for one route label and one method class. */
+        RouteOverview: {
+            /** @description How long they took. */
+            latency: components["schemas"]["LatencySummary"];
+            /** @description The method class. */
+            method: components["schemas"]["HttpMethodClass"];
+            /**
+             * Format: int64
+             * @description Requests recorded for this route and method.
+             */
+            requests: number;
+            /** @description How those requests were answered. */
+            responses: components["schemas"]["StatusClassCounts"];
+            /**
+             * @description The normalised route label.
+             *
+             *     Always the *matched* router pattern — `/api/v1/analyses/{analysis_id}` —
+             *     never the path a caller sent, so no analysis id, repository name, or
+             *     pasted token can arrive here. Two labels are not patterns and say so:
+             *     `<unmatched>` for a request that matched no route, and `<overflow>` for
+             *     requests folded together once the registry stopped distinguishing.
+             */
+            route: string;
+        };
         /**
          * @description Impact if the finding is valid. Independent of [`Confidence`].
          * @enum {string}
          */
         Severity: "INFO" | "LOW" | "MEDIUM" | "HIGH";
+        /**
+         * @description Responses counted by status class.
+         *
+         *     Named fields rather than an array, because an array's meaning is its index
+         *     order and no consumer can check that it still holds. A field named
+         *     `server_error` cannot be silently reordered into the position `client_error`
+         *     used to occupy.
+         *
+         *     A class rather than the code: `404` and `410` answer the same operational
+         *     question, and a counter per code would be several hundred figures at a
+         *     resolution nothing reads at.
+         */
+        StatusClassCounts: {
+            /**
+             * Format: int64
+             * @description `4xx` — the caller's fault.
+             */
+            client_error: number;
+            /**
+             * Format: int64
+             * @description `1xx`.
+             */
+            informational: number;
+            /**
+             * Format: int64
+             * @description Any other status the HTTP crate admits. No handler here produces one.
+             */
+            other: number;
+            /**
+             * Format: int64
+             * @description `3xx`.
+             */
+            redirection: number;
+            /**
+             * Format: int64
+             * @description `5xx` — ours.
+             */
+            server_error: number;
+            /**
+             * Format: int64
+             * @description `2xx`.
+             */
+            success: number;
+        };
         /**
          * @description Result of the system probe.
          *
@@ -721,6 +949,71 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    overview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Operational snapshot of the process that answered */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminOverview"];
+                };
+            };
+            /** @description No valid Firebase ID token was presented */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description The caller is signed in and is not an administrator */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description The request exceeded the server time budget */
+            408: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description An unhandled fault in this service */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Sign-in could not be checked, so the request was refused */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
     create: {
         parameters: {
             query?: never;

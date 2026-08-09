@@ -9,6 +9,8 @@ export {
 export type { $defs, components, operations, paths, webhooks } from './schema';
 
 export type {
+	AdminFixture,
+	AdminOverview,
 	Analysis,
 	AnalysisFixture,
 	AnalysisState,
@@ -26,7 +28,11 @@ export type {
 	Finding,
 	FindingCategory,
 	FindingState,
+	HttpMethodClass,
+	HttpOverview,
 	LanguageLineCount,
+	LatencyPercentile,
+	LatencySummary,
 	LargestSourceFile,
 	RoleLineCount,
 	Limitation,
@@ -34,15 +40,22 @@ export type {
 	LineRange,
 	OverviewStatement,
 	ProbeStatus,
+	ProcessOverview,
 	Report,
 	RepositoryIdentity,
 	RetryPolicy,
+	RouteOverview,
 	Severity,
+	StatusClassCounts,
 	SystemProbeResponse,
 	TriggerStatus
 } from './contract';
 
 export {
+	ADMIN_FIXTURES,
+	ADMIN_FIXTURE_NAMES,
+	ADMIN_OVERVIEW_FIXTURE,
+	ADMIN_OVERVIEW_MEMORY_UNAVAILABLE_FIXTURE,
 	ANALYSIS_FIXTURES,
 	ANALYSIS_FIXTURE_NAMES,
 	COMPLETED_REPORT_FIXTURE,
@@ -52,6 +65,7 @@ export {
 	LOC_UNAVAILABLE_FIXTURE,
 	QUEUED_FIXTURE,
 	RESOLVING_FIXTURE,
+	type AdminFixtureName,
 	type AnalysisFixtureName
 } from './fixtures';
 
@@ -65,6 +79,7 @@ export {
 	FINDING_CATEGORY_LABELS,
 	FINDING_STATE_LABELS,
 	HANDLED_VARIANTS,
+	HTTP_METHOD_CLASS_LABELS,
 	PROBE_STATUS_LABELS,
 	SEVERITY_LABELS,
 	TRIGGER_STATUS_LABELS,
@@ -76,6 +91,7 @@ export {
 	describeEvidenceProvider,
 	describeFindingCategory,
 	describeFindingState,
+	describeHttpMethodClass,
 	describeProbeStatus,
 	describeSeverity,
 	describeTriggerStatus,

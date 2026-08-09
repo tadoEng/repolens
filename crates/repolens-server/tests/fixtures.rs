@@ -1,4 +1,4 @@
-//! Generates and gates the `analysis-v1` executable fixtures.
+//! Generates and gates the executable fixtures for every published contract.
 //!
 //! The fixtures are written **from the Rust types**, not by hand. A hand-written
 //! fixture is a second definition of the contract that drifts the moment a DTO
@@ -8,6 +8,15 @@
 //! The other half of the gate lives in TypeScript: the fixtures are type-checked
 //! against the generated `schema.ts`, so a shape the frontend cannot consume
 //! fails the build rather than the browser.
+//!
+//! # Two families, one gate
+//!
+//! `analysis-v1` is the report a reader came for; `admin-v1` is the operational
+//! snapshot an operator reads. They are separate directories because they are
+//! separate contracts with separate audiences, and one gate because the rule
+//! they are held to is identical — a second `--test` target for admin would be
+//! the "special admin script" this arrangement exists to avoid, and the
+//! regeneration command in the root `AGENTS.md` would stop covering everything.
 //!
 //! Regenerate after an intentional contract change:
 //!
@@ -19,6 +28,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use repolens_core::ContentDigest;
+use repolens_server::contract::admin::{
+    AdminOverview, HttpMethodClass, HttpOverview, LatencyPercentile, LatencySummary,
+    ProcessOverview, RouteOverview, StatusClassCounts,
+};
 use repolens_server::contract::analysis::{
     Analysis, AnalysisState, ExecutionMetadata, RepositoryIdentity, RetryPolicy, TriggerStatus,
 };
@@ -36,8 +49,10 @@ use uuid::Uuid;
 
 /// Where the fixtures live. `contracts/` is the handshake between the API and
 /// the frontend; both sides read this directory.
-fn fixture_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts/fixtures/analysis-v1")
+fn fixture_dir(family: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../contracts/fixtures")
+        .join(family)
 }
 
 /// Fixed identifiers and timestamps.
@@ -575,6 +590,205 @@ fn fixtures() -> Vec<(&'static str, String)> {
     .collect()
 }
 
+/// One row of the published route table.
+///
+/// A helper rather than eight literals, because the fields that must agree —
+/// requests against the status classes below it — are easy to get wrong by hand
+/// and impossible to notice afterwards. `admin_fixtures_are_internally_coherent`
+/// asserts the agreement; this makes it cheap to keep.
+fn route(
+    label: &str,
+    method: HttpMethodClass,
+    responses: StatusClassCounts,
+    total_micros: u64,
+    percentiles: [LatencyPercentile; 3],
+) -> RouteOverview {
+    let [p50, p95, p99] = percentiles;
+    RouteOverview {
+        route: label.to_owned(),
+        method,
+        requests: responses.informational
+            + responses.success
+            + responses.redirection
+            + responses.client_error
+            + responses.server_error
+            + responses.other,
+        responses,
+        latency: LatencySummary {
+            total_micros,
+            p50,
+            p95,
+            p99,
+        },
+    }
+}
+
+/// A percentile inside a bucket that has both bounds.
+const fn estimate(micros: u64, lower: u64, upper: u64) -> LatencyPercentile {
+    LatencyPercentile {
+        micros,
+        lower_bound_micros: lower,
+        upper_bound_micros: Some(upper),
+    }
+}
+
+/// A percentile in the overflow bucket, where the figure is a floor.
+///
+/// `micros` equals the lower bound, because past the last bound the histogram
+/// recorded that an observation was slower and nothing more. Any upper figure
+/// would be invented, which is why the field is null rather than large.
+const fn floor(lower: u64) -> LatencyPercentile {
+    LatencyPercentile {
+        micros: lower,
+        lower_bound_micros: lower,
+        upper_bound_micros: None,
+    }
+}
+
+fn counts(success: u64, client_error: u64, server_error: u64) -> StatusClassCounts {
+    StatusClassCounts {
+        informational: 0,
+        success,
+        redirection: 0,
+        client_error,
+        server_error,
+        other: 0,
+    }
+}
+
+/// A plausible snapshot of a process that has been serving for a day.
+///
+/// **Every value is written here and none is read from the running process.**
+/// A fixture built from a live `Metrics::snapshot()`, the real uptime, or
+/// `/proc` would be regenerated differently on every run: the gate below would
+/// then fail for reasons that have nothing to do with the contract, and the
+/// first fix anyone reached for would be deleting the gate.
+///
+/// The figures are chosen to exercise the wire vocabulary rather than to be
+/// impressive — the route labels are the five a caller can actually produce
+/// against this router, including the fixed `<unmatched>` label, and the status
+/// classes carry a client error and a server error so a consumer that renders
+/// only `2xx` fails on the fixture rather than in production.
+fn admin_overview(resident_bytes: Option<u64>) -> AdminOverview {
+    AdminOverview {
+        process: ProcessOverview {
+            build_sha: COMMIT_SHA.to_owned(),
+            // A day, two hours, three minutes and four seconds: distinct enough
+            // in every unit that a renderer dividing by the wrong one is
+            // visible rather than plausible.
+            uptime_seconds: 93_784,
+            resident_bytes,
+        },
+        http: HttpOverview {
+            // One, not zero. The request reading the snapshot is itself in
+            // flight while the snapshot is taken, and a fixture showing an idle
+            // process would teach a reader to treat one as an anomaly.
+            in_flight: 1,
+            tracked_routes: 5,
+            max_tracked_routes: 64,
+            // Sorted by route then method, exactly as the server emits them —
+            // a HashMap iterates differently between runs, and a rendered table
+            // that reshuffled under a reader would be the server's fault rather
+            // than the UI's to fix.
+            routes: vec![
+                route(
+                    "/api/v1/analyses",
+                    HttpMethodClass::Post,
+                    // The 4xx here is the authentication gate refusing, which is
+                    // ordinary traffic for this route rather than a fault.
+                    counts(389, 22, 1),
+                    64_070_000,
+                    [
+                        estimate(9_800, 5_000, 10_000),
+                        estimate(31_200, 25_000, 50_000),
+                        // Past the last bucket bound. A cold instance resuming a
+                        // scaled-to-zero database is exactly how a request
+                        // exceeds ten seconds, and telling that apart from a slow
+                        // handler is what issue #37 exists to do — so the case a
+                        // UI must render as a floor gets a fixture.
+                        floor(10_000_000),
+                    ],
+                ),
+                route(
+                    "/api/v1/analyses/{analysis_id}",
+                    HttpMethodClass::Get,
+                    counts(7_041, 60, 1),
+                    63_918_000,
+                    [
+                        estimate(7_900, 5_000, 10_000),
+                        estimate(22_800, 10_000, 25_000),
+                        estimate(41_500, 25_000, 50_000),
+                    ],
+                ),
+                route(
+                    "/api/v1/system/probe",
+                    HttpMethodClass::Get,
+                    counts(1_241, 0, 0),
+                    9_928_000,
+                    [
+                        estimate(6_800, 5_000, 10_000),
+                        estimate(17_400, 10_000, 25_000),
+                        estimate(33_100, 25_000, 50_000),
+                    ],
+                ),
+                route(
+                    "/healthz",
+                    HttpMethodClass::Get,
+                    counts(6_814, 0, 0),
+                    6_132_600,
+                    [
+                        estimate(720, 500, 1_000),
+                        estimate(2_100, 1_000, 2_500),
+                        estimate(4_400, 2_500, 5_000),
+                    ],
+                ),
+                // Not a pattern, and it says so. Every request that matched no
+                // route shares this one label however many distinct paths were
+                // probed, which is what keeps a 404 flood from being an
+                // unbounded label set on demand.
+                route(
+                    "<unmatched>",
+                    HttpMethodClass::Get,
+                    counts(0, 37, 0),
+                    11_100,
+                    [
+                        estimate(260, 0, 500),
+                        estimate(420, 0, 500),
+                        estimate(480, 0, 500),
+                    ],
+                ),
+            ],
+        },
+    }
+}
+
+/// The `admin-v1` fixtures.
+///
+/// Two files differing in exactly one field. That is deliberate: a reader
+/// diffing them sees the unknown-memory case and nothing else, and a change
+/// that accidentally altered the rest of the payload shows up as noise in a
+/// diff that should have one line in it.
+///
+/// There are no `401` or `403` fixtures. Authorisation semantics are owned by
+/// `tests/admin.rs`, which drives the real router, and the wire shape of a
+/// refusal is `ApiError` — already published, already rendered. A fixture for
+/// them would assert serialization and nothing about behaviour.
+fn admin_fixtures() -> Vec<(&'static str, String)> {
+    let render = |value: &dyn erased::Erased| value.to_pretty();
+
+    vec![
+        ("overview.json", render(&admin_overview(Some(61_849_600)))),
+        // Named for the figure that is unknown rather than for the process,
+        // which is emphatically available — it answered the request. The
+        // precedent is `loc-unavailable.json`: the file is named after the
+        // measurement that could not be taken.
+        (
+            "overview-memory-unavailable.json",
+            render(&admin_overview(None)),
+        ),
+    ]
+}
+
 /// Minimal erasure so `fixtures()` can render heterogeneous values uniformly
 /// without a generic function per shape.
 mod erased {
@@ -591,37 +805,177 @@ mod erased {
     }
 }
 
+/// Every published family, and the directory each is written to.
+///
+/// One list, so adding a contract family means adding a line here rather than a
+/// second test target. A family that was generated but never gated would be a
+/// hand-editable file wearing a generated file's banner.
+fn families() -> Vec<(&'static str, Vec<(&'static str, String)>)> {
+    vec![("analysis-v1", fixtures()), ("admin-v1", admin_fixtures())]
+}
+
 #[test]
 fn fixtures_match_the_contract() {
-    let dir = fixture_dir();
     let update = std::env::var_os("UPDATE_FIXTURES").is_some();
 
-    if update {
-        fs::create_dir_all(&dir).expect("creating contracts/fixtures/analysis-v1");
-    }
-
-    for (name, generated) in fixtures() {
-        let path = dir.join(name);
+    for (family, fixtures) in families() {
+        let dir = fixture_dir(family);
 
         if update {
-            fs::write(&path, &generated).unwrap_or_else(|e| panic!("writing {name}: {e}"));
-            continue;
+            fs::create_dir_all(&dir)
+                .unwrap_or_else(|e| panic!("creating contracts/fixtures/{family}: {e}"));
         }
 
-        let committed = fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!(
-                "{name} could not be read ({e}).\n\
-                 Generate with: UPDATE_FIXTURES=1 cargo test -p repolens-server --test fixtures"
-            )
-        });
+        for (name, generated) in fixtures {
+            let path = dir.join(name);
+
+            if update {
+                fs::write(&path, &generated)
+                    .unwrap_or_else(|e| panic!("writing {family}/{name}: {e}"));
+                continue;
+            }
+
+            let committed = fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!(
+                    "{family}/{name} could not be read ({e}).\n\
+                     Generate with: UPDATE_FIXTURES=1 cargo test -p repolens-server --test fixtures"
+                )
+            });
+
+            assert_eq!(
+                committed.replace("\r\n", "\n"),
+                generated.replace("\r\n", "\n"),
+                "{family}/{name} is stale.\n\
+                 Regenerate with: UPDATE_FIXTURES=1 cargo test -p repolens-server --test fixtures"
+            );
+        }
+    }
+}
+
+#[test]
+fn admin_fixtures_are_internally_coherent() {
+    // A fixture is evidence, not illustration: the frontend is built against
+    // these numbers, so a set that no running process could have produced would
+    // teach the UI invariants that do not hold. None of this is checkable by
+    // reading the literals — the arithmetic is exactly the part a human eye
+    // slides over.
+    for (name, body) in admin_fixtures() {
+        let overview: AdminOverview =
+            serde_json::from_str(&body).unwrap_or_else(|e| panic!("{name} parses: {e}"));
 
         assert_eq!(
-            committed.replace("\r\n", "\n"),
-            generated.replace("\r\n", "\n"),
-            "{name} is stale.\n\
-             Regenerate with: UPDATE_FIXTURES=1 cargo test -p repolens-server --test fixtures"
+            overview.http.tracked_routes,
+            u64::try_from(overview.http.routes.len()).expect("fits"),
+            "{name}: the label count disagrees with the table it describes"
         );
+        assert!(
+            overview.http.tracked_routes <= overview.http.max_tracked_routes,
+            "{name}: more labels are held than the ceiling permits"
+        );
+
+        let mut previous_label: Option<&str> = None;
+        for row in &overview.http.routes {
+            let responses = row.responses;
+            assert_eq!(
+                row.requests,
+                responses.informational
+                    + responses.success
+                    + responses.redirection
+                    + responses.client_error
+                    + responses.server_error
+                    + responses.other,
+                "{name}: {} counts requests the status classes do not account for",
+                row.route
+            );
+            assert!(
+                row.requests > 0,
+                "{name}: {} is a series with no observations, which the server never emits",
+                row.route
+            );
+
+            // Percentiles cannot decrease, and each estimate has to lie inside
+            // the bucket it names. A fixture violating either would be the one
+            // shape a reader has no reason to distrust.
+            let latency = row.latency;
+            assert!(
+                latency.p50.micros <= latency.p95.micros
+                    && latency.p95.micros <= latency.p99.micros,
+                "{name}: {} has percentiles that go backwards",
+                row.route
+            );
+            for (label, estimate) in [
+                ("p50", latency.p50),
+                ("p95", latency.p95),
+                ("p99", latency.p99),
+            ] {
+                assert!(
+                    estimate.micros >= estimate.lower_bound_micros,
+                    "{name}: {} {label} is below its own bucket",
+                    row.route
+                );
+                match estimate.upper_bound_micros {
+                    Some(upper) => assert!(
+                        estimate.micros <= upper && estimate.lower_bound_micros < upper,
+                        "{name}: {} {label} is outside its own bucket",
+                        row.route
+                    ),
+                    // The overflow bucket reports a floor rather than an
+                    // estimate, so the two must be the same number. Anything
+                    // else is an interpolation towards a bound that does not
+                    // exist.
+                    None => assert_eq!(
+                        estimate.micros, estimate.lower_bound_micros,
+                        "{name}: {} {label} interpolated past the last bound",
+                        row.route
+                    ),
+                }
+            }
+            assert!(
+                latency.total_micros >= row.requests * latency.p50.lower_bound_micros,
+                "{name}: {} spent less time in total than its own median implies",
+                row.route
+            );
+
+            // The server sorts by label so a rendered table does not reshuffle
+            // between reads. A fixture in another order would publish an order
+            // the server never produces.
+            if let Some(previous) = previous_label {
+                assert!(
+                    previous < row.route.as_str(),
+                    "{name}: {} follows {previous}, which is not the order the server emits",
+                    row.route
+                );
+            }
+            previous_label = Some(&row.route);
+        }
     }
+}
+
+#[test]
+fn the_admin_fixtures_differ_only_in_the_figure_that_is_unknown() {
+    // The pair exists to publish "unknown renders as unknown rather than zero".
+    // If the two files drifted in any other field, a consumer diffing them
+    // would learn the wrong lesson about which case it is looking at — and the
+    // null would stop being the thing under test.
+    let known: AdminOverview = serde_json::from_str(&admin_fixtures()[0].1).expect("parses");
+    let unknown: AdminOverview = serde_json::from_str(&admin_fixtures()[1].1).expect("parses");
+
+    assert!(known.process.resident_bytes.is_some());
+    assert_eq!(
+        unknown.process.resident_bytes, None,
+        "the unavailable-memory fixture must carry null, not zero"
+    );
+    assert_eq!(
+        AdminOverview {
+            process: ProcessOverview {
+                resident_bytes: known.process.resident_bytes,
+                ..unknown.process
+            },
+            ..unknown
+        },
+        known,
+        "the two fixtures differ in more than the memory figure"
+    );
 }
 
 #[test]
@@ -657,11 +1011,18 @@ fn every_error_code_is_either_in_a_fixture_or_explicitly_exempt() {
     // exceeded ingestion bound — and each is written to the row by
     // `store::fail`. Exempting them meant three terminal states a user can
     // actually hit had no proof that the frontend renders them.
-    const EXEMPT: [ErrorCode; 9] = [
+    //
+    // `FORBIDDEN` joins them for the same reason and one of its own: the admin
+    // gate refuses before any handler runs, so no analysis can carry it, and it
+    // belongs to `admin-v1` rather than to this contract at all. Its behaviour
+    // is owned by `tests/admin.rs` against the real router, and its rendering by
+    // the unknown-variant gate in the client package, which covers every code.
+    const EXEMPT: [ErrorCode; 10] = [
         ErrorCode::InvalidRepositoryUrl,
         ErrorCode::AnalysisNotFound,
         ErrorCode::ReportNotAvailable,
         ErrorCode::Unauthenticated,
+        ErrorCode::Forbidden,
         ErrorCode::AuthenticationUnavailable,
         ErrorCode::MalformedRequest,
         ErrorCode::RequestTooLarge,

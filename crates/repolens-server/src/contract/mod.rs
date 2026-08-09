@@ -1,4 +1,4 @@
-//! The `analysis-v1` public wire contract.
+//! The public wire contract.
 //!
 //! These types exist to be *generated from*, not merely described. The chain is
 //! one-directional and gated at both ends:
@@ -7,6 +7,17 @@
 //! these types → utoipa → contracts/openapi.json → openapi-typescript
 //!            → schema.ts → fixtures type-check → MSW → SvelteKit
 //! ```
+//!
+//! # Two families, one chain
+//!
+//! [`analysis`], [`report`] and [`error`] are `analysis-v1`: the report a reader
+//! came for. [`admin`] is `admin-v1`: an operational snapshot of the process
+//! that answered, served behind an authorisation gate and read by nobody but an
+//! operator. They are separate directories under `contracts/fixtures/` because
+//! they are separate contracts with separate audiences — an admin field is not
+//! an analysis-contract change, and versioning them together would make it look
+//! like one. The generation chain above is shared; only the fixture family
+//! differs.
 //!
 //! # Why the endpoints are not here
 //!
@@ -29,6 +40,7 @@
 //! which would generate `field?: T | null` and let a consumer skip the null
 //! case entirely — and the null case is the one that matters.
 
+pub mod admin;
 pub mod analysis;
 pub mod error;
 pub mod report;

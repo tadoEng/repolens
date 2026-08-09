@@ -4,6 +4,7 @@
 //! "what can this endpoint touch?" is answered by reading one struct rather
 //! than by tracing imports.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use repolens_github::GitHubRestClient;
@@ -66,6 +67,20 @@ pub struct AppState {
     /// lets creation **close** in that case rather than silently run
     /// unauthenticated — see `api::authenticated`.
     verifier: Option<SharedVerifier>,
+    /// Firebase uids permitted to read the operational snapshot.
+    ///
+    /// **Not** an `Option`, and the difference from `verifier` above is the
+    /// point. An absent verifier means identity cannot be established at all,
+    /// which is a distinct answer a caller must be told (`503`, not `401`). An
+    /// absent allowlist is not a third state: it is an empty one, and an empty
+    /// one already means what it should — nobody is an admin. Modelling it as
+    /// `Option<HashSet<_>>` would create a `None` case indistinguishable in
+    /// behaviour from `Some(empty)` and invite a future reader to give the two
+    /// different meanings, which is exactly how a door gets opened by accident.
+    ///
+    /// A set rather than a `Vec`: membership is the only question ever asked of
+    /// it, and the lists are small enough that the choice is about saying so.
+    admin_uids: Arc<HashSet<String>>,
     /// What this process has observed about itself.
     ///
     /// Held here rather than beside the router because there must be exactly
@@ -87,6 +102,7 @@ impl AppState {
             pool: Some(pool),
             github: Arc::new(github),
             verifier: None,
+            admin_uids: Arc::new(HashSet::new()),
             metrics: Metrics::new(),
         }
     }
@@ -104,6 +120,40 @@ impl AppState {
         self.verifier.as_ref()
     }
 
+    /// Sets the uids permitted to read the operational snapshot.
+    ///
+    /// Takes owned strings from [`crate::config::admin_firebase_uids`], which
+    /// has already discarded blank entries — an allowlist containing the empty
+    /// string would admit any caller whose uid arrived as nothing.
+    #[must_use]
+    pub fn with_admin_uids(mut self, uids: impl IntoIterator<Item = String>) -> Self {
+        self.admin_uids = Arc::new(uids.into_iter().collect());
+        self
+    }
+
+    /// Whether `uid` may read the operational snapshot.
+    ///
+    /// Compared exactly. A Firebase uid is case-sensitive, so an allowlist that
+    /// helpfully folded case would admit an identity nobody configured — the
+    /// same rule the parser in [`crate::config`] keeps, and it has to be kept at
+    /// both ends or one of them is decorative.
+    #[must_use]
+    pub fn is_admin(&self, uid: &str) -> bool {
+        self.admin_uids.contains(uid)
+    }
+
+    /// Whether anybody at all is configured as an admin.
+    ///
+    /// Exists only so a refusal can be logged with the reason an operator needs.
+    /// "Nobody is allow-listed" and "you specifically are not" are the same
+    /// `403` to the caller, deliberately, and completely different problems to
+    /// whoever deployed this. The *list itself* is never logged: it is not a
+    /// secret the way a token is, but it names people.
+    #[must_use]
+    pub fn has_admins(&self) -> bool {
+        !self.admin_uids.is_empty()
+    }
+
     /// Borrows the GitHub client.
     #[must_use]
     pub fn github(&self) -> &Arc<GitHubRestClient> {
@@ -117,6 +167,7 @@ impl AppState {
             pool: None,
             github: Arc::new(github),
             verifier: None,
+            admin_uids: Arc::new(HashSet::new()),
             metrics: Metrics::new(),
         }
     }

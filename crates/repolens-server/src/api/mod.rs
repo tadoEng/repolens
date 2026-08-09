@@ -21,6 +21,7 @@ use utoipa::{OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+pub mod admin;
 pub mod analyses;
 mod authenticated;
 mod failure;
@@ -382,6 +383,7 @@ pub fn build(
         .routes(routes!(liveness))
         .routes(routes!(system_probe))
         .merge(analyses::routes())
+        .merge(admin::routes())
         .with_state(state)
         .split_for_parts();
 

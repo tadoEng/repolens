@@ -27,7 +27,7 @@ crates/repolens-core           domain — identity, findings, evidence, rule con
                                reproducibility key
 crates/repolens-github         GitHub REST boundary — resolve, tree, blobs, bounded archive
 crates/repolens-server         axum API, worker, migrate binary, public wire DTOs
-contracts/                     openapi.json and the analysis-v1 executable fixtures
+contracts/                     openapi.json and the executable fixtures (analysis-v1, admin-v1)
 packages/repolens-api-client   generated TypeScript client
 packages/repolens-msw          MSW handlers driven by those fixtures
 web/                           SvelteKit application, static output only
@@ -120,7 +120,7 @@ broken intra-doc links are caught by whoever runs it.
 
 ## Regenerating generated artefacts
 
-`contracts/openapi.json`, `contracts/fixtures/analysis-v1/*.json`,
+`contracts/openapi.json`, every fixture under `contracts/fixtures/`,
 `packages/repolens-api-client/src/schema.ts`, and
 `packages/repolens-api-client/src/fixtures.ts` are **generated end to end and
 never hand-edited**. Editing one is writing a second definition of the contract

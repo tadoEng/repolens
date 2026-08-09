@@ -18,7 +18,7 @@ framework. `@repolens/msw` may depend on the client; nothing here depends on
 | File                     | Generated from            | Regenerate with       |
 | ------------------------ | ------------------------- | --------------------- |
 | `repolens-api-client/src/schema.ts`   | `contracts/openapi.json`  | `schema:update`   |
-| `repolens-api-client/src/fixtures.ts` | `contracts/fixtures/analysis-v1` | `fixtures:update` |
+| `repolens-api-client/src/fixtures.ts` | every family under `contracts/fixtures/` | `fixtures:update` |
 
 Each has a staleness test that regenerates from the committed input and compares
 byte for byte, so hand-editing either one fails `pnpm -r test` rather than
@@ -31,6 +31,15 @@ difference is invisible whitespace.
 imported as JSON, because TypeScript widens string literals in JSON modules —
 `"state": "QUEUED"` types as `string`, which would silently retire the enum
 check the unknown-variant policy depends on.
+
+It binds **both** contract families in one module: `ANALYSIS_FIXTURES` under
+`satisfies AnalysisFixture`, `ADMIN_FIXTURES` under `satisfies AdminFixture`.
+The `satisfies` count is asserted per family, so a fixture emitted under the
+wrong family's type cannot hide inside a total that happens to add up. Adding a
+family means adding a row to `FAMILIES` in `fixtures.test.ts` — including the
+list of scenarios it is required to cover, because a directory that quietly
+emptied would otherwise regenerate into a module matching its own snapshot
+perfectly while proving nothing.
 
 ## MSW handlers hold no payloads
 

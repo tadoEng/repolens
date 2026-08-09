@@ -439,6 +439,12 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::AnalysisNotFound => "ANALYSIS_NOT_FOUND",
         ErrorCode::ReportNotAvailable => "REPORT_NOT_AVAILABLE",
         ErrorCode::Unauthenticated => "UNAUTHENTICATED",
+        // Listed for the same reason as its neighbours, and no analysis can
+        // carry it: the admin gate refuses before any handler runs, so nothing
+        // reaches a terminal state holding this code. The arm exists so the
+        // match stays exhaustive by the compiler rather than by a wildcard,
+        // which is what makes a future code impossible to store unnamed.
+        ErrorCode::Forbidden => "FORBIDDEN",
         ErrorCode::AuthenticationUnavailable => "AUTHENTICATION_UNAVAILABLE",
         ErrorCode::MalformedRequest => "MALFORMED_REQUEST",
         ErrorCode::RequestTooLarge => "REQUEST_TOO_LARGE",
