@@ -34,6 +34,7 @@
 	import type { AdminOverview, SystemProbeResponse } from '$lib/api/admin';
 	import type { Fetched } from '$lib/api/fetched';
 	import { session } from '$lib/auth/session.svelte';
+	import AdminRefusal, { type Remedy } from '$lib/components/admin/AdminRefusal.svelte';
 	import AdminSection from '$lib/components/admin/AdminSection.svelte';
 	import MetricCard from '$lib/components/admin/MetricCard.svelte';
 	import RouteTable from '$lib/components/admin/RouteTable.svelte';
@@ -101,8 +102,6 @@
 	 * server said. That is the unknown-variant policy: never crash, never drop it silently,
 	 * and never invent an affordance for a refusal this build does not understand.
 	 */
-	type Remedy = 'sign-in' | 'not-permitted' | 'try-again' | 'refused';
-
 	const remedy = $derived<Remedy>(
 		refusal === null
 			? 'refused'
@@ -119,6 +118,29 @@
 	const canSignIn = $derived(
 		session.state.status === 'signed-out' || session.state.status === 'signed-in'
 	);
+
+	/**
+	 * The heading for each remedy.
+	 *
+	 * Written here, never by the server. `Record<Remedy, string>` rather than a lookup with a
+	 * default, so a remedy added later fails `pnpm -r check` instead of rendering blank.
+	 */
+	const REFUSAL_TITLES: Readonly<Record<Remedy, string>> = {
+		'sign-in': 'Sign in required',
+		'not-permitted': 'Not permitted',
+		'try-again': 'Sign-in cannot be checked',
+		refused: 'Request refused'
+	};
+
+	/**
+	 * What to say when the API refused without sending an envelope.
+	 *
+	 * Reached when a proxy answered instead of the service, so the status is the only fact
+	 * available and it is stated rather than dressed up.
+	 */
+	function refusalFallback(status: number): string {
+		return `The API answered with status ${status} and did not explain why.`;
+	}
 
 	/**
 	 * Requests this process has finished serving, summed over the published rows.
@@ -145,59 +167,23 @@
 
 {#if session.state.status === 'unknown'}
 	<p class="notice">Checking whether you are signed in…</p>
-{:else if refusal && remedy === 'sign-in'}
-	<section class="refusal" aria-labelledby="refusal-title">
-		<h2 id="refusal-title">Sign in required</h2>
-		<p>{refusal.error?.message ?? 'Operational data requires signing in as an administrator.'}</p>
-		{#if canSignIn}
-			<Button onclick={() => void session.signIn()} disabled={session.busy}>
-				{session.busy ? 'Signing in…' : 'Sign in'}
-			</Button>
-		{:else}
-			<p>
-				Sign-in is not configured in this build, so there is no way to present a credential from
-				here. Reports remain public; operational data does not.
-			</p>
-		{/if}
-	</section>
-{:else if refusal && remedy === 'not-permitted'}
-	<!--
-		Deliberately no sign-in control. This account is signed in and is not permitted, so
-		offering the flow again would loop somebody through something that cannot change the
-		answer — which is the whole reason FORBIDDEN is a separate code from UNAUTHENTICATED
-		rather than a second status sharing one.
-	-->
-	<section class="refusal" aria-labelledby="refusal-title">
-		<h2 id="refusal-title">Not permitted</h2>
-		<p>
-			{refusal.error?.message ??
-				'This account is not permitted to read operational data. Signing in again will not change that.'}
-		</p>
-	</section>
-{:else if refusal && remedy === 'try-again'}
-	<!--
-		Ours, not the caller's: sign-in could not be checked. Refreshing is the remedy and
-		signing out is emphatically not — it would take a valid session away from somebody
-		over a dependency that was briefly unreachable.
-	-->
-	<section class="refusal" aria-labelledby="refusal-title">
-		<h2 id="refusal-title">Sign-in cannot be checked</h2>
-		<p>
-			{refusal.error?.message ??
-				'Sign-in cannot be checked right now, so this request was refused rather than allowed through.'}
-		</p>
-		<Button onclick={() => void load()} disabled={loading}>
-			{loading ? 'Reading…' : 'Try again'}
-		</Button>
-	</section>
 {:else if refusal}
-	<section class="refusal" aria-labelledby="refusal-title">
-		<h2 id="refusal-title">Request refused</h2>
-		<p>
-			The API answered with status {refusal.status}.
-			{refusal.error?.message ?? 'It did not explain why.'}
-		</p>
-	</section>
+	<!--
+		Every refusal goes through one component, which is what makes "how many controls does
+		this state offer" a property a test can own directly. It could not be owned from the
+		end-to-end suite alone: there is no Firebase configuration in CI, so the sign-in
+		control is correctly absent from every capture and a suite that only ever saw that
+		branch would have to assert something adjacent to the requirement instead.
+	-->
+	<AdminRefusal
+		{remedy}
+		title={REFUSAL_TITLES[remedy]}
+		message={refusal.error?.message ?? refusalFallback(refusal.status)}
+		{canSignIn}
+		busy={remedy === 'try-again' ? loading : session.busy}
+		onSignIn={() => void session.signIn()}
+		onRetry={() => void load()}
+	/>
 {:else if unreachable}
 	<p class="notice">
 		The API could not be reached at all — no response arrived. That is a network, CORS, or
@@ -219,13 +205,23 @@
 		asserted that no button named "Try again" existed, which was true and irrelevant —
 		the button was named "Refresh". A test now counts the controls instead of naming
 		them.
+
+		The lead's provenance claim is narrowed to what the two requests actually guarantee.
+		It used to say "every figure on this page", which the *composition* made false: the
+		operational snapshot genuinely describes the process that answered it, but the
+		database and schema facts arrive on a separate system-probe request, and with more
+		than one instance — or mid-rollout — nothing routes the two to the same process. Each
+		endpoint was truthful; putting them under one sentence was not.
+
+		Narrowed in the wording rather than fixed with sticky routing, because the wording is
+		what was wrong. The page can say exactly what it knows.
 	-->
 	<p class="lead">
-		Every figure on this page describes <strong
-			>the single process that answered this request</strong
-		>. There is no aggregation across instances and no history: counters start at zero when a
-		process starts, so a deploy or a restart resets them, and two instances would each report their
-		own.
+		The figures under <strong>API / Axum</strong> and <strong>Runtime</strong> describe
+		<strong>the single process that answered the operational snapshot</strong>. There is no
+		aggregation across instances and no history: counters start at zero when a process starts, so a
+		deploy or a restart resets them, and two instances would each report their own. Deployment mixes
+		in facts from a second request, and says which.
 	</p>
 
 	<div class="controls">
@@ -315,7 +311,9 @@
 	<AdminSection
 		id="deployment"
 		title="Deployment"
-		lead="Which build answered, and what it is running against."
+		lead="Which build answered the operational snapshot, and — from a separate system-probe
+			request, which may have been served by a different instance — what the deployment is
+			running against."
 	>
 		<dl class="cards">
 			<div class="card-sha">
@@ -344,7 +342,7 @@
 					<MetricCard
 						label="Schema version"
 						value={integer(system.schema_version)}
-						detail="Highest applied migration."
+						detail="Highest applied migration, from the system probe."
 					/>
 				{/if}
 			{:else}
@@ -388,28 +386,6 @@
 	.notice,
 	.empty {
 		max-width: var(--measure);
-		color: var(--text-secondary);
-	}
-
-	/*
-	 * A refusal is the whole page when it happens, so it gets a section's breathing room
-	 * rather than sitting tight under the heading as though it were a subtitle.
-	 */
-	.refusal {
-		display: flex;
-		flex-direction: column;
-		align-items: start;
-		gap: var(--space-4);
-		padding-block-start: var(--space-8);
-		max-width: var(--measure);
-	}
-
-	.refusal h2 {
-		margin: 0;
-	}
-
-	.refusal p {
-		margin: 0;
 		color: var(--text-secondary);
 	}
 
