@@ -219,6 +219,54 @@ pub fn firebase_project_id() -> Option<String> {
     (!raw.is_empty()).then(|| raw.to_owned())
 }
 
+/// Firebase UIDs allowed to read the operational snapshot.
+///
+/// A UID allowlist rather than an email one: the UID is the stable Firebase
+/// identity, while an email can change, be unverified, or be reused.
+///
+/// **Absent closes the door.** An empty list means nobody is an admin, and the
+/// service still starts — a deployment that forgot this variable serves its
+/// public endpoints and refuses its operational one, which is the safe
+/// direction. The opposite default would publish process internals to whoever
+/// found the path.
+///
+/// Three inputs mean the same thing, and they are one contract rather than
+/// three behaviours:
+///
+/// ```text
+/// unset  ->  empty  ->  whitespace-only  ->  nobody is an admin
+/// ```
+///
+/// Entries are trimmed and blank ones discarded, because the alternative is
+/// worse than untidy: splitting `""` on a comma yields one entry that is the
+/// empty string, and an allowlist containing `""` would admit any caller whose
+/// UID failed to parse into anything. A separator with nothing around it is not
+/// an identity.
+///
+/// The configured list is **never logged**. It is not a secret in the sense a
+/// token is, but it names people, and an operational log is the wrong place to
+/// learn who the operators are.
+#[must_use]
+pub fn admin_firebase_uids() -> Vec<String> {
+    parse_admin_uids(env::var("ADMIN_FIREBASE_UIDS").ok().as_deref())
+}
+
+/// The parsing half, separated so the contract above is testable.
+///
+/// Process environment is global and this crate's tests run in parallel, so a
+/// test that set the variable would be testing whichever value won the race.
+/// The env read stays a one-liner and the decisions live here.
+fn parse_admin_uids(raw: Option<&str>) -> Vec<String> {
+    raw.map(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|uid| !uid.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 fn required(name: &'static str) -> Result<String, ConfigError> {
     match env::var(name) {
         Ok(value) if !value.trim().is_empty() => {
@@ -463,5 +511,51 @@ mod tests {
         // asserted so this stays independent of how the test runner is invoked.
         let address = bind_address().expect("default is always valid");
         assert!(address.ip().is_unspecified());
+    }
+}
+
+#[cfg(test)]
+mod admin_uid_tests {
+    use super::parse_admin_uids;
+
+    #[test]
+    fn every_way_of_saying_nothing_means_nobody_is_an_admin() {
+        // One contract rather than three behaviours. A deployment that forgot
+        // the variable, one that set it empty, and one that left a stray comma
+        // are all saying the same thing, and none of them may open the door.
+        for raw in [None, Some(""), Some("   "), Some(","), Some(" , , ")] {
+            assert!(
+                parse_admin_uids(raw).is_empty(),
+                "{raw:?} must yield no admins"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_entry_never_becomes_an_identity() {
+        // The trap this parser exists for: splitting on a comma turns an empty
+        // segment into an entry that is the empty string, and an allowlist
+        // holding `""` admits any caller whose UID arrived as nothing. A
+        // separator with nothing around it is not an identity.
+        let uids = parse_admin_uids(Some("uid-a,,uid-b, ,"));
+
+        assert_eq!(uids, ["uid-a", "uid-b"]);
+        assert!(!uids.iter().any(String::is_empty));
+    }
+
+    #[test]
+    fn entries_are_trimmed_but_never_otherwise_rewritten() {
+        // Trimmed because a list is written by a human with spaces after the
+        // commas. Not lowercased, and not normalised in any other way: a
+        // Firebase UID is case-sensitive and an allowlist that "helpfully"
+        // folded case would admit an identity nobody configured.
+        assert_eq!(
+            parse_admin_uids(Some(" Uid-A , uid-b ")),
+            ["Uid-A", "uid-b"]
+        );
+        assert_ne!(
+            parse_admin_uids(Some("UID-A")),
+            parse_admin_uids(Some("uid-a"))
+        );
     }
 }
