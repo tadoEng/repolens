@@ -1,8 +1,13 @@
 import type { Page } from '@playwright/test';
 import {
+	ADMIN_FIXTURES,
 	COMPLETED_REPORT_FIXTURE,
+	type AdminFixtureName,
 	type AnalysisFixture,
 	type AnalysisFixtureName,
+	type ApiError,
+	type ErrorCode,
+	type SystemProbeResponse,
 	ANALYSIS_FIXTURES
 } from '@repolens/api-client';
 
@@ -65,6 +70,71 @@ export async function serveFixture(page: Page, fixture: AnalysisFixture): Promis
 /** Intercept both endpoints for a named fixture. */
 export function serveScenario(page: Page, name: AnalysisFixtureName): Promise<void> {
 	return serveFixture(page, ANALYSIS_FIXTURES[name]);
+}
+
+const ADMIN_OVERVIEW_PATH = '/api/v1/admin/overview';
+const SYSTEM_PROBE_PATH = '/api/v1/system/probe';
+
+/**
+ * The probe body `/admin` reads its deployment facts from.
+ *
+ * Typed as the generated DTO, so a probe field that changes shape breaks this at compile
+ * time. The values are a healthy deployment: the point of the admin baselines is the
+ * operational sections, not the probe's own failure modes, which `system-probe.spec.ts`
+ * already owns.
+ */
+const HEALTHY_PROBE: SystemProbeResponse = {
+	api: 'OK',
+	database: 'OK',
+	build_sha: '0584a2df65968a4e9e6859ef46bbed430408a3f1',
+	schema_version: 1
+};
+
+/**
+ * Serve one `admin-v1` fixture, plus the probe the page reads alongside it.
+ *
+ * The body comes from `@repolens/api-client`, generated from
+ * `contracts/fixtures/admin-v1/*.json` under a `satisfies` assertion — so a change to the
+ * Rust `AdminOverview` breaks this file at compile time rather than leaving a green suite
+ * asserting against a shape the API no longer serves. There is no hand-written snapshot
+ * here and there must not be one.
+ */
+export async function serveAdminOverview(page: Page, name: AdminFixtureName): Promise<void> {
+	await page.route(`${API_ORIGIN}${ADMIN_OVERVIEW_PATH}`, (route) =>
+		route.fulfill({ json: ADMIN_FIXTURES[name], headers: CORS_HEADERS })
+	);
+	await page.route(`${API_ORIGIN}${SYSTEM_PROBE_PATH}`, (route) =>
+		route.fulfill({ json: HEALTHY_PROBE, headers: CORS_HEADERS })
+	);
+}
+
+/**
+ * Refuse the operational snapshot with one error code.
+ *
+ * The envelope is built here rather than read from a fixture, and that is deliberate:
+ * `admin-v1` publishes no refusal fixtures, because a refusal's wire shape is `ApiError` —
+ * already published, already generated, already rendered everywhere else. What is *not*
+ * hand-written is the shape: `ApiError` and `ErrorCode` come from the generated client, so
+ * a code removed from the Rust enum fails this file at compile time.
+ *
+ * The message is arbitrary on purpose. **No behavioural test may depend on it.** The
+ * contract the page implements is `ErrorCode → remedy`, so these strings exist only to
+ * prove the server's sentence is what gets rendered — never to be matched against.
+ */
+export async function refuseAdminOverview(
+	page: Page,
+	status: number,
+	code: ErrorCode,
+	message: string
+): Promise<void> {
+	const body: ApiError = { code, message, retry_after_seconds: null };
+
+	await page.route(`${API_ORIGIN}${ADMIN_OVERVIEW_PATH}`, (route) =>
+		route.fulfill({ status, json: body, headers: CORS_HEADERS })
+	);
+	await page.route(`${API_ORIGIN}${SYSTEM_PROBE_PATH}`, (route) =>
+		route.fulfill({ json: HEALTHY_PROBE, headers: CORS_HEADERS })
+	);
 }
 
 /** One request the page made to the API. */

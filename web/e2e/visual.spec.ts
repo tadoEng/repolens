@@ -2,7 +2,12 @@ import { existsSync } from 'node:fs';
 
 import { expect, test, type TestInfo } from '@playwright/test';
 
-import { ANALYSIS_ID, serveScenario } from './support/api-mock';
+import {
+	ANALYSIS_ID,
+	refuseAdminOverview,
+	serveAdminOverview,
+	serveScenario
+} from './support/api-mock';
 
 /**
  * Visual baselines — small, canonical, and deliberately not one per permutation.
@@ -25,8 +30,31 @@ import { ANALYSIS_ID, serveScenario } from './support/api-mock';
  *   4. a report with no line counts — the `UNABLE_TO_VERIFY` state, which must never
  *      resemble the populated one.
  *
- * Everything else about those pages is asserted by name in `report.spec.ts` and
- * `analysis.spec.ts`, where a failure says *what* broke rather than showing a picture.
+ * `/admin` adds four on the same principle, not one per state:
+ *
+ *   5. the populated dashboard at desktop — five sections, the route table, and the two
+ *      unmeasured sections that must not look like failed loads;
+ *   6. the same at 360px, where a nine-column table has to scroll inside its own box
+ *      rather than the page;
+ *   7. the unmeasurable-memory state, which is the whole reason a second fixture exists;
+ *   8. one refusal — `FORBIDDEN`, because it is the state with the fewest affordances and
+ *      therefore the easiest to ship looking broken.
+ *
+ * The other refusals are deliberately **not** baselined. They share one shell and differ
+ * only in title, body and which button is present, all of which `admin.spec.ts` asserts by
+ * name. Three more screenshots would mostly duplicate evidence, and duplicate baselines are
+ * what get approved without being read.
+ *
+ * ## The server's prose is inside these captures, on purpose
+ *
+ * A refusal's sentence comes from Rust and is visible product output, so rewording it moves
+ * a screenshot. That cost is accepted rather than designed away: masking the message would
+ * remove the visual proof exactly where refusal states matter most. A baseline review then
+ * answers the right question — did the page still look intentional after the copy changed?
+ *
+ * Everything else about those pages is asserted by name in `report.spec.ts`,
+ * `analysis.spec.ts` and `admin.spec.ts`, where a failure says *what* broke rather than
+ * showing a picture.
  *
  * ## Determinism
  *
@@ -125,4 +153,91 @@ test('report with no line counts', async ({ page }, testInfo) => {
 	await settle(page);
 
 	await expect(page).toHaveScreenshot('report-loc-unavailable.png', SHOT);
+});
+
+/**
+ * `/admin` settles differently from the report routes.
+ *
+ * `settle` above waits for the layout's footer probe to *fail*, which is right for a page
+ * served with no API behind it. The admin captures intercept the probe and answer it, so
+ * the footer resolves instead — waiting for the failure text there would wait forever.
+ */
+async function settleAdmin(page: import('@playwright/test').Page): Promise<void> {
+	await page.evaluate(() => document.fonts.ready);
+}
+
+/**
+ * The instant `/admin` believes it read its snapshot at.
+ *
+ * The page stamps the wall clock into "Read …", which is exactly right for a surface with
+ * no polling — an operator has to know how stale the figures are. It is also
+ * non-deterministic, and the first generated baseline proved it: the capture contained the
+ * minute it happened to be taken, so every subsequent run would have differed for a reason
+ * that is not a regression.
+ *
+ * Pinning the clock rather than hiding the element. Masking it would remove a visible piece
+ * of product output from the one artifact that checks the page still looks intentional,
+ * which is the same argument that keeps the server's refusal prose inside these captures.
+ */
+const READ_AT = new Date('2026-08-06T09:00:00.000Z');
+
+/** A capture of `/admin` cannot start until its clock is pinned. */
+async function gotoAdmin(page: import('@playwright/test').Page): Promise<void> {
+	await page.clock.setFixedTime(READ_AT);
+	await page.goto('/admin');
+}
+
+test('operations dashboard, desktop', async ({ page }, testInfo) => {
+	test.skip(testInfo.project.name !== 'chromium', 'The desktop baseline is the 1280 project.');
+	requireBaseline(testInfo, 'admin-populated.png');
+
+	await serveAdminOverview(page, 'overview');
+	await gotoAdmin(page);
+	await expect(page.getByRole('heading', { name: 'Deployment', level: 2 })).toBeVisible();
+	await settleAdmin(page);
+
+	await expect(page).toHaveScreenshot('admin-populated.png', SHOT);
+});
+
+test('operations dashboard, 360px', async ({ page }, testInfo) => {
+	test.skip(testInfo.project.name !== 'mobile-360', 'The narrow baseline is the 360 project.');
+	requireBaseline(testInfo, 'admin-populated-narrow.png');
+
+	await serveAdminOverview(page, 'overview');
+	await gotoAdmin(page);
+	await expect(page.getByRole('heading', { name: 'Deployment', level: 2 })).toBeVisible();
+	await settleAdmin(page);
+
+	await expect(page).toHaveScreenshot('admin-populated-narrow.png', SHOT);
+});
+
+test('operations dashboard with unmeasurable memory', async ({ page }, testInfo) => {
+	test.skip(testInfo.project.name !== 'chromium', 'One canonical capture, at desktop.');
+	requireBaseline(testInfo, 'admin-memory-unavailable.png');
+
+	await serveAdminOverview(page, 'overview-memory-unavailable');
+	await gotoAdmin(page);
+	await expect(page.getByRole('heading', { name: 'Runtime', level: 2 })).toBeVisible();
+	await settleAdmin(page);
+
+	await expect(page).toHaveScreenshot('admin-memory-unavailable.png', SHOT);
+});
+
+test('operations dashboard refused', async ({ page }, testInfo) => {
+	test.skip(testInfo.project.name !== 'chromium', 'One canonical capture, at desktop.');
+	requireBaseline(testInfo, 'admin-forbidden.png');
+
+	// The state with the fewest affordances — no sign-in, no retry — and therefore the one
+	// most easily shipped looking like a broken page rather than a considered refusal.
+	await refuseAdminOverview(
+		page,
+		403,
+		'FORBIDDEN',
+		'This account is not permitted to read operational data. Signing in again will not change that.'
+	);
+	await gotoAdmin(page);
+	await expect(page.getByRole('heading', { name: 'Not permitted' })).toBeVisible();
+	await settleAdmin(page);
+
+	await expect(page).toHaveScreenshot('admin-forbidden.png', SHOT);
 });

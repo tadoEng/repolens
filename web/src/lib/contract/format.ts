@@ -74,6 +74,60 @@ export function duration(seconds: number): string {
 }
 
 /**
+ * A latency in microseconds, in the largest unit that keeps it readable.
+ *
+ * Microseconds are what the contract publishes, because the figure under test is expected
+ * to be small: a histogram whose finest bucket was one millisecond could not tell "fast"
+ * from "immeasurable". Rendering them raw would make a route table unreadable, and
+ * rendering them in milliseconds alone would print `0 ms` for the handler this whole
+ * experiment exists to measure — which states the opposite of what was observed.
+ *
+ * So the unit follows the value, and sub-millisecond figures keep their own unit rather
+ * than being rounded into a zero.
+ */
+export function micros(value: number): string {
+	if (!Number.isFinite(value) || value < 0) return 'unknown';
+	if (value < 1000) return `${integer(value)} µs`;
+	if (value < 10_000) return `${(value / 1000).toFixed(1)} ms`;
+	if (value < 1_000_000) return `${integer(Math.round(value / 1000))} ms`;
+	return `${(value / 1_000_000).toFixed(2)} s`;
+}
+
+/**
+ * A process uptime in seconds, as the coarsest two units that describe it.
+ *
+ * Two units rather than one, because one is ambiguous exactly where it matters: "2 days" and
+ * "2 days 23 hours" are nearly a day apart, and a reader comparing a cold start against a
+ * warm process needs to know which. Two rather than all four, because seconds stop being
+ * interesting the moment hours are involved.
+ */
+export function uptime(seconds: number): string {
+	if (!Number.isFinite(seconds) || seconds < 0) return 'unknown';
+
+	const whole = Math.floor(seconds);
+	const parts: string[] = [];
+	const units: readonly (readonly [number, string])[] = [
+		[86_400, 'd'],
+		[3600, 'h'],
+		[60, 'm'],
+		[1, 's']
+	];
+
+	let remaining = whole;
+	for (const [size, suffix] of units) {
+		const count = Math.floor(remaining / size);
+		remaining %= size;
+		// A leading zero is noise; a middle one is information. `1 d 0 h` says the process
+		// started just over a day ago, which `1 d 3 m` would not.
+		if (count === 0 && parts.length === 0) continue;
+		parts.push(`${count} ${suffix}`);
+		if (parts.length === 2) break;
+	}
+
+	return parts.length > 0 ? parts.join(' ') : '0 s';
+}
+
+/**
  * The first seven characters of a digest, keeping any algorithm prefix.
  *
  * `sha256:6b8f9e2c…` shortens to `sha256:6b8f9e2`, not to `sha256:`. The prefix is part of
