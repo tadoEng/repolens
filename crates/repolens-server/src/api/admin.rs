@@ -80,14 +80,38 @@ fn http_overview(snapshot: &MetricsSnapshot) -> HttpOverview {
         tracked_routes: widen(snapshot.tracked_routes),
         max_tracked_routes: widen(MAX_TRACKED_ROUTES),
         // `filter_map` rather than `map`, because building a row needs
-        // percentiles and a histogram with no observations has none.
-        // `Metrics::snapshot` never emits such a sample — a series exists only
-        // once something was recorded into it — so this drops nothing today.
-        // If that ever changed, a route with nothing measured would be omitted
-        // rather than published with three zeroes, and zero is exactly what a
-        // percentile must not be allowed to mean here: it is indistinguishable
-        // from a genuinely instant response.
-        routes: snapshot.routes.iter().filter_map(route_overview).collect(),
+        // percentiles and a histogram with no observations has none. Two
+        // separate things keep it from dropping anything: a series exists only
+        // once something was recorded into it, and `Metrics::snapshot` reads the
+        // whole registry under a barrier, so `count` can never exceed the
+        // observations the buckets hold. Without that second property this
+        // branch was reachable — a request completing mid-read could leave a
+        // rank the bucket walk could not satisfy, and the route would vanish
+        // from the table under load.
+        //
+        // Publishing zeroes instead is not the alternative: zero is
+        // indistinguishable from a genuinely instant response, which is the one
+        // thing a percentile here must never be able to mean. So a dropped row
+        // stays dropped — and says so, because a table quietly missing a route
+        // is the failure a reader cannot see.
+        routes: snapshot
+            .routes
+            .iter()
+            .filter_map(|sample| {
+                let row = route_overview(sample);
+                if row.is_none() {
+                    // The label is safe to log: it is a matched pattern or a
+                    // fixed string, never a caller-written path.
+                    tracing::error!(
+                        route = %sample.route,
+                        requests = sample.count,
+                        "a route was dropped from the operational snapshot: its histogram \
+                         reported no percentile for requests it had counted"
+                    );
+                }
+                row
+            })
+            .collect(),
     }
 }
 

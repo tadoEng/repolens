@@ -544,6 +544,12 @@ impl Metrics {
     /// passing a concrete URI would defeat every guarantee this module makes;
     /// [`super::http::record`] is the only caller that ships, and it is where
     /// that normalisation is enforced.
+    ///
+    /// The four counters this touches are updated one at a time, so the read
+    /// lock below is doing more than protecting the map: it is the half of the
+    /// barrier that keeps the group from being read mid-update. The other half
+    /// is [`snapshot`](Self::snapshot) taking the *write* lock, which is where
+    /// the reasoning lives.
     pub fn record_request(
         &self,
         method: RouteMethod,
@@ -617,15 +623,59 @@ impl Metrics {
     /// labels in the result are exactly the labels this process has recorded —
     /// which is what makes "no identifier ever became a label" a property a test
     /// can assert rather than a comment it has to trust.
+    ///
+    /// # Why this takes the *write* lock
+    ///
+    /// Nothing here writes. The exclusion is the point.
+    ///
+    /// One completed request updates four independent relaxed atomics — a
+    /// status-class counter, a bucket, the histogram count, and the sum — and
+    /// [`record_request`](Self::record_request) holds only a *read* lock while
+    /// doing so. Two read locks are not mutually exclusive, so a snapshot taken
+    /// under one could interleave with a recording under another and observe
+    /// the group half-updated:
+    ///
+    /// ```text
+    /// snapshot reads bucket = 9
+    ///                            request increments bucket -> 10
+    ///                            request increments count  -> 10
+    /// snapshot reads count  = 10
+    /// ```
+    ///
+    /// Every individual counter is correct and the published aggregate is
+    /// impossible: nine observations spread across buckets, ten counted. That
+    /// state never existed in the process.
+    ///
+    /// It is not a cosmetic discrepancy. [`HistogramSnapshot::percentile`]
+    /// selects a rank from `count` and then walks the buckets, so a `count`
+    /// higher than the buckets hold falls off the end of that walk and returns
+    /// `None` — the branch documented there as unreachable. The admin endpoint
+    /// builds a route's row from those percentiles, so an interleaved read
+    /// makes a **real route disappear from the published table**, silently, at
+    /// exactly the moment traffic is heaviest. A different interleaving leaves
+    /// `requests` disagreeing with the status classes that are supposed to sum
+    /// to it.
+    ///
+    /// Taking the write lock makes this a barrier around completed-request
+    /// accounting, which the existing design already lends itself to: the
+    /// new-route and overflow paths in `record_request` are *already* under the
+    /// write lock, so exclusion here covers every recording path rather than
+    /// most of them. The cost lands entirely on the rare reader — snapshots are
+    /// taken by one operator, request completions happen thousands of times a
+    /// minute and keep the read lock they always had.
+    ///
+    /// `in_flight` stays outside it. It is a live gauge of what is happening
+    /// *now* rather than part of the completed-request accounting, and no
+    /// invariant ties it to the figures below.
     #[must_use]
     pub fn snapshot(&self) -> MetricsSnapshot {
-        let routes = self.routes();
-        let mut samples: Vec<RouteSample> = routes
-            .iter()
-            .map(|(label, metrics)| (label.as_ref(), metrics))
-            .chain(std::iter::once((OVERFLOW_ROUTE, &self.inner.overflow)))
-            .flat_map(|(label, metrics)| sample_route(label, metrics))
-            .collect();
+        let mut routes = self
+            .inner
+            .routes
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        let mut samples = sample_registry(&mut routes, &self.inner.overflow);
 
         // A HashMap iterates in an order that changes between runs; a stable one
         // keeps a rendered table from reshuffling itself under a reader.
@@ -661,6 +711,30 @@ impl Metrics {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// Reads every route in the registry, from **exclusive** access to it.
+///
+/// `routes` is `&mut` although nothing here mutates it, and that is the whole
+/// mechanism rather than an oversight. In Rust `&mut` means *exclusive*, not
+/// *will be written*, and exclusive is exactly what a coherent read of these
+/// counters requires — see [`Metrics::snapshot`] for what an interleaved read
+/// publishes.
+///
+/// Stating it in the signature is what makes the barrier hold in a year.
+/// `RwLockReadGuard` derefs only to `&T`, so a future edit that takes the read
+/// lock here "because nothing is written" does not compile. A comment asking
+/// for the write lock would have been deleted by the same edit that broke it.
+fn sample_registry(
+    routes: &mut HashMap<Box<str>, RouteMetrics>,
+    overflow: &RouteMetrics,
+) -> Vec<RouteSample> {
+    routes
+        .iter()
+        .map(|(label, metrics)| (label.as_ref(), metrics))
+        .chain(std::iter::once((OVERFLOW_ROUTE, overflow)))
+        .flat_map(|(label, metrics)| sample_route(label, metrics))
+        .collect()
 }
 
 /// Builds one sample per method class that has seen a request.
@@ -743,6 +817,17 @@ impl MetricsSnapshot {
 }
 
 /// Counters for one route label and one method class.
+///
+/// Three figures here count the same requests and therefore agree:
+///
+/// ```text
+/// count == sum(latency.buckets()) == sum(by_status_class)
+/// ```
+///
+/// That is a property of *how the sample was read*, not of how the counters are
+/// written — each is a separate relaxed atomic, and a read that raced a
+/// recording would satisfy none of it. [`Metrics::snapshot`] is what makes it
+/// true, and `a_sample_counts_the_same_requests_three_ways` is what states it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteSample {
     /// The normalised route label.
@@ -1027,6 +1112,74 @@ mod tests {
         assert_eq!(sample.in_status_class(StatusClass::ServerError), 1);
         assert_eq!(sample.in_status_class(StatusClass::Redirection), 0);
         assert_eq!(sample.count, 4);
+    }
+
+    #[test]
+    fn a_sample_counts_the_same_requests_three_ways() {
+        // The invariant a torn read breaks. Each of these is a separate relaxed
+        // atomic written at a different instant, so they agree only because
+        // `snapshot` excludes recording while it reads them.
+        //
+        // Single-threaded, this cannot fail — which is the honest limit of what
+        // an assertion can prove here. Its job is to state the invariant next to
+        // the code that owns it; the *enforcement* is structural, in
+        // `sample_registry` taking `&mut` so the read lock will not compile.
+        let metrics = Metrics::new();
+        for (status, micros) in [
+            (StatusCode::OK, 400),
+            (StatusCode::OK, 1_500),
+            (StatusCode::NOT_FOUND, 90_000),
+            (StatusCode::INTERNAL_SERVER_ERROR, 60_000_000),
+        ] {
+            metrics.record_request(
+                RouteMethod::Get,
+                "/mixed",
+                status,
+                Duration::from_micros(micros),
+            );
+        }
+
+        let snapshot = metrics.snapshot();
+        for sample in &snapshot.routes {
+            assert_eq!(
+                sample.count,
+                sample.latency.buckets().iter().sum::<u64>(),
+                "{}: the histogram holds a different number of observations than it counted",
+                sample.route
+            );
+            assert_eq!(
+                sample.count,
+                sample.by_status_class.iter().sum::<u64>(),
+                "{}: the status classes do not account for every request",
+                sample.route
+            );
+            assert!(
+                sample.latency.percentile(99).is_some(),
+                "{}: a sample that exists has observations, so it has percentiles — \
+                 a None here is what drops a real route from the published table",
+                sample.route
+            );
+        }
+    }
+
+    #[test]
+    fn a_snapshot_releases_the_barrier_it_takes() {
+        // The failure mode this change introduces, and the only part of the
+        // barrier a single-threaded test can observe. `snapshot` now excludes
+        // every recording path for as long as it holds the write lock, so a
+        // guard that outlived the call — returned inside the snapshot, or held
+        // across an await — would not slow the service down, it would stop it.
+        //
+        // Recording afterwards is the assertion that matters: it takes the same
+        // lock, so it cannot succeed if the barrier is still standing.
+        let metrics = Metrics::new();
+        record(&metrics, "/held", 400);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.routes[0].count, 1);
+
+        record(&metrics, "/held", 900);
+        assert_eq!(metrics.snapshot().routes[0].count, 2);
     }
 
     #[test]
