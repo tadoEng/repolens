@@ -26,6 +26,13 @@ use repolens_server::infrastructure::composition::{self, Composed};
 /// sends.
 const PREFIX: &str = "owner-repo-0584a2d";
 
+/// Exactly what `repolens-github` puts in `limit_name` when the archive
+/// exceeds its compressed budget.
+///
+/// A human-readable message rather than report vocabulary, which is the point:
+/// the consumer must translate the *variant*, never match this text.
+const COMPRESSED_LIMIT_PHRASE: &str = "archive compressed bytes";
+
 fn commit() -> CommitSha {
     CommitSha::parse("0584a2df65968a4e9e6859ef46bbed430408a3f1").expect("a literal digest")
 }
@@ -115,8 +122,16 @@ impl GitHubRepositorySource for ArchiveSource {
         // the numbers it reports.
         let ceiling = self.ceiling.unwrap_or(max_compressed_bytes);
         if written > ceiling {
+            // The phrase the *real* client sends, not the report's vocabulary.
+            //
+            // This fixture said `ARCHIVE_COMPRESSED_LIMIT` and so agreed with a
+            // consumer that string-matched on it, while production emitted
+            // "archive compressed bytes" and fell through to a retrieval
+            // failure with both numbers lost. A double that speaks the
+            // consumer's language instead of the producer's proves the two
+            // agree with each other and nothing about the boundary.
             return Err(GitHubSourceError::LimitExceeded {
-                limit_name: "ARCHIVE_COMPRESSED_LIMIT",
+                limit_name: COMPRESSED_LIMIT_PHRASE,
                 limit: ceiling,
                 observed: written,
             });
@@ -157,7 +172,7 @@ async fn a_commit_archive_becomes_a_counted_repository() {
     )
     .await;
 
-    let Composed::Counted(counted) = composed else {
+    let Composed::Counted { counted, .. } = composed else {
         panic!("a well-formed archive must count: {composed:?}");
     };
 
@@ -189,10 +204,16 @@ async fn two_runs_over_one_archive_produce_the_same_counts() {
     // enter.
     let files = vec![("src/main.rs", MAIN_RS), ("crates/a/src/lib.rs", LIB_RS)];
 
-    let (Composed::Counted(first), Composed::Counted(second)) = (
+    let (
+        Composed::Counted { counted: first, .. },
+        Composed::Counted {
+            counted: second, ..
+        },
+    ) = (
         compose_over(files.clone(), None).await,
         compose_over(files, None).await,
-    ) else {
+    )
+    else {
         panic!("both runs must count");
     };
 
@@ -302,7 +323,7 @@ async fn nothing_of_the_archive_survives_the_count() {
     )
     .await;
 
-    assert!(matches!(composed, Composed::Counted(_)));
+    assert!(matches!(composed, Composed::Counted { .. }));
     let leftovers: Vec<_> = std::fs::read_dir(scratch.path())
         .expect("the scratch parent is readable")
         .collect::<Result<Vec<_>, _>>()
@@ -314,5 +335,34 @@ async fn nothing_of_the_archive_survives_the_count() {
             .iter()
             .map(std::fs::DirEntry::path)
             .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn the_downloader_and_the_report_do_not_have_to_agree_on_wording() {
+    // The boundary this slice got wrong. `repolens-github` describes its
+    // ceiling in prose for a human; the report names it in vocabulary a client
+    // switches on. They are different strings on purpose, and the consumer's
+    // job is to translate the error *variant* rather than to recognise the
+    // phrase.
+    //
+    // Pinned here rather than left implicit, because both sides were locally
+    // correct and locally tested while a real oversized archive lost its
+    // numbers between them.
+    assert_ne!(
+        COMPRESSED_LIMIT_PHRASE,
+        repolens_server::infrastructure::composition::limits::names::COMPRESSED_STREAM,
+        "if these ever become the same string, this test is proving nothing"
+    );
+
+    let composed = compose_over(vec![("src/main.rs", MAIN_RS)], Some(1)).await;
+
+    let Composed::Limited(breach) = composed else {
+        panic!("a refusal from the real downloader must stay a breach: {composed:?}");
+    };
+    assert_eq!(
+        breach.limit_name,
+        repolens_server::infrastructure::composition::limits::names::COMPRESSED_STREAM,
+        "the report publishes its own vocabulary, translated from the variant"
     );
 }

@@ -50,8 +50,8 @@ pub mod summary;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use repolens_core::CompositionLimitBreach;
 use repolens_core::{CommitSha, RepositoryCoordinate};
+use repolens_core::{CompositionCounter, CompositionLimitBreach};
 use repolens_github::{GitHubRepositorySource, GitHubSourceError};
 
 use counter::{CountedRepository, TokeiCounter};
@@ -68,7 +68,18 @@ use extract::{Ceilings, ExtractionError};
 #[derive(Debug)]
 pub enum Composed {
     /// Counting completed inside every ceiling.
-    Counted(Box<CountedRepository>),
+    ///
+    /// Carries the counter rather than leaving it to be looked up. A counted
+    /// run always has one, and a variant that let the caller discover otherwise
+    /// is how `composition: null` with no limitation became reachable: the
+    /// section quietly returned nothing while the limitation logic, correctly,
+    /// had nothing to say about a successful count.
+    Counted {
+        /// The counts and the manifest.
+        counted: Box<CountedRepository>,
+        /// What produced them, for the key and the published section.
+        counter: CompositionCounter,
+    },
     /// A ceiling stopped the run, with the limit and what was seen.
     Limited(CompositionLimitBreach),
     /// The archive could not be retrieved or read at all.
@@ -101,17 +112,31 @@ where
     // The wall-clock ceiling covers download plus extraction plus counting,
     // because that is the cost being bounded: an archive that decompresses
     // slowly enough to hold a worker breaches no size limit at all.
+    //
+    // **It bounds how long the analysis waits, not how long the work runs.**
+    // Extraction and counting are `spawn_blocking`, and Tokio cannot abort a
+    // blocking task once it has started -- it runs to completion whether or not
+    // anything is still awaiting it. So on a breach the report stops waiting
+    // and says so, while the thread may still be reading an archive and holding
+    // its scratch directory until it finishes on its own.
+    //
+    // That is a real limit of this control and it is written down rather than
+    // papered over: the byte and entry ceilings are what actually bound the
+    // work, and this bounds the analysis. Making it a hard stop needs
+    // cancellation inside the extractor's own loop, which is a change to
+    // extraction rather than to its caller.
     match tokio::time::timeout(ceiling, attempt(source, coordinate, commit, parent)).await {
         Ok(composed) => composed,
         Err(_elapsed) => {
-            // `observed` equals the ceiling because the run was *stopped* at it
-            // rather than allowed to overrun and then measured. Reporting a
-            // larger number would be inventing one; reporting how long it had
-            // been running is exactly the ceiling.
+            // `observed` is how long the analysis waited, which is the
+            // ceiling: it stopped waiting at exactly that point rather than
+            // overrunning and then measuring. Reporting a larger number would
+            // be inventing one, and the work's own duration is not knowable
+            // from here precisely because the task cannot be stopped.
             tracing::info!(
                 repository = %coordinate,
                 limit_seconds = limits::MAX_DURATION_SECONDS,
-                "composition exceeded its wall-clock ceiling"
+                "composition exceeded its wall-clock ceiling; the analysis stopped waiting"
             );
             Composed::Limited(CompositionLimitBreach {
                 limit_name: limits::names::DURATION.to_owned(),
@@ -152,19 +177,27 @@ where
         .await
     {
         return match error {
-            // The compressed ceiling is a real breach with both numbers, and
-            // the ingestion boundary is where it is enforced.
+            // Matched on the *variant*, never on the phrase inside it.
+            //
+            // This read `limit_name == COMPRESSED_STREAM` and was wrong in
+            // production: the downloader says "archive compressed bytes", which
+            // is a message for a human, while `ARCHIVE_COMPRESSED_LIMIT` is
+            // report vocabulary. The two never matched, so a genuinely
+            // oversized archive lost both its numbers and reported itself as a
+            // retrieval failure. Every component was locally correct; the
+            // producer and the consumer disagreed across the boundary.
+            //
+            // `download_archive` has exactly one ceiling -- the compressed
+            // budget this call passed it -- so the translation is total rather
+            // than a guess, and the name comes from the contract that publishes
+            // it.
             GitHubSourceError::LimitExceeded {
-                limit_name,
-                limit,
-                observed,
-            } if limit_name == limits::names::COMPRESSED_STREAM => {
-                Composed::Limited(CompositionLimitBreach {
-                    limit_name: limit_name.to_owned(),
-                    limit_value: limit,
-                    observed_value: observed,
-                })
-            }
+                limit, observed, ..
+            } => Composed::Limited(CompositionLimitBreach {
+                limit_name: limits::names::COMPRESSED_STREAM.to_owned(),
+                limit_value: limit,
+                observed_value: observed,
+            }),
             // Anything else is a retrieval that may succeed next time. Logged
             // by category; the URL and the response body never reach a log.
             other => {
@@ -193,7 +226,10 @@ where
     .await;
 
     match counted {
-        Ok(Ok(counted)) => Composed::Counted(Box::new(counted)),
+        Ok(Ok(counted)) => Composed::Counted {
+            counter: CompositionCounter::new(counter::COUNTER_NAME, counted.tokei_version),
+            counted: Box::new(counted),
+        },
         Ok(Err(ExtractionError::Limit(limit))) => Composed::Limited(limit.breach()),
         Ok(Err(ExtractionError::Io(error))) => {
             tracing::info!(

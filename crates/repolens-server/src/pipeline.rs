@@ -35,7 +35,7 @@ use crate::contract::report::{
 };
 use crate::infrastructure::composition;
 use crate::store;
-use repolens_core::{CompositionCounter, ReproducibilityKey};
+use repolens_core::ReproducibilityKey;
 
 /// Version of the analyzer producing these reports.
 ///
@@ -632,11 +632,11 @@ fn reproducibility_key(
         source: repolens_github::evidence_source(),
         analyzer_version: ANALYZER_VERSION.to_owned(),
         ruleset_version: ruleset::RULESET_VERSION.to_owned(),
+        // Decided by the outcome rather than by the inputs: a run that
+        // produced no counts had no counter, and saying so is the difference
+        // between "counted by tokei 14" and "not counted".
         composition_counter: match composed {
-            composition::Composed::Counted(counted) => Some(CompositionCounter::new(
-                composition::counter::COUNTER_NAME,
-                counted.tokei_version,
-            )),
+            composition::Composed::Counted { counter, .. } => Some(counter.clone()),
             composition::Composed::Limited(_) | composition::Composed::Unavailable => None,
         },
         exclusion_policy_version: composition::exclusion::EXCLUSION_POLICY_VERSION.to_owned(),
@@ -648,19 +648,23 @@ fn reproducibility_key(
 
 /// The composition section, projected from the key and the count.
 ///
-/// Total rather than unwrapping: the key is built from the same outcome one
-/// line above, so a counted run always carries a counter. Should that ever stop
-/// being true, this reports no composition rather than panicking or publishing
-/// a section whose provenance disagrees with the key it was keyed by.
+/// Total by construction. This once read the counter out of
+/// `key.composition_counter`, which is an `Option`, and returned `None` when it
+/// was absent -- producing `composition: null` with no limitation to explain it,
+/// because a *successful* count has nothing for the limitation logic to say.
+/// That is the one state this pipeline claims cannot exist, reachable through
+/// the fail-open branch of an invariant nobody could see.
+///
+/// `Composed::Counted` now carries its counter, so there is no branch left in
+/// which a count exists and its provenance does not.
 fn composition_section(
     key: &ReproducibilityKey,
     composed: &composition::Composed,
 ) -> Option<LineCountSummary> {
     match composed {
-        composition::Composed::Counted(counted) => key
-            .composition_counter
-            .as_ref()
-            .map(|counter| composition::summary::summarize(key, counter, counted)),
+        composition::Composed::Counted { counted, counter } => {
+            Some(composition::summary::summarize(key, counter, counted))
+        }
         composition::Composed::Limited(_) | composition::Composed::Unavailable => None,
     }
 }
@@ -672,7 +676,7 @@ fn composition_section(
 /// more entries than the walk accepts, 200000, and it holds 431902".
 fn composition_limitation(composed: &composition::Composed) -> Option<Limitation> {
     match composed {
-        composition::Composed::Counted(_) => None,
+        composition::Composed::Counted { .. } => None,
         composition::Composed::Limited(breach) => Some(Limitation {
             code: breach.limit_name.clone(),
             explanation: format!(
