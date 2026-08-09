@@ -208,6 +208,10 @@ was run but never committed fails there.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — why each invariant exists
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — every deployed variable, the
   order the two hosts must go out in, and the smoke test
+- [`docs/PRE-REGISTRATION.md`](docs/PRE-REGISTRATION.md) — the measurement
+  criteria, fixed before any result was seen. **Feature development ends at the
+  freeze tag it defines**; during measurement no application change is
+  permitted, and no criterion may be revised because a result is inconvenient
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — the gates exactly as
   they run
 - [`Cargo.toml`](Cargo.toml), [`package.json`](package.json),
