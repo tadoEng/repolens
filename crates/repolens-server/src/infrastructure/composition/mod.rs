@@ -94,9 +94,17 @@ pub enum Composed {
 /// analysis failure would throw away work that succeeded in order to report a
 /// number that is explicitly allowed to be absent.
 ///
-/// `parent` is where the bounded extraction volume is mounted in production.
-/// The storage ceiling is enforced against it either way, so an ordinary
-/// temporary directory is a safe default rather than a silent downgrade.
+/// `parent` is the scratch root the archive and its extraction are written
+/// under. The storage-byte ceiling is enforced in application code whatever
+/// `parent` is, and that is the whole of what this function guarantees.
+///
+/// It does **not** guarantee that `parent` sits on a physically size-limited
+/// mount, and an ordinary temporary directory is **not** equivalent protection.
+/// A bounded mount makes an over-large write fail even if the application
+/// ceiling were wrong, which matters most on a memory-backed filesystem where
+/// an unbounded write is an OOM kill rather than a catchable error. Whether one
+/// is provisioned is a deployment fact this code cannot observe, and it is
+/// attested at deployment rather than claimed here.
 pub async fn compose<S>(
     source: &S,
     coordinate: &RepositoryCoordinate,

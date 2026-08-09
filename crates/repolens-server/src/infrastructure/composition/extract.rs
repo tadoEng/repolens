@@ -237,9 +237,15 @@ impl Default for Ceilings {
 
 /// Extracts `archive` into a self-deleting directory under `parent`.
 ///
-/// `parent` is where the bounded volume is mounted in production, so the
-/// storage ceiling here is a *second* line rather than the only one: the volume
-/// makes an over-large write fail, and this makes it fail with a name.
+/// The storage ceiling here is enforced in application code, whatever `parent`
+/// is: it refuses a write it can already see will not fit, and it fails with a
+/// name rather than as an anonymous I/O error.
+///
+/// It is *designed* as the second line behind a physically size-limited mount,
+/// which would make an over-large write fail even if this ceiling were wrong.
+/// Whether such a mount is provisioned is a deployment fact rather than
+/// something this function can observe, so it is attested at deployment and not
+/// assumed here.
 ///
 /// # Errors
 ///
